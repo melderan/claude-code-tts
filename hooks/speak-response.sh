@@ -306,6 +306,23 @@ fi
 
 # --- Queue mode: write to daemon queue and exit ---
 if [[ "$TTS_MODE" == "queue" ]]; then
+    # Auto-start daemon if not running
+    TTS_PID_FILE="$HOME/.claude-tts/daemon.pid"
+    DAEMON_RUNNING=false
+
+    if [[ -f "$TTS_PID_FILE" ]]; then
+        DAEMON_PID=$(cat "$TTS_PID_FILE" 2>/dev/null)
+        if [[ -n "$DAEMON_PID" ]] && kill -0 "$DAEMON_PID" 2>/dev/null; then
+            DAEMON_RUNNING=true
+        fi
+    fi
+
+    if [[ "$DAEMON_RUNNING" == "false" ]]; then
+        debug "Daemon not running, starting it..."
+        "$HOME/.claude-tts/tts-mode.sh" start >/dev/null 2>&1 &
+        sleep 0.5  # Brief wait for daemon to start
+    fi
+
     debug "Queue mode: writing to daemon queue"
     write_to_queue "$CLIFF_NOTES" "$TTS_SESSION" "$PROJECT_NAME" "${ACTIVE_PERSONA:-claude-prime}"
     exit 0
