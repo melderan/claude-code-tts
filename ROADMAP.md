@@ -2,29 +2,53 @@
 
 Ideas captured from the late night session that started it all.
 
-## Current State (v1.0)
+## Current State (v1.1)
 
-- Single voice TTS via Piper (en_US-hfc_male-medium)
+- Piper TTS with configurable voice models
 - Stop hook triggers after each response
 - Smart filtering skips tool_use blocks, finds actual text
-- /mute and /unmute slash commands
-- Python installer with pre-flight checks and backup system
+- /mute and /unmute slash commands (session-aware)
+- /persona command for switching voice configurations
+- Session-local settings (each Claude window can have own persona/mute state)
+- Persona system with speed, voice, and speed_method configs
+- Cross-platform: macOS (afplay), Linux (paplay/aplay), WSL 2 (WSLg)
+- Python installer with interactive mode, persona management, pre-flight checks
+
+## Completed
+
+### Voice Identity Per Session (DONE)
+
+Each Claude session can have its own voice personality via personas.
+
+- Sessions auto-detected from project hash
+- /persona command switches voice for current session only
+- Config file stores session overrides
+- Multiple Claude windows can use different voices simultaneously
+
+### Linux Support (DONE)
+
+- paplay for PulseAudio, aplay for ALSA
+- WSL 2 support via WSLg's built-in PulseAudio
+- Platform-specific speed methods (playback on macOS, length_scale elsewhere)
+
+### Voice Selection Command (DONE)
+
+The /persona command handles this:
+- List available personas
+- Switch personas per-session
+- Configure via installer or config file
 
 ## Future Ideas
 
-### Voice Identity Per Session
+### Voice Model Browser/Downloader
 
-Give each Claude session or subagent its own voice personality.
+Download new Piper voices directly from Hugging Face.
 
-- Code reviewer: deeper, authoritative voice
-- Test writer: faster, energetic voice
-- Architect agent: slower, thoughtful voice
-- Main session: current HFC male medium
-
-Implementation thoughts:
-- Hook could detect session context or agent type
-- Environment variable per terminal/session
-- Voice config file that maps agent types to voice models
+- Browse available voices (dozens of languages/styles)
+- Preview voice samples
+- Download .onnx + .onnx.json to ~/.local/share/piper-voices/
+- Auto-register as personas in config
+- Source: huggingface.co/rhasspy/piper-voices
 
 ### Multi-Agent Voice Pipeline
 
@@ -35,23 +59,6 @@ When running multiple subagents in parallel, queue their responses.
 - User controls playback (spacebar = next, skip = discard)
 - Prevents agents talking over each other
 - Kafka-style consumer pattern but simpler
-
-### Voice Selection Command
-
-Add `/voice` slash command to switch voices on the fly.
-
-- List available voices
-- Preview voices
-- Set default voice
-- Per-session override
-
-### Linux Support
-
-Current installer is macOS only.
-
-- Replace `afplay` with `paplay` (PulseAudio) or `aplay` (ALSA)
-- Test on common distros
-- Handle audio system differences
 
 ### Interrupt/Skip Current Speech
 
