@@ -14,28 +14,31 @@ A text-to-speech hook for [Claude Code](https://github.com/anthropics/claude-cod
 - Mute/unmute with simple slash commands
 - Works alongside tool calls without breaking
 - Zero impact on conversation context
+- Cross-platform: macOS, Linux, and WSL 2
 
-## Quick Install (macOS)
+## Quick Install
 
 ```bash
 git clone https://github.com/Melderan/claude-code-tts.git
 cd claude-code-tts
-./scripts/install.py
+python3 scripts/install.py
 ```
 
-The installer will:
+The installer auto-detects your platform and will:
 1. Install Piper TTS via pipx
-2. Download a voice model
-3. Configure Claude Code hooks
-4. Set up /mute and /unmute commands
-5. Play a test audio to verify
+2. Download a voice model (~60MB)
+3. Install audio player (paplay on Linux/WSL)
+4. Configure Claude Code hooks
+5. Set up /mute and /unmute commands
+6. Play a test audio to verify
 
 ### Installer Options
 
 ```bash
-./scripts/install.py --dry-run    # Preview what will be installed
-./scripts/install.py --uninstall  # Remove TTS completely
-./scripts/install.py --help       # Show all options
+python3 scripts/install.py --dry-run    # Preview what will be installed
+python3 scripts/install.py --upgrade    # Update to latest version
+python3 scripts/install.py --uninstall  # Remove TTS completely
+python3 scripts/install.py --help       # Show all options
 ```
 
 ## Usage
@@ -59,9 +62,12 @@ export CLAUDE_TTS_ENABLED=0        # Set to 0 to disable entirely
 
 ## Requirements
 
-- macOS (Linux support planned)
 - [Claude Code](https://github.com/anthropics/claude-code)
-- [Homebrew](https://brew.sh)
+- Python 3.8+
+- One of:
+  - **macOS**: Homebrew
+  - **Linux**: apt, dnf, or pacman
+  - **WSL 2**: Windows 11 with WSLg (for audio support)
 
 The installer handles everything else.
 
@@ -116,10 +122,10 @@ Three Claude sessions contributed to this code. Their context windows are gone, 
 
 PRs welcome! Areas that need love:
 
-- Linux support (paplay/aplay)
 - More voice options
-- Speed adjustment via slash command
+- Voice selection via slash command
 - Interrupt/skip current speech
+- Gemini CLI support (when they add hooks)
 
 ## License
 
