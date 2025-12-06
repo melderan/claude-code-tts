@@ -696,8 +696,8 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
             shutil.copy(src_cmd, dst_cmd)
     success("Commands: /tts-mute, /tts-unmute, /tts-speed, /tts-sounds, /tts-mode, /tts-persona")
 
-    # Clean up old command names (v1.x -> v2.x migration)
-    for old_cmd in ["mute.md", "unmute.md", "speed.md", "sounds.md"]:
+    # Clean up old command names (v1.x -> v2.x, v3.x -> v4.x migration)
+    for old_cmd in ["mute.md", "unmute.md", "speed.md", "sounds.md", "persona.md"]:
         old_file = COMMANDS_DIR / old_cmd
         if old_file.exists():
             if not dry_run:
