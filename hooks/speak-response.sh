@@ -40,8 +40,44 @@ TTS_CONFIG_FILE="$HOME/.claude-tts/config.json"
 TTS_TEMP_DIR="/tmp"
 TTS_MUTE_FILE="/tmp/claude_tts_muted"  # Legacy mute file for backward compat
 
-# Default values (can be overridden by config file or env vars)
+# Exit early if TTS is disabled via env var
 TTS_ENABLED="${CLAUDE_TTS_ENABLED:-1}"
+if [[ "$TTS_ENABLED" != "1" ]]; then
+    debug "TTS disabled via env var"
+    exit 0
+fi
+
+# Legacy mute file check (fast exit before processing)
+if [[ -f "$TTS_MUTE_FILE" ]]; then
+    debug "TTS muted via mute file (legacy)"
+    exit 0
+fi
+
+# --- Read hook input from stdin (need this early for session detection) ---
+INPUT=$(cat)
+debug "Input received: ${INPUT:0:200}"
+TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // empty')
+debug "Transcript path: $TRANSCRIPT_PATH"
+
+if [[ -z "$TRANSCRIPT_PATH" || ! -f "$TRANSCRIPT_PATH" ]]; then
+    debug "No transcript path or file not found"
+    exit 0
+fi
+
+# --- Auto-detect session from project hash ---
+# Transcript path format: ~/.claude/projects/<HASH>/transcript.jsonl
+# Extract the hash as the automatic session ID
+TTS_SESSION="${CLAUDE_TTS_SESSION:-}"
+if [[ -z "$TTS_SESSION" ]]; then
+    # Auto-detect from transcript path
+    PROJECT_HASH=$(echo "$TRANSCRIPT_PATH" | sed -n 's|.*/projects/\([^/]*\)/.*|\1|p')
+    if [[ -n "$PROJECT_HASH" ]]; then
+        TTS_SESSION="$PROJECT_HASH"
+        debug "Auto-detected session from project: $TTS_SESSION"
+    fi
+fi
+
+# Default values (can be overridden by config file or env vars)
 TTS_SPEED="${CLAUDE_TTS_SPEED:-2.0}"
 TTS_SPEED_METHOD=""  # Will be set based on platform later
 TTS_VOICE="${CLAUDE_TTS_VOICE:-$HOME/.local/share/piper-voices/en_US-hfc_male-medium.onnx}"
@@ -52,12 +88,36 @@ TTS_MUTED="false"
 if [[ -f "$TTS_CONFIG_FILE" ]]; then
     debug "Loading config from $TTS_CONFIG_FILE"
 
-    # Get active persona name
+    # Get global settings first
     ACTIVE_PERSONA=$(jq -r '.active_persona // "default"' "$TTS_CONFIG_FILE" 2>/dev/null)
+    CONFIG_MUTED=$(jq -r '.muted // false' "$TTS_CONFIG_FILE" 2>/dev/null)
+
+    # Check for session-specific overrides
+    if [[ -n "$TTS_SESSION" ]]; then
+        debug "Session: $TTS_SESSION"
+        SESSION_EXISTS=$(jq -r ".sessions[\"$TTS_SESSION\"] // empty" "$TTS_CONFIG_FILE" 2>/dev/null)
+        if [[ -n "$SESSION_EXISTS" && "$SESSION_EXISTS" != "null" ]]; then
+            # Session-specific muted state
+            SESSION_MUTED=$(jq -r ".sessions[\"$TTS_SESSION\"].muted // empty" "$TTS_CONFIG_FILE" 2>/dev/null)
+            if [[ -n "$SESSION_MUTED" && "$SESSION_MUTED" != "null" ]]; then
+                CONFIG_MUTED="$SESSION_MUTED"
+            fi
+
+            # Session-specific persona
+            SESSION_PERSONA=$(jq -r ".sessions[\"$TTS_SESSION\"].persona // empty" "$TTS_CONFIG_FILE" 2>/dev/null)
+            if [[ -n "$SESSION_PERSONA" && "$SESSION_PERSONA" != "null" ]]; then
+                ACTIVE_PERSONA="$SESSION_PERSONA"
+            fi
+
+            debug "Session overrides - muted:$CONFIG_MUTED persona:$ACTIVE_PERSONA"
+        else
+            debug "Session '$TTS_SESSION' not in config, using global settings"
+        fi
+    fi
+
     debug "Active persona: $ACTIVE_PERSONA"
 
-    # Check if muted in config
-    CONFIG_MUTED=$(jq -r '.muted // false' "$TTS_CONFIG_FILE" 2>/dev/null)
+    # Apply muted state
     if [[ "$CONFIG_MUTED" == "true" ]]; then
         TTS_MUTED="true"
     fi
@@ -89,30 +149,9 @@ fi
 [[ -n "${CLAUDE_TTS_VOICE:-}" ]] && TTS_VOICE="$CLAUDE_TTS_VOICE"
 [[ -n "${CLAUDE_TTS_MAX_CHARS:-}" ]] && TTS_MAX_CHARS="$CLAUDE_TTS_MAX_CHARS"
 
-# Exit early if TTS is disabled via env var
-if [[ "$TTS_ENABLED" != "1" ]]; then
-    debug "TTS disabled via env var"
-    exit 0
-fi
-
-# Exit early if muted (config or legacy mute file)
+# Exit if muted via config (checked after session detection)
 if [[ "$TTS_MUTED" == "true" ]]; then
-    debug "TTS muted via config"
-    exit 0
-fi
-if [[ -f "$TTS_MUTE_FILE" ]]; then
-    debug "TTS muted via mute file (legacy)"
-    exit 0
-fi
-
-# --- Read hook input from stdin ---
-INPUT=$(cat)
-debug "Input received: ${INPUT:0:200}"
-TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // empty')
-debug "Transcript path: $TRANSCRIPT_PATH"
-
-if [[ -z "$TRANSCRIPT_PATH" || ! -f "$TRANSCRIPT_PATH" ]]; then
-    debug "No transcript path or file not found"
+    debug "TTS muted via config (session: ${TTS_SESSION:-global})"
     exit 0
 fi
 
