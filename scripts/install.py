@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import platform
+import random
 import shutil
 import subprocess
 import sys
@@ -1202,6 +1203,70 @@ def download_voice(voice_name: str, path_segment: str, dry_run: bool = False) ->
         return False
 
 
+PREVIEW_SAMPLES = [
+    "Hello! This is what I sound like. Pretty cool, right?",
+    "I can read your code comments and explain what's happening.",
+    "Let me help you debug that tricky issue you've been working on.",
+]
+
+
+def preview_voice(voice_name: str, speed: float = 1.5) -> bool:
+    """Play a preview of a voice. Returns True if successful."""
+    voice_file = VOICES_DIR / f"{voice_name}.onnx"
+
+    if not voice_file.exists():
+        warn(f"Voice {voice_name} is not installed")
+        return False
+
+    if not command_exists("piper"):
+        warn("Piper is not installed - cannot preview")
+        return False
+
+    # Pick a random sample
+    sample_text = random.choice(PREVIEW_SAMPLES)
+
+    info(f"Previewing {voice_name}...")
+    print(f"  \"{sample_text}\"")
+
+    # Generate and play audio
+    test_file = Path("/tmp/claude_tts_preview.wav")
+    try:
+        # Use length_scale for natural pitch preview
+        length_scale = str(1.0 / speed)
+        subprocess.run(
+            ["piper", "--model", str(voice_file), "--length_scale", length_scale,
+             "--output_file", str(test_file)],
+            input=sample_text,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+        if test_file.exists():
+            # Play with appropriate player
+            if PLATFORM == "macos" and command_exists("afplay"):
+                subprocess.run(["afplay", str(test_file)], check=False)
+            elif command_exists("paplay"):
+                subprocess.run(["paplay", str(test_file)], check=False)
+            elif command_exists("aplay"):
+                subprocess.run(["aplay", "-q", str(test_file)], check=False)
+            else:
+                warn("No audio player available")
+                return False
+
+            test_file.unlink()
+            return True
+        else:
+            warn("Failed to generate preview audio")
+            return False
+    except subprocess.CalledProcessError as e:
+        warn(f"Piper failed: {e}")
+        return False
+    except Exception as e:
+        warn(f"Preview failed: {e}")
+        return False
+
+
 def create_persona_from_voice(
     voice_name: str,
     gender: str,
@@ -1243,6 +1308,52 @@ def create_persona_from_voice(
     return persona_name
 
 
+def do_preview_voices() -> None:
+    """Preview installed voices."""
+    print()
+    print("========================================")
+    print("  Voice Preview")
+    print("========================================")
+
+    installed = get_installed_voices()
+
+    if not installed:
+        warn("No voices installed yet. Download some first!")
+        return
+
+    print(f"\nInstalled voices: {len(installed)}")
+    print()
+
+    # Build list of installed voices with info from AVAILABLE_VOICES
+    voice_options = []
+    for voice in AVAILABLE_VOICES:
+        name, gender, quality, desc, path = voice
+        if name in installed:
+            gender_icon = "F" if gender == "female" else "M"
+            voice_options.append((name, f"[{gender_icon}] {desc} ({quality})"))
+
+    # Add any installed voices not in our curated list
+    for name in installed:
+        if not any(v[0] == name for v in AVAILABLE_VOICES):
+            voice_options.append((name, f"[?] {name} (custom)"))
+
+    display_options = [opt[1] for opt in voice_options]
+    display_options.append("Back")
+
+    choice = prompt_choice("Select voice to preview:", display_options)
+
+    if choice == len(display_options) - 1:  # Back
+        return
+
+    voice_name = voice_options[choice][0]
+    preview_voice(voice_name)
+
+    # Offer to preview again
+    again = prompt_choice("Preview another voice?", ["Yes", "No"], default=1)
+    if again == 0:
+        do_preview_voices()
+
+
 def do_download_voices() -> None:
     """Interactive voice download menu."""
     print()
@@ -1259,9 +1370,20 @@ def do_download_voices() -> None:
     # Filter options
     filter_choice = prompt_choice(
         "Filter voices by:",
-        ["All voices", "Female voices only", "Male voices only", "Not installed only"],
+        [
+            "All voices",
+            "Female voices only",
+            "Male voices only",
+            "Not installed only",
+            "Preview installed voices",
+        ],
         default=3,
     )
+
+    # Handle preview option
+    if filter_choice == 4:
+        do_preview_voices()
+        return
 
     # Apply filter
     voices_to_show = []
@@ -1329,14 +1451,16 @@ def do_download_voices() -> None:
         name, gender, quality, desc, path = voice
 
         if name in installed:
-            warn(f"{name} is already installed")
-            # Offer to create persona anyway
-            create = prompt_choice(
-                "Create a persona for this voice?",
-                ["Yes", "No"],
-                default=1,
+            info(f"{name} is already installed")
+            # Offer preview or persona creation
+            action = prompt_choice(
+                "What would you like to do?",
+                ["Preview this voice", "Create a persona", "Back"],
+                default=0,
             )
-            if create == 0:
+            if action == 0:  # Preview
+                preview_voice(name)
+            elif action == 1:  # Create persona
                 ai_type = prompt_choice(
                     "AI type for this persona?",
                     ["Claude", "Gemini"],
@@ -1515,6 +1639,7 @@ Examples:
   python install.py --version            # Show version info
   python install.py --personas           # Manage personas
   python install.py --voices             # Download new voice models
+  python install.py --preview            # Preview installed voices
   python install.py --bootstrap config.json  # Install from config file
   python install.py --uninstall          # Remove TTS
         """,
@@ -1543,6 +1668,11 @@ Examples:
         "--voices",
         action="store_true",
         help="Download new voice models from Hugging Face",
+    )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Preview installed voice models",
     )
     parser.add_argument(
         "--bootstrap",
@@ -1589,6 +1719,8 @@ Examples:
         do_manage_personas()
     elif args.voices:
         do_download_voices()
+    elif args.preview:
+        do_preview_voices()
     elif args.dry_run:
         do_install(dry_run=True, upgrade=False)
     else:

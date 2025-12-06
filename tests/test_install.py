@@ -240,3 +240,24 @@ class TestColors:
         assert install.Colors.RED.startswith("\033[")
         assert install.Colors.GREEN.startswith("\033[")
         assert install.Colors.NC.startswith("\033[")
+
+
+class TestVoicePreview:
+    """Tests for voice preview functionality."""
+
+    def test_preview_samples_not_empty(self):
+        """Verify preview samples exist."""
+        assert len(install.PREVIEW_SAMPLES) > 0
+
+    def test_preview_samples_are_strings(self):
+        """Verify all preview samples are non-empty strings."""
+        for sample in install.PREVIEW_SAMPLES:
+            assert isinstance(sample, str)
+            assert len(sample) > 10  # Should be meaningful sentences
+
+    def test_preview_voice_returns_false_for_missing_voice(self):
+        """Test preview returns False when voice not installed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.object(install, "VOICES_DIR", Path(tmpdir)):
+                result = install.preview_voice("nonexistent-voice")
+                assert result is False
