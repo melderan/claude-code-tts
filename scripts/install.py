@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -24,6 +25,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+# Version of this installer/package
+__version__ = "1.1.0"
 
 
 # --- Platform Detection ---
@@ -813,6 +817,11 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
         print("  CLAUDE_TTS_ENABLED=0        Disable TTS entirely")
         print()
         print("Debug log: /tmp/claude_tts_debug.log")
+        print()
+
+        # Record installed version
+        set_installed_version(__version__)
+        info(f"Version {__version__} recorded in config")
     print()
 
 
@@ -867,6 +876,107 @@ def save_config(config: dict) -> None:
     TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(TTS_CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
+
+
+def get_installed_version() -> Optional[str]:
+    """Get the currently installed version from config."""
+    config = load_config()
+    return config.get("installed_version")
+
+
+def set_installed_version(version: str) -> None:
+    """Set the installed version in config."""
+    config = load_config()
+    config["installed_version"] = version
+    config["installed_at"] = datetime.now().isoformat()
+    save_config(config)
+
+
+def get_file_hash(filepath: Path) -> str:
+    """Get MD5 hash of a file for change detection."""
+    if not filepath.exists():
+        return ""
+    with open(filepath, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()[:8]
+
+
+def check_for_updates() -> dict:
+    """Check if installed files differ from repo files."""
+    results = {
+        "installed_version": get_installed_version(),
+        "repo_version": __version__,
+        "files": {},
+    }
+
+    # Files to check
+    files_to_check = [
+        (HOOKS_DIR / "speak-response.sh", REPO_DIR / "hooks" / "speak-response.sh"),
+        (COMMANDS_DIR / "mute.md", REPO_DIR / "commands" / "mute.md"),
+        (COMMANDS_DIR / "unmute.md", REPO_DIR / "commands" / "unmute.md"),
+    ]
+
+    for installed, repo in files_to_check:
+        name = installed.name
+        installed_hash = get_file_hash(installed)
+        repo_hash = get_file_hash(repo)
+
+        if not installed.exists():
+            status = "not_installed"
+        elif installed_hash == repo_hash:
+            status = "current"
+        else:
+            status = "outdated"
+
+        results["files"][name] = {
+            "status": status,
+            "installed_hash": installed_hash,
+            "repo_hash": repo_hash,
+        }
+
+    # Overall status
+    statuses = [f["status"] for f in results["files"].values()]
+    if "not_installed" in statuses:
+        results["overall"] = "not_installed"
+    elif "outdated" in statuses:
+        results["overall"] = "outdated"
+    else:
+        results["overall"] = "current"
+
+    return results
+
+
+def do_check() -> None:
+    """Check installation status and version."""
+    print()
+    print("========================================")
+    print("  Claude Code TTS - Version Check")
+    print("========================================")
+    print()
+
+    results = check_for_updates()
+
+    print(f"Repo version:      {results['repo_version']}")
+    print(f"Installed version: {results['installed_version'] or 'unknown'}")
+    print()
+
+    print("File status:")
+    for name, info in results["files"].items():
+        if info["status"] == "current":
+            status_str = f"{Colors.GREEN}current{Colors.NC}"
+        elif info["status"] == "outdated":
+            status_str = f"{Colors.YELLOW}outdated{Colors.NC}"
+        else:
+            status_str = f"{Colors.RED}not installed{Colors.NC}"
+        print(f"  {name}: {status_str}")
+
+    print()
+    if results["overall"] == "current":
+        print(f"{Colors.GREEN}Everything is up to date!{Colors.NC}")
+    elif results["overall"] == "outdated":
+        print(f"{Colors.YELLOW}Updates available. Run: python install.py --upgrade{Colors.NC}")
+    else:
+        print(f"{Colors.RED}TTS not installed. Run: python install.py --install{Colors.NC}")
+    print()
 
 
 def prompt_choice(prompt: str, options: list[str], default: int = 0) -> int:
@@ -1383,6 +1493,8 @@ Examples:
   python install.py                      # Interactive menu
   python install.py --install            # Direct install
   python install.py --upgrade            # Update to latest version
+  python install.py --check              # Check for updates
+  python install.py --version            # Show version info
   python install.py --personas           # Manage personas
   python install.py --voices             # Download new voice models
   python install.py --bootstrap config.json  # Install from config file
@@ -1425,11 +1537,29 @@ Examples:
         action="store_true",
         help="Remove Claude Code TTS completely",
     )
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Show version information",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check if updates are available",
+    )
 
     args = parser.parse_args()
 
     # If any specific action is requested, do it directly
-    if args.uninstall:
+    if args.version:
+        print(f"claude-code-tts version {__version__}")
+        installed = get_installed_version()
+        if installed:
+            print(f"Installed version: {installed}")
+        sys.exit(0)
+    elif args.check:
+        do_check()
+    elif args.uninstall:
         do_uninstall(dry_run=args.dry_run)
     elif args.bootstrap:
         do_bootstrap_from_config(Path(args.bootstrap))
