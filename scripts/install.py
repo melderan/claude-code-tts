@@ -643,18 +643,21 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
     # --- Configure settings.json ---
 
     print()
-    info("Configuring Claude Code settings...")
-
     new_hook = {
         "hooks": [{"type": "command", "command": str(dst_hook), "timeout": 180}]
     }
 
-    if SETTINGS_FILE.exists():
+    if upgrade:
+        # In upgrade mode, skip settings.json modification - just update files
+        info("Upgrade mode: keeping existing settings.json configuration")
+        success("Settings preserved")
+    elif SETTINGS_FILE.exists():
+        info("Configuring Claude Code settings...")
         with open(SETTINGS_FILE) as f:
             content = f.read()
 
         if "speak-response.sh" in content:
-            warn("TTS hook already configured in settings.json")
+            success("TTS hook already configured in settings.json")
         else:
             if dry_run:
                 dry("Add TTS hook to settings.json (preserving existing hooks)")
@@ -674,6 +677,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
                     json.dump(settings, f, indent=2)
                 success("Hook added to settings.json (preserving existing hooks)")
     else:
+        info("Configuring Claude Code settings...")
         if dry_run:
             dry(f"Create {SETTINGS_FILE} with hook configuration")
         else:
@@ -729,22 +733,31 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
 
     # --- Done! ---
 
+    action = "Upgrade" if upgrade else "Installation"
+
     print()
     print("========================================")
     if dry_run:
         print(f"{Colors.CYAN}  Dry Run Complete - No changes made{Colors.NC}")
         print("========================================")
         print()
-        print("Run without --dry-run to install.")
+        if upgrade:
+            print("Run without --dry-run to upgrade.")
+        else:
+            print("Run without --dry-run to install.")
     else:
-        print(f"{Colors.GREEN}  Installation Complete!{Colors.NC}")
+        print(f"{Colors.GREEN}  {action} Complete!{Colors.NC}")
         print("========================================")
         print()
-        print("Next steps:")
-        print("  1. Start a new Claude Code session")
-        print("  2. Claude's responses will now be spoken aloud")
-        print("  3. Use /mute to temporarily silence TTS")
-        print("  4. Use /unmute to re-enable TTS")
+        if upgrade:
+            print("Hook and commands have been updated to the latest version.")
+            print("Your settings.json configuration was preserved.")
+        else:
+            print("Next steps:")
+            print("  1. Start a new Claude Code session")
+            print("  2. Claude's responses will now be spoken aloud")
+            print("  3. Use /mute to temporarily silence TTS")
+            print("  4. Use /unmute to re-enable TTS")
         print()
         print("Configuration:")
         print(f"  Hook:     {dst_hook}")
