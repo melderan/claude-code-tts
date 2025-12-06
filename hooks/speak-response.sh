@@ -13,6 +13,8 @@
 # CONFIGURATION (environment variables):
 #   CLAUDE_TTS_ENABLED=1              Enable/disable TTS (default: 1)
 #   CLAUDE_TTS_SPEED=2.0              Playback speed multiplier (default: 2.0)
+#   CLAUDE_TTS_SPEED_METHOD=playback  Speed method: "playback" (chipmunk) or "length_scale" (natural)
+#                                     Default: playback on macOS, length_scale on Linux/WSL
 #   CLAUDE_TTS_VOICE=<path>           Piper voice model path (default: ~/.local/share/piper-voices/en_US-hfc_male-medium.onnx)
 #   CLAUDE_TTS_MAX_CHARS=10000        Max characters to speak (default: 10000)
 #
@@ -34,12 +36,58 @@ debug() {
 debug "=== Hook triggered ==="
 
 # --- Configuration ---
+TTS_CONFIG_FILE="$HOME/.claude-tts/config.json"
+TTS_TEMP_DIR="/tmp"
+TTS_MUTE_FILE="/tmp/claude_tts_muted"  # Legacy mute file for backward compat
+
+# Default values (can be overridden by config file or env vars)
 TTS_ENABLED="${CLAUDE_TTS_ENABLED:-1}"
 TTS_SPEED="${CLAUDE_TTS_SPEED:-2.0}"
+TTS_SPEED_METHOD=""  # Will be set based on platform later
 TTS_VOICE="${CLAUDE_TTS_VOICE:-$HOME/.local/share/piper-voices/en_US-hfc_male-medium.onnx}"
 TTS_MAX_CHARS="${CLAUDE_TTS_MAX_CHARS:-10000}"
-TTS_TEMP_DIR="/tmp"
-TTS_MUTE_FILE="/tmp/claude_tts_muted"
+TTS_MUTED="false"
+
+# Load from config file if it exists
+if [[ -f "$TTS_CONFIG_FILE" ]]; then
+    debug "Loading config from $TTS_CONFIG_FILE"
+
+    # Get active persona name
+    ACTIVE_PERSONA=$(jq -r '.active_persona // "default"' "$TTS_CONFIG_FILE" 2>/dev/null)
+    debug "Active persona: $ACTIVE_PERSONA"
+
+    # Check if muted in config
+    CONFIG_MUTED=$(jq -r '.muted // false' "$TTS_CONFIG_FILE" 2>/dev/null)
+    if [[ "$CONFIG_MUTED" == "true" ]]; then
+        TTS_MUTED="true"
+    fi
+
+    # Load persona settings (fall back to defaults if not found)
+    PERSONA_SPEED=$(jq -r ".personas[\"$ACTIVE_PERSONA\"].speed // empty" "$TTS_CONFIG_FILE" 2>/dev/null)
+    PERSONA_SPEED_METHOD=$(jq -r ".personas[\"$ACTIVE_PERSONA\"].speed_method // empty" "$TTS_CONFIG_FILE" 2>/dev/null)
+    PERSONA_VOICE=$(jq -r ".personas[\"$ACTIVE_PERSONA\"].voice // empty" "$TTS_CONFIG_FILE" 2>/dev/null)
+    PERSONA_MAX_CHARS=$(jq -r ".personas[\"$ACTIVE_PERSONA\"].max_chars // empty" "$TTS_CONFIG_FILE" 2>/dev/null)
+
+    # Apply persona settings (if set)
+    [[ -n "$PERSONA_SPEED" ]] && TTS_SPEED="$PERSONA_SPEED"
+    [[ -n "$PERSONA_SPEED_METHOD" ]] && TTS_SPEED_METHOD="$PERSONA_SPEED_METHOD"
+    [[ -n "$PERSONA_MAX_CHARS" ]] && TTS_MAX_CHARS="$PERSONA_MAX_CHARS"
+
+    # Voice needs path expansion
+    if [[ -n "$PERSONA_VOICE" ]]; then
+        TTS_VOICE="$HOME/.local/share/piper-voices/${PERSONA_VOICE}.onnx"
+    fi
+
+    debug "Config loaded - speed:$TTS_SPEED method:$TTS_SPEED_METHOD max_chars:$TTS_MAX_CHARS"
+else
+    debug "No config file, using defaults/env vars"
+fi
+
+# Environment variables override config file
+[[ -n "${CLAUDE_TTS_SPEED:-}" ]] && TTS_SPEED="$CLAUDE_TTS_SPEED"
+[[ -n "${CLAUDE_TTS_SPEED_METHOD:-}" ]] && TTS_SPEED_METHOD="$CLAUDE_TTS_SPEED_METHOD"
+[[ -n "${CLAUDE_TTS_VOICE:-}" ]] && TTS_VOICE="$CLAUDE_TTS_VOICE"
+[[ -n "${CLAUDE_TTS_MAX_CHARS:-}" ]] && TTS_MAX_CHARS="$CLAUDE_TTS_MAX_CHARS"
 
 # Exit early if TTS is disabled via env var
 if [[ "$TTS_ENABLED" != "1" ]]; then
@@ -47,9 +95,13 @@ if [[ "$TTS_ENABLED" != "1" ]]; then
     exit 0
 fi
 
-# Exit early if muted via /mute command (check for mute file)
+# Exit early if muted (config or legacy mute file)
+if [[ "$TTS_MUTED" == "true" ]]; then
+    debug "TTS muted via config"
+    exit 0
+fi
 if [[ -f "$TTS_MUTE_FILE" ]]; then
-    debug "TTS muted via mute file"
+    debug "TTS muted via mute file (legacy)"
     exit 0
 fi
 
@@ -154,26 +206,47 @@ elif [[ "$(uname)" == "Linux" ]]; then
 fi
 debug "Detected platform: $PLATFORM"
 
+# --- Speed method configuration ---
+# "playback" = generate normal, speed up with afplay -r (old voice, macOS only)
+# "length_scale" = generate fast with Piper --length_scale (new voice, all platforms)
+# Default: playback on macOS (old voice), length_scale elsewhere (only option)
+if [[ -z "$TTS_SPEED_METHOD" ]]; then
+    # Not set by config or env var, use platform default
+    if [[ "$PLATFORM" == "macos" ]]; then
+        TTS_SPEED_METHOD="playback"
+    else
+        TTS_SPEED_METHOD="length_scale"
+    fi
+fi
+debug "Speed method: $TTS_SPEED_METHOD"
+
 # --- Generate and play audio ---
 debug "Final text (${#CLIFF_NOTES} chars): ${CLIFF_NOTES:0:100}..."
 
 if command -v piper &>/dev/null; then
     debug "Using piper for TTS"
 
-    # Convert TTS_SPEED to Piper's length_scale (inverse relationship)
-    # TTS_SPEED=2.0 -> length_scale=0.5 (faster)
-    # TTS_SPEED=1.0 -> length_scale=1.0 (normal)
-    LENGTH_SCALE=$(awk "BEGIN {printf \"%.2f\", 1.0 / $TTS_SPEED}")
-    debug "Speed $TTS_SPEED -> length_scale $LENGTH_SCALE"
-
-    echo "$CLIFF_NOTES" | piper --model "$TTS_VOICE" --length_scale "$LENGTH_SCALE" --output_file "$TEMP_FILE" 2>/dev/null
+    if [[ "$TTS_SPEED_METHOD" == "length_scale" ]]; then
+        # Generate audio at target speed (natural pitch)
+        LENGTH_SCALE=$(awk "BEGIN {printf \"%.2f\", 1.0 / $TTS_SPEED}")
+        debug "Speed $TTS_SPEED -> length_scale $LENGTH_SCALE"
+        echo "$CLIFF_NOTES" | piper --model "$TTS_VOICE" --length_scale "$LENGTH_SCALE" --output_file "$TEMP_FILE" 2>/dev/null
+    else
+        # Generate at normal speed (will speed up during playback)
+        debug "Generating at normal speed for playback speedup"
+        echo "$CLIFF_NOTES" | piper --model "$TTS_VOICE" --output_file "$TEMP_FILE" 2>/dev/null
+    fi
 
     if [[ -f "$TEMP_FILE" ]]; then
         debug "Playing audio: $TEMP_FILE"
-        # Speed is already baked into the audio via length_scale, so just play it
+
         if command -v afplay &>/dev/null; then
-            # macOS
-            afplay "$TEMP_FILE" 2>/dev/null &
+            # macOS - can speed up during playback
+            if [[ "$TTS_SPEED_METHOD" == "playback" ]]; then
+                afplay -r "$TTS_SPEED" "$TEMP_FILE" 2>/dev/null &
+            else
+                afplay "$TEMP_FILE" 2>/dev/null &
+            fi
         elif command -v paplay &>/dev/null; then
             # PulseAudio (Linux native, WSL 2 via WSLg)
             paplay "$TEMP_FILE" 2>/dev/null &
