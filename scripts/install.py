@@ -84,6 +84,31 @@ BACKUP_DIR = HOME / ".claude-tts-backups"
 SCRIPT_DIR = Path(__file__).parent.resolve()
 REPO_DIR = SCRIPT_DIR.parent
 
+# Hugging Face Piper voices base URL
+HF_VOICES_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
+
+# Available voice models (curated list of quality English voices)
+# Format: (name, gender, quality, description, path_segment)
+AVAILABLE_VOICES = [
+    # Female voices
+    ("en_US-amy-medium", "female", "medium", "Amy - Clear American female", "en/en_US/amy/medium"),
+    ("en_US-amy-low", "female", "low", "Amy - Faster, lower quality", "en/en_US/amy/low"),
+    ("en_US-hfc_female-medium", "female", "medium", "HFC Female - Natural female voice", "en/en_US/hfc_female/medium"),
+    ("en_US-kristin-medium", "female", "medium", "Kristin - Warm American female", "en/en_US/kristin/medium"),
+    ("en_US-ljspeech-high", "female", "high", "LJSpeech - High quality female", "en/en_US/ljspeech/high"),
+    ("en_US-ljspeech-medium", "female", "medium", "LJSpeech - Medium quality female", "en/en_US/ljspeech/medium"),
+    # Male voices
+    ("en_US-hfc_male-medium", "male", "medium", "HFC Male - Natural male voice (default)", "en/en_US/hfc_male/medium"),
+    ("en_US-lessac-medium", "male", "medium", "Lessac - Professional male narrator", "en/en_US/lessac/medium"),
+    ("en_US-lessac-high", "male", "high", "Lessac - High quality male narrator", "en/en_US/lessac/high"),
+    ("en_US-ryan-medium", "male", "medium", "Ryan - Friendly American male", "en/en_US/ryan/medium"),
+    ("en_US-ryan-high", "male", "high", "Ryan - High quality American male", "en/en_US/ryan/high"),
+    # British voices
+    ("en_GB-alan-medium", "male", "medium", "Alan - British male", "en/en_GB/alan/medium"),
+    ("en_GB-alba-medium", "female", "medium", "Alba - Scottish female", "en/en_GB/alba/medium"),
+    ("en_GB-jenny_dioco-medium", "female", "medium", "Jenny - British female", "en/en_GB/jenny_dioco/medium"),
+]
+
 
 # --- Colors ---
 
@@ -789,6 +814,7 @@ DEFAULT_CONFIG = {
             "speed": 2.0,
             "speed_method": "playback",
             "max_chars": 10000,
+            "ai_type": "claude",
         },
         "claude-chill": {
             "description": "Relaxed Claude - natural pitch, slower pace",
@@ -796,6 +822,7 @@ DEFAULT_CONFIG = {
             "speed": 1.5,
             "speed_method": "length_scale",
             "max_chars": 10000,
+            "ai_type": "claude",
         },
         "code-reviewer": {
             "description": "For code review agents - authoritative pace",
@@ -803,6 +830,7 @@ DEFAULT_CONFIG = {
             "speed": 1.8,
             "speed_method": "length_scale",
             "max_chars": 5000,
+            "ai_type": "claude",
         },
     },
 }
@@ -889,7 +917,9 @@ def do_manage_personas() -> None:
         for name, persona in config["personas"].items():
             active = " (active)" if name == config["active_persona"] else ""
             desc = persona.get("description", "No description")
-            print(f"  - {name}{active}: {desc}")
+            ai_type = persona.get("ai_type", "claude")
+            ai_badge = f"[{ai_type}]" if ai_type else ""
+            print(f"  - {name}{active} {ai_badge}: {desc}")
 
         choice = prompt_choice(
             "What would you like to do?",
@@ -921,6 +951,8 @@ def do_manage_personas() -> None:
                 continue
 
             desc = prompt_string("Description", "Custom persona")
+            ai_idx = prompt_choice("AI type:", ["Claude", "Gemini"], default=0)
+            ai_type = "claude" if ai_idx == 0 else "gemini"
             speed = prompt_float("Speed multiplier", 2.0)
             method_idx = prompt_choice(
                 "Speed method:",
@@ -935,6 +967,7 @@ def do_manage_personas() -> None:
                 "speed": speed,
                 "speed_method": method,
                 "max_chars": max_chars,
+                "ai_type": ai_type,
             }
             save_config(config)
             success(f"Created persona '{name}'")
@@ -982,6 +1015,267 @@ def do_manage_personas() -> None:
             break
 
 
+# --- Voice Download ---
+
+def get_installed_voices() -> set[str]:
+    """Get set of already installed voice model names."""
+    installed = set()
+    if VOICES_DIR.exists():
+        for f in VOICES_DIR.glob("*.onnx"):
+            # Remove .onnx extension to get voice name
+            installed.add(f.stem)
+    return installed
+
+
+def download_voice(voice_name: str, path_segment: str, dry_run: bool = False) -> bool:
+    """Download a voice model from Hugging Face."""
+    onnx_url = f"{HF_VOICES_BASE}/{path_segment}/{voice_name}.onnx"
+    json_url = f"{HF_VOICES_BASE}/{path_segment}/{voice_name}.onnx.json"
+
+    onnx_file = VOICES_DIR / f"{voice_name}.onnx"
+    json_file = VOICES_DIR / f"{voice_name}.onnx.json"
+
+    if dry_run:
+        dry(f"Download {voice_name}.onnx (~60MB)")
+        dry(f"Download {voice_name}.onnx.json")
+        return True
+
+    VOICES_DIR.mkdir(parents=True, exist_ok=True)
+
+    try:
+        download_file(onnx_url, onnx_file)
+        download_file(json_url, json_file)
+        return True
+    except Exception as e:
+        error(f"Failed to download {voice_name}: {e}")
+        # Clean up partial downloads
+        if onnx_file.exists():
+            onnx_file.unlink()
+        if json_file.exists():
+            json_file.unlink()
+        return False
+
+
+def create_persona_from_voice(
+    voice_name: str,
+    gender: str,
+    description: str,
+    ai_type: str = "claude",
+    config: Optional[dict] = None,
+) -> str:
+    """Create a persona for a downloaded voice. Returns persona name."""
+    if config is None:
+        config = load_config()
+
+    # Generate persona name from voice
+    # e.g., "en_US-amy-medium" -> "amy" or "gemini-amy" if for gemini
+    parts = voice_name.split("-")
+    base_name = parts[1] if len(parts) > 1 else voice_name
+
+    if ai_type == "gemini":
+        persona_name = f"gemini-{base_name}"
+    else:
+        persona_name = base_name
+
+    # Avoid duplicates
+    if persona_name in config["personas"]:
+        persona_name = f"{persona_name}-{parts[2]}" if len(parts) > 2 else f"{persona_name}-new"
+
+    # Set speed based on gender preference (male faster for claude style)
+    default_speed = 2.0 if gender == "male" else 1.8
+
+    config["personas"][persona_name] = {
+        "description": description,
+        "voice": voice_name,
+        "speed": default_speed,
+        "speed_method": "playback" if PLATFORM == "macos" else "length_scale",
+        "max_chars": 10000,
+        "ai_type": ai_type,
+    }
+
+    save_config(config)
+    return persona_name
+
+
+def do_download_voices() -> None:
+    """Interactive voice download menu."""
+    print()
+    print("========================================")
+    print("  Voice Model Downloader")
+    print("========================================")
+
+    installed = get_installed_voices()
+
+    print(f"\nInstalled voices: {len(installed)}")
+    print(f"Voice directory: {VOICES_DIR}")
+    print()
+
+    # Filter options
+    filter_choice = prompt_choice(
+        "Filter voices by:",
+        ["All voices", "Female voices only", "Male voices only", "Not installed only"],
+        default=3,
+    )
+
+    # Apply filter
+    voices_to_show = []
+    for voice in AVAILABLE_VOICES:
+        name, gender, quality, desc, path = voice
+        is_installed = name in installed
+
+        if filter_choice == 1 and gender != "female":
+            continue
+        if filter_choice == 2 and gender != "male":
+            continue
+        if filter_choice == 3 and is_installed:
+            continue
+
+        voices_to_show.append(voice)
+
+    if not voices_to_show:
+        info("No voices match the filter (all may already be installed)")
+        return
+
+    # Build display list
+    display_options = []
+    for name, gender, quality, desc, path in voices_to_show:
+        is_installed = name in installed
+        status = f"{Colors.GREEN}[installed]{Colors.NC}" if is_installed else ""
+        gender_icon = "F" if gender == "female" else "M"
+        display_options.append(f"[{gender_icon}] {desc} ({quality}) {status}")
+
+    display_options.append("Download ALL listed voices")
+    display_options.append("Back to main menu")
+
+    choice = prompt_choice("Select voice to download:", display_options)
+
+    if choice == len(display_options) - 1:  # Back
+        return
+    elif choice == len(display_options) - 2:  # Download all
+        ai_type = prompt_choice(
+            "What AI are these voices for?",
+            ["Claude (male voices)", "Gemini (female voices)", "Both / Mixed"],
+            default=2,
+        )
+
+        for voice in voices_to_show:
+            name, gender, quality, desc, path = voice
+            if name in installed:
+                info(f"Skipping {name} (already installed)")
+                continue
+
+            info(f"Downloading {name}...")
+            if download_voice(name, path):
+                # Determine AI type for persona
+                if ai_type == 0:
+                    voice_ai = "claude"
+                elif ai_type == 1:
+                    voice_ai = "gemini"
+                else:
+                    # Auto-assign: male=claude, female=gemini
+                    voice_ai = "claude" if gender == "male" else "gemini"
+
+                persona = create_persona_from_voice(name, gender, desc, voice_ai)
+                success(f"Downloaded and created persona: {persona}")
+
+    else:  # Single voice
+        voice = voices_to_show[choice]
+        name, gender, quality, desc, path = voice
+
+        if name in installed:
+            warn(f"{name} is already installed")
+            # Offer to create persona anyway
+            create = prompt_choice(
+                "Create a persona for this voice?",
+                ["Yes", "No"],
+                default=1,
+            )
+            if create == 0:
+                ai_type = prompt_choice(
+                    "AI type for this persona?",
+                    ["Claude", "Gemini"],
+                    default=0 if gender == "male" else 1,
+                )
+                persona = create_persona_from_voice(
+                    name, gender, desc, "claude" if ai_type == 0 else "gemini"
+                )
+                success(f"Created persona: {persona}")
+            return
+
+        ai_type = prompt_choice(
+            "AI type for this persona?",
+            ["Claude", "Gemini"],
+            default=0 if gender == "male" else 1,
+        )
+
+        if download_voice(name, path):
+            persona = create_persona_from_voice(
+                name, gender, desc, "claude" if ai_type == 0 else "gemini"
+            )
+            success(f"Downloaded and created persona: {persona}")
+
+
+def do_bootstrap_from_config(config_path: Path) -> None:
+    """Bootstrap installation from a config file - downloads all required voices."""
+    print()
+    print("========================================")
+    print("  Bootstrap from Config")
+    print("========================================")
+    print()
+
+    if not config_path.exists():
+        die(f"Config file not found: {config_path}")
+
+    with open(config_path) as f:
+        config = json.load(f)
+
+    info(f"Loading config from {config_path}")
+
+    # Get all unique voices from personas
+    voices_needed = set()
+    for name, persona in config.get("personas", {}).items():
+        voice = persona.get("voice")
+        if voice:
+            voices_needed.add(voice)
+
+    info(f"Found {len(voices_needed)} unique voice(s) in config")
+
+    # Check which need downloading
+    installed = get_installed_voices()
+    to_download = voices_needed - installed
+
+    if not to_download:
+        success("All required voices are already installed")
+    else:
+        info(f"Need to download {len(to_download)} voice(s)")
+        for voice_name in to_download:
+            # Find voice in available list
+            voice_info = None
+            for v in AVAILABLE_VOICES:
+                if v[0] == voice_name:
+                    voice_info = v
+                    break
+
+            if voice_info:
+                name, gender, quality, desc, path = voice_info
+                info(f"Downloading {name}...")
+                if download_voice(name, path):
+                    success(f"Downloaded {name}")
+                else:
+                    error(f"Failed to download {name}")
+            else:
+                warn(f"Voice {voice_name} not in curated list, skipping")
+
+    # Copy config to TTS config location
+    info("Installing config...")
+    TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy(config_path, TTS_CONFIG_FILE)
+    success(f"Config installed to {TTS_CONFIG_FILE}")
+
+    print()
+    success("Bootstrap complete!")
+
+
 def do_interactive() -> None:
     """Interactive main menu."""
     print()
@@ -1015,6 +1309,9 @@ def do_interactive() -> None:
     options.append("Manage personas")
     actions.append("personas")
 
+    options.append("Download new voices")
+    actions.append("voices")
+
     if is_installed:
         options.append("Toggle mute/unmute")
         actions.append("mute")
@@ -1034,6 +1331,9 @@ def do_interactive() -> None:
         do_install(dry_run=False, upgrade=True)
     elif action == "personas":
         do_manage_personas()
+        do_interactive()  # Return to main menu
+    elif action == "voices":
+        do_download_voices()
         do_interactive()  # Return to main menu
     elif action == "mute":
         config = load_config()
@@ -1062,11 +1362,13 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python install.py              # Interactive menu
-  python install.py --install    # Direct install
-  python install.py --upgrade    # Update to latest version
-  python install.py --personas   # Manage personas
-  python install.py --uninstall  # Remove TTS
+  python install.py                      # Interactive menu
+  python install.py --install            # Direct install
+  python install.py --upgrade            # Update to latest version
+  python install.py --personas           # Manage personas
+  python install.py --voices             # Download new voice models
+  python install.py --bootstrap config.json  # Install from config file
+  python install.py --uninstall          # Remove TTS
         """,
     )
     parser.add_argument(
@@ -1090,6 +1392,17 @@ Examples:
         help="Manage personas interactively",
     )
     parser.add_argument(
+        "--voices",
+        action="store_true",
+        help="Download new voice models from Hugging Face",
+    )
+    parser.add_argument(
+        "--bootstrap",
+        type=str,
+        metavar="CONFIG",
+        help="Bootstrap from config file (downloads required voices and installs config)",
+    )
+    parser.add_argument(
         "--uninstall",
         action="store_true",
         help="Remove Claude Code TTS completely",
@@ -1100,12 +1413,16 @@ Examples:
     # If any specific action is requested, do it directly
     if args.uninstall:
         do_uninstall(dry_run=args.dry_run)
+    elif args.bootstrap:
+        do_bootstrap_from_config(Path(args.bootstrap))
     elif args.upgrade:
         do_install(dry_run=args.dry_run, upgrade=True)
     elif args.install:
         do_install(dry_run=args.dry_run, upgrade=False)
     elif args.personas:
         do_manage_personas()
+    elif args.voices:
+        do_download_voices()
     elif args.dry_run:
         do_install(dry_run=True, upgrade=False)
     else:
