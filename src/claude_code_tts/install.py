@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 
 
 # --- Platform Detection ---
@@ -752,9 +752,14 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
 
     print()
     new_hook = {
-        "type": "command",
-        "command": str(dst_hook),
-        "timeout": 180
+        "matcher": "*",
+        "hooks": [
+            {
+                "type": "command",
+                "command": str(dst_hook),
+                "timeout": 180
+            }
+        ]
     }
 
     if upgrade:
