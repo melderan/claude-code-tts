@@ -17,6 +17,10 @@ if [[ -f "$CONFIG_FILE" ]]; then
     # Ensure sessions object exists and set this session's muted state
     jq --arg s "$SESSION" '.sessions[$s].muted = false' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
     echo "Session unmuted (ID: ${SESSION:0:8}...)"
+
+    # Play unmuted sound if available
+    PLAY_SOUND="$HOME/.claude/hooks/play-sound.sh"
+    [[ -x "$PLAY_SOUND" ]] && "$PLAY_SOUND" unmuted &
 else
     rm -f /tmp/claude_tts_muted
     echo "TTS unmuted (legacy mode)"
