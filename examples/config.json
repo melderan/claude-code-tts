@@ -1,7 +1,15 @@
 {
   "version": 1,
+  "mode": "direct",
   "active_persona": "claude-prime",
   "muted": false,
+  "queue": {
+    "max_depth": 20,
+    "max_age_seconds": 300,
+    "speaker_transition": "chime",
+    "coalesce_rapid_ms": 500,
+    "idle_poll_ms": 100
+  },
   "sounds": {
     "enabled": false,
     "volume": 0.5,

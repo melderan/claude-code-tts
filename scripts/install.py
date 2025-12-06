@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "1.2.0"
+__version__ = "2.0.0"
 
 
 # --- Platform Detection ---
@@ -301,7 +301,7 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
         else:
             preflight(f"{Colors.GREEN}PASS{Colors.NC} Source {hook_name} found")
 
-    for cmd_name in ["mute.md", "unmute.md", "speed.md", "sounds.md"]:
+    for cmd_name in ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md"]:
         src_cmd = REPO_DIR / "commands" / cmd_name
         if not src_cmd.exists():
             issues.append(f"Source command not found: {src_cmd}")
@@ -403,7 +403,8 @@ def do_uninstall(dry_run: bool = False) -> None:
             success(f"Removed hook: {hook_file}")
 
     # Remove slash commands
-    for cmd_name in ["mute.md", "unmute.md", "speed.md", "sounds.md"]:
+    for cmd_name in ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md",
+                      "mute.md", "unmute.md", "speed.md", "sounds.md"]:  # Include old names for cleanup
         cmd_file = COMMANDS_DIR / cmd_name
         if cmd_file.exists():
             if dry_run:
@@ -580,10 +581,12 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
         SETTINGS_FILE,
         HOOKS_DIR / "speak-response.sh",
         HOOKS_DIR / "play-sound.sh",
-        COMMANDS_DIR / "mute.md",
-        COMMANDS_DIR / "unmute.md",
-        COMMANDS_DIR / "speed.md",
-        COMMANDS_DIR / "sounds.md",
+        COMMANDS_DIR / "tts-mute.md",
+        COMMANDS_DIR / "tts-unmute.md",
+        COMMANDS_DIR / "tts-speed.md",
+        COMMANDS_DIR / "tts-sounds.md",
+        COMMANDS_DIR / "tts-mode.md",
+        TTS_CONFIG_DIR / "tts-daemon.py",
     ]
 
     backed_up_count = 0
@@ -683,14 +686,64 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
 
     # --- Install slash commands ---
 
-    for cmd_name in ["mute.md", "unmute.md", "speed.md", "sounds.md"]:
+    for cmd_name in ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md"]:
         src_cmd = REPO_DIR / "commands" / cmd_name
         dst_cmd = COMMANDS_DIR / cmd_name
         if dry_run:
             dry(f"cp {src_cmd} -> {dst_cmd}")
         else:
             shutil.copy(src_cmd, dst_cmd)
-    success("Commands: /mute, /unmute, /speed, /sounds")
+    success("Commands: /tts-mute, /tts-unmute, /tts-speed, /tts-sounds, /tts-mode")
+
+    # Clean up old command names (v1.x -> v2.x migration)
+    for old_cmd in ["mute.md", "unmute.md", "speed.md", "sounds.md"]:
+        old_file = COMMANDS_DIR / old_cmd
+        if old_file.exists():
+            if not dry_run:
+                old_file.unlink()
+            info(f"Removed old command: /{old_cmd.replace('.md', '')}")
+
+    # --- Install daemon script ---
+
+    src_daemon = REPO_DIR / "scripts" / "tts-daemon.py"
+    dst_daemon = TTS_CONFIG_DIR / "tts-daemon.py"
+    if src_daemon.exists():
+        if dry_run:
+            dry(f"cp {src_daemon} -> {dst_daemon}")
+        else:
+            TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy(src_daemon, dst_daemon)
+            dst_daemon.chmod(0o755)
+        success("Daemon: tts-daemon.py")
+
+    # --- Install service files ---
+
+    services_dir = TTS_CONFIG_DIR / "services"
+    if dry_run:
+        dry(f"mkdir -p {services_dir}")
+    else:
+        services_dir.mkdir(parents=True, exist_ok=True)
+
+    # macOS launchd plist
+    src_plist = REPO_DIR / "services" / "com.claude-tts.daemon.plist"
+    dst_plist = services_dir / "com.claude-tts.daemon.plist"
+    if src_plist.exists():
+        if dry_run:
+            dry(f"cp {src_plist} -> {dst_plist}")
+        else:
+            shutil.copy(src_plist, dst_plist)
+
+    # Linux systemd service
+    src_systemd = REPO_DIR / "services" / "claude-tts.service"
+    dst_systemd = services_dir / "claude-tts.service"
+    if src_systemd.exists():
+        if dry_run:
+            dry(f"cp {src_systemd} -> {dst_systemd}")
+        else:
+            shutil.copy(src_systemd, dst_systemd)
+
+    if src_plist.exists() or src_systemd.exists():
+        success("Services: launchd plist, systemd unit")
 
     # --- Configure settings.json ---
 
@@ -837,8 +890,16 @@ TTS_CONFIG_FILE = TTS_CONFIG_DIR / "config.json"
 
 DEFAULT_CONFIG = {
     "version": 1,
+    "mode": "direct",  # "direct" = immediate playback, "queue" = daemon handles playback
     "active_persona": "claude-prime",
     "muted": False,
+    "queue": {
+        "max_depth": 20,
+        "max_age_seconds": 300,
+        "speaker_transition": "chime",  # "chime", "announce", "none"
+        "coalesce_rapid_ms": 500,
+        "idle_poll_ms": 100,
+    },
     "sounds": {
         "enabled": False,
         "volume": 0.5,
@@ -928,10 +989,12 @@ def check_for_updates() -> dict:
     files_to_check = [
         (HOOKS_DIR / "speak-response.sh", REPO_DIR / "hooks" / "speak-response.sh"),
         (HOOKS_DIR / "play-sound.sh", REPO_DIR / "hooks" / "play-sound.sh"),
-        (COMMANDS_DIR / "mute.md", REPO_DIR / "commands" / "mute.md"),
-        (COMMANDS_DIR / "unmute.md", REPO_DIR / "commands" / "unmute.md"),
-        (COMMANDS_DIR / "speed.md", REPO_DIR / "commands" / "speed.md"),
-        (COMMANDS_DIR / "sounds.md", REPO_DIR / "commands" / "sounds.md"),
+        (COMMANDS_DIR / "tts-mute.md", REPO_DIR / "commands" / "tts-mute.md"),
+        (COMMANDS_DIR / "tts-unmute.md", REPO_DIR / "commands" / "tts-unmute.md"),
+        (COMMANDS_DIR / "tts-speed.md", REPO_DIR / "commands" / "tts-speed.md"),
+        (COMMANDS_DIR / "tts-sounds.md", REPO_DIR / "commands" / "tts-sounds.md"),
+        (COMMANDS_DIR / "tts-mode.md", REPO_DIR / "commands" / "tts-mode.md"),
+        (TTS_CONFIG_DIR / "tts-daemon.py", REPO_DIR / "scripts" / "tts-daemon.py"),
     ]
 
     for installed, repo in files_to_check:
