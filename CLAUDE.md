@@ -52,9 +52,11 @@ claude-code-tts/
     tts-mode.md          # /tts-mode command (daemon control)
     tts-speed.md         # /tts-speed command
     tts-sounds.md        # /tts-sounds command
+    tts-persona.md       # /tts-persona command (voice switching)
   scripts/
     tts-daemon.py        # Queue daemon for multi-session
     tts-mode.sh          # Mode management script
+    check-version.sh     # Version consistency checker
   services/
     com.claude-tts.daemon.plist  # macOS launchd
     claude-tts.service           # Linux systemd
@@ -130,6 +132,66 @@ echo '{"transcript_path":"/path/to/transcript.jsonl"}' | bash -x ~/.claude/hooks
 Built on a Friday night debugging session. What started as fixing a frozen Claude Code session turned into filing an open source contribution and building a voice interface.
 
 Many Claudes have contributed to this code. Their context windows are gone, but their work lives on.
+
+## Development Workflow
+
+### Version Bumping
+
+We use `bump-my-version` (community standard tool). **Never manually edit version strings.**
+
+```bash
+# Check current version
+bump-my-version show current_version
+
+# See what bumps are available
+bump-my-version show-bump
+
+# Bump version (auto-commits and tags)
+bump-my-version bump patch   # 4.1.0 -> 4.1.1 (bug fixes)
+bump-my-version bump minor   # 4.1.0 -> 4.2.0 (new features)
+bump-my-version bump major   # 4.1.0 -> 5.0.0 (breaking changes)
+
+# Push with tags
+git push origin main --tags
+```
+
+Version is tracked in 4 files (all updated automatically):
+- `pyproject.toml` - Python package version
+- `src/claude_code_tts/__init__.py` - Module version
+- `src/claude_code_tts/install.py` - Installer version
+- `CLAUDE.md` - Documentation version
+
+### Verification
+
+```bash
+# Verify all versions match
+./scripts/check-version.sh
+
+# Sync local install after changes
+python3 src/claude_code_tts/install.py --upgrade
+python3 src/claude_code_tts/install.py --check
+```
+
+### Adding New Commands
+
+When adding a new `/tts-*` command:
+1. Create `commands/tts-newcmd.md`
+2. Add to installer in **5 places** in `install.py`:
+   - Line ~304: preflight check list
+   - Line ~406: uninstall cleanup list
+   - Line ~589: backup list
+   - Line ~690: install loop
+   - Line ~1008: version check list
+3. Add to README.md commands section
+4. Bump version and push
+
+### Pre-commit Checklist
+
+Before pushing:
+- [ ] `./scripts/check-version.sh` passes
+- [ ] `python3 src/claude_code_tts/install.py --check` shows all current
+- [ ] New commands added to all 5 installer locations
+- [ ] README.md updated if user-facing changes
 
 ## Code Style
 
