@@ -275,8 +275,11 @@ fi
 debug "Extracted response (${#RESPONSE} chars): ${RESPONSE:0:100}..."
 
 # --- Filter out code blocks and clean up for speech ---
+# Remove <thinking> blocks (internal reasoning, not for speech)
+CLIFF_NOTES=$(echo "$RESPONSE" | perl -0777 -pe 's/<thinking>[\s\S]*?<\/thinking>//g')
+
 # Remove fenced code blocks (```...```)
-CLIFF_NOTES=$(echo "$RESPONSE" | perl -0777 -pe 's/```[\s\S]*?```//g')
+CLIFF_NOTES=$(echo "$CLIFF_NOTES" | perl -0777 -pe 's/```[\s\S]*?```//g')
 
 # Remove indented code blocks (4+ spaces at start of line)
 CLIFF_NOTES=$(echo "$CLIFF_NOTES" | grep -v '^    ' || echo "$CLIFF_NOTES")

@@ -172,6 +172,7 @@ MIT
 
 ## Credits
 
-- [Piper TTS](https://github.com/rhasspy/piper) - Fast, local neural TTS
-- [Claude Code](https://github.com/anthropics/claude-code) - The AI coding assistant
-- Late night debugging sessions and too much caffeine
+- [Handy](https://handy.computer) by [CJ Pais](https://github.com/cjpais) - Free, open-source speech-to-text that lets you speak into any text field. Local, private, fast. CJ built the input side of the voice loop - without Handy, you'd still be typing. Thank you.
+- [Piper TTS](https://github.com/rhasspy/piper) by [Michael Hansen](https://github.com/synesthesiam) and the [Rhasspy](https://rhasspy.github.io/) project - The fast, local neural TTS engine that makes all of this possible. Without Piper, we'd have no voices. Michael built something magical: high-quality speech synthesis that runs locally, privately, and fast enough for real-time conversation. Thank you.
+- [Claude Code](https://github.com/anthropics/claude-code) - The AI coding assistant with hooks that let us extend it
+- Late night debugging sessions, too much caffeine, and the belief that computers should talk back
