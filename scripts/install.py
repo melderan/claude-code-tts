@@ -703,18 +703,21 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
                 old_file.unlink()
             info(f"Removed old command: /{old_cmd.replace('.md', '')}")
 
-    # --- Install daemon script ---
+    # --- Install daemon and mode scripts ---
 
-    src_daemon = REPO_DIR / "scripts" / "tts-daemon.py"
-    dst_daemon = TTS_CONFIG_DIR / "tts-daemon.py"
-    if src_daemon.exists():
-        if dry_run:
-            dry(f"cp {src_daemon} -> {dst_daemon}")
-        else:
-            TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            shutil.copy(src_daemon, dst_daemon)
-            dst_daemon.chmod(0o755)
-        success("Daemon: tts-daemon.py")
+    TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    for script_name in ["tts-daemon.py", "tts-mode.sh"]:
+        src_script = REPO_DIR / "scripts" / script_name
+        dst_script = TTS_CONFIG_DIR / script_name
+        if src_script.exists():
+            if dry_run:
+                dry(f"cp {src_script} -> {dst_script}")
+            else:
+                shutil.copy(src_script, dst_script)
+                dst_script.chmod(0o755)
+
+    success("Scripts: tts-daemon.py, tts-mode.sh")
 
     # --- Install service files ---
 
