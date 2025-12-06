@@ -37,6 +37,45 @@ debug "=== Hook triggered ==="
 
 # --- Configuration ---
 TTS_CONFIG_FILE="$HOME/.claude-tts/config.json"
+TTS_QUEUE_DIR="$HOME/.claude-tts/queue"
+
+# --- Queue Mode Support ---
+# Write message to queue for daemon to process
+write_to_queue() {
+    local text="$1"
+    local session_id="$2"
+    local project="$3"
+    local persona="$4"
+
+    mkdir -p "$TTS_QUEUE_DIR"
+
+    # Generate unique filename with timestamp
+    local timestamp=$(date +%s.%N)
+    local msg_id=$(head -c 8 /dev/urandom | xxd -p)
+    local queue_file="$TTS_QUEUE_DIR/${timestamp}_${msg_id}.json"
+
+    # Get project path from transcript
+    local project_path=""
+    if [[ -n "$TRANSCRIPT_PATH" ]]; then
+        # Extract project path - transcript is at ~/.claude/projects/<hash>/<files>
+        project_path=$(dirname "$(dirname "$TRANSCRIPT_PATH")")
+    fi
+
+    # Write queue message
+    cat > "$queue_file" << EOF
+{
+  "id": "$msg_id",
+  "timestamp": $timestamp,
+  "session_id": "$session_id",
+  "project": "$project",
+  "project_path": "$project_path",
+  "text": $(echo "$text" | jq -Rs .),
+  "persona": "$persona"
+}
+EOF
+
+    debug "Wrote to queue: $queue_file"
+}
 TTS_TEMP_DIR="/tmp"
 TTS_MUTE_FILE="/tmp/claude_tts_muted"  # Legacy mute file for backward compat
 
@@ -77,6 +116,25 @@ if [[ -z "$TTS_SESSION" ]]; then
     fi
 fi
 
+# --- Extract project name for queue messages ---
+# Try to get a human-readable project name from the project directory
+PROJECT_NAME="session-${TTS_SESSION:0:8}"
+if [[ -n "$TRANSCRIPT_PATH" ]]; then
+    PROJECT_DIR=$(dirname "$(dirname "$TRANSCRIPT_PATH")")
+    if [[ -d "$PROJECT_DIR" ]]; then
+        # Look for project name in various ways
+        # 1. Try to read from a .project-name file if we ever create one
+        # 2. Use the actual directory name from CWD stored in transcript
+        # 3. Fall back to session hash
+        CWD_FILE="$PROJECT_DIR/cwd"
+        if [[ -f "$CWD_FILE" ]]; then
+            FULL_PATH=$(cat "$CWD_FILE" 2>/dev/null)
+            PROJECT_NAME=$(basename "$FULL_PATH" 2>/dev/null || echo "$PROJECT_NAME")
+        fi
+    fi
+fi
+debug "Project name: $PROJECT_NAME"
+
 # Default values (can be overridden by config file or env vars)
 TTS_SPEED="${CLAUDE_TTS_SPEED:-2.0}"
 TTS_SPEED_METHOD=""  # Will be set based on platform later
@@ -85,8 +143,15 @@ TTS_MAX_CHARS="${CLAUDE_TTS_MAX_CHARS:-10000}"
 TTS_MUTED="false"
 
 # Load from config file if it exists
+TTS_MODE="direct"  # Default to direct mode
+PROJECT_NAME="unknown"
+
 if [[ -f "$TTS_CONFIG_FILE" ]]; then
     debug "Loading config from $TTS_CONFIG_FILE"
+
+    # Check for queue mode
+    TTS_MODE=$(jq -r '.mode // "direct"' "$TTS_CONFIG_FILE" 2>/dev/null)
+    debug "TTS mode: $TTS_MODE"
 
     # Get global settings first
     ACTIVE_PERSONA=$(jq -r '.active_persona // "default"' "$TTS_CONFIG_FILE" 2>/dev/null)
@@ -238,6 +303,15 @@ fi
 if [[ ${#CLIFF_NOTES} -gt $TTS_MAX_CHARS ]]; then
     CLIFF_NOTES="${CLIFF_NOTES:0:$TTS_MAX_CHARS}..."
 fi
+
+# --- Queue mode: write to daemon queue and exit ---
+if [[ "$TTS_MODE" == "queue" ]]; then
+    debug "Queue mode: writing to daemon queue"
+    write_to_queue "$CLIFF_NOTES" "$TTS_SESSION" "$PROJECT_NAME" "${ACTIVE_PERSONA:-claude-prime}"
+    exit 0
+fi
+
+# --- Direct mode: generate and play immediately ---
 
 # --- Rotating temp file (5 slots to avoid file conflicts) ---
 SLOT=$(( $(date +%s) % 5 ))
