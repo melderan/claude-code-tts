@@ -307,7 +307,18 @@ def daemon_loop() -> None:
                 msg_file.unlink(missing_ok=True)
                 continue
 
-            # Speaker transition
+            # Generate speech FIRST (before any chimes) so it's ready to play
+            log(f"Speaking for {project}: {text[:50]}...")
+            audio_file = Path(f"/tmp/tts_queue_{session_id}.wav")
+            persona_config = get_persona_config(persona)
+            speed = persona_config.get("speed", 2.0)
+
+            if not generate_speech(text, persona, audio_file):
+                log(f"Failed to generate speech for message from {project}", "ERROR")
+                msg_file.unlink(missing_ok=True)
+                continue
+
+            # Speaker transition (audio is already generated, ready to play)
             speaker_key = f"{session_id}:{project}"
             if last_speaker and last_speaker != speaker_key:
                 transition = config["speaker_transition"]
@@ -320,10 +331,9 @@ def daemon_loop() -> None:
                     log(f"Announcing speaker: {project}")
                     announce_file = Path("/tmp/tts_announce.wav")
                     if generate_speech(f"{project} says:", persona, announce_file):
-                        persona_config = get_persona_config(persona)
-                        speed = persona_config.get("speed", 2.0)
-                        if persona_config.get("speed_method") == "playback":
-                            play_audio(announce_file, speed)
+                        announce_speed = speed if persona_config.get("speed_method") == "playback" else None
+                        if announce_speed:
+                            play_audio(announce_file, announce_speed)
                         else:
                             play_audio(announce_file)
                         announce_file.unlink(missing_ok=True)
@@ -331,23 +341,13 @@ def daemon_loop() -> None:
 
             last_speaker = speaker_key
 
-            # Generate and play the message
-            log(f"Speaking for {project}: {text[:50]}...")
-
-            audio_file = Path(f"/tmp/tts_queue_{session_id}.wav")
-
-            if generate_speech(text, persona, audio_file):
-                persona_config = get_persona_config(persona)
-                speed = persona_config.get("speed", 2.0)
-
-                if persona_config.get("speed_method") == "playback":
-                    play_audio(audio_file, speed)
-                else:
-                    play_audio(audio_file)
-
-                audio_file.unlink(missing_ok=True)
+            # Play the pre-generated audio immediately
+            if persona_config.get("speed_method") == "playback":
+                play_audio(audio_file, speed)
             else:
-                log(f"Failed to generate speech for message from {project}", "ERROR")
+                play_audio(audio_file)
+
+            audio_file.unlink(missing_ok=True)
 
             # Remove processed message
             msg_file.unlink(missing_ok=True)
