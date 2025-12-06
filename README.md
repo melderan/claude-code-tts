@@ -18,8 +18,17 @@ A text-to-speech hook for [Claude Code](https://github.com/anthropics/claude-cod
 
 ## Quick Install
 
+### Option 1: uv tool (recommended)
+
 ```bash
-git clone https://github.com/Melderan/claude-code-tts.git
+uv tool install git+https://github.com/melderan/claude-code-tts
+claude-tts-install
+```
+
+### Option 2: From source
+
+```bash
+git clone https://github.com/melderan/claude-code-tts.git
 cd claude-code-tts
 python3 scripts/install.py
 ```
@@ -47,8 +56,27 @@ After installation, just use Claude Code normally. Every response will be spoken
 
 ### Commands
 
-- `/mute` - Silence TTS temporarily
-- `/unmute` - Re-enable TTS
+- `/tts-mute` - Silence TTS temporarily
+- `/tts-unmute` - Re-enable TTS
+- `/tts-mode` - Manage queue mode and daemon
+- `/tts-speed` - Adjust playback speed
+- `/tts-sounds` - Configure sound effects
+
+### Multi-Session Mode
+
+Running multiple Claude Code sessions? Use queue mode so they don't talk over each other:
+
+```bash
+/tts-mode queue     # Switch to queue mode
+/tts-mode start     # Start the daemon
+```
+
+The daemon queues messages and plays them in order, with a chime when switching between sessions.
+
+```bash
+/tts-mode status    # Check daemon status
+/tts-mode direct    # Switch back to direct mode (default)
+```
 
 ### Configuration
 
@@ -91,11 +119,22 @@ When Claude runs tools (file reads, bash commands, etc.), the transcript contain
 ```
 ~/.claude/
   hooks/
-    speak-response.sh     # The TTS hook
+    speak-response.sh       # The TTS hook
   commands/
-    mute.md               # /mute command
-    unmute.md             # /unmute command
-  settings.json           # Hook configuration
+    tts-mute.md             # /tts-mute command
+    tts-unmute.md           # /tts-unmute command
+    tts-mode.md             # /tts-mode command
+    tts-speed.md            # /tts-speed command
+    tts-sounds.md           # /tts-sounds command
+  settings.json             # Hook configuration
+
+~/.claude-tts/
+  config.json               # TTS configuration
+  tts-daemon.py             # Queue daemon
+  tts-mode.sh               # Mode management script
+  voices/                   # Piper voice models
+  queue/                    # Message queue (queue mode)
+  services/                 # launchd/systemd service files
 ```
 
 ## Debugging
