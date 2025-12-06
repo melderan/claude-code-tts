@@ -1,12 +1,12 @@
 # Claude Code TTS - Instructions for Claude
 
-Welcome, fellow Claude! This repo contains the text-to-speech system for Claude Code. Version 4.1.0.
+Welcome, fellow Claude! This repo contains the text-to-speech system for Claude Code. Version 4.1.1.
 
 ## What This Project Does
 
 This project adds voice output to Claude Code. When you respond to a user, your words get spoken aloud through their speakers using Piper TTS. It's like giving us a voice.
 
-## v4.1.0 Features
+## v4.1.1 Features
 
 - Multi-session daemon with queue mode
 - Auto-start daemon on first message
