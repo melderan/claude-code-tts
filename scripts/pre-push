@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# pre-push hook - Ensures code quality before pushing
+# Install: cp scripts/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+# Or run: ./scripts/release.sh --install-hooks
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+echo "Running pre-push checks..."
+echo ""
+
+ERRORS=0
+
+# --- Check 1: Version consistency ---
+echo -n "Checking version consistency... "
+if ./scripts/check-version.sh > /dev/null 2>&1; then
+    echo -e "${GREEN}OK${NC}"
+else
+    echo -e "${RED}FAIL${NC}"
+    ./scripts/check-version.sh
+    ERRORS=1
+fi
+
+# --- Check 2: All commands in installer ---
+echo -n "Checking commands in installer... "
+COMMANDS_IN_DIR=$(ls commands/*.md 2>/dev/null | xargs -I{} basename {} .md | sort)
+COMMANDS_IN_INSTALLER=$(grep -oE 'tts-[a-z]+\.md' src/claude_code_tts/install.py | sed 's/\.md//' | sort | uniq)
+
+MISSING=""
+for cmd in $COMMANDS_IN_DIR; do
+    if ! echo "$COMMANDS_IN_INSTALLER" | grep -q "^${cmd}$"; then
+        MISSING="$MISSING $cmd"
+    fi
+done
+
+if [[ -z "$MISSING" ]]; then
+    echo -e "${GREEN}OK${NC}"
+else
+    echo -e "${RED}FAIL${NC}"
+    echo "  Commands in commands/ but not in installer:$MISSING"
+    ERRORS=1
+fi
+
+# --- Check 3: README has all commands ---
+echo -n "Checking README has all commands... "
+MISSING_README=""
+for cmd in $COMMANDS_IN_DIR; do
+    if ! grep -q "/$cmd" README.md 2>/dev/null; then
+        MISSING_README="$MISSING_README $cmd"
+    fi
+done
+
+if [[ -z "$MISSING_README" ]]; then
+    echo -e "${GREEN}OK${NC}"
+else
+    echo -e "${YELLOW}WARN${NC}"
+    echo "  Commands not in README:$MISSING_README"
+    # Warning only, not a blocker
+fi
+
+# --- Check 4: No debug prints left behind ---
+echo -n "Checking for debug prints... "
+if grep -r "print.*DEBUG\|breakpoint()\|import pdb" src/ --include="*.py" 2>/dev/null | grep -v "^Binary"; then
+    echo -e "${YELLOW}WARN${NC} - Found debug statements"
+else
+    echo -e "${GREEN}OK${NC}"
+fi
+
+# --- Check 5: Python syntax check ---
+echo -n "Checking Python syntax... "
+if python3 -m py_compile src/claude_code_tts/install.py 2>/dev/null; then
+    echo -e "${GREEN}OK${NC}"
+else
+    echo -e "${RED}FAIL${NC}"
+    ERRORS=1
+fi
+
+echo ""
+
+if [[ "$ERRORS" -eq 1 ]]; then
+    echo -e "${RED}Pre-push checks failed. Fix issues and try again.${NC}"
+    echo "To bypass (not recommended): git push --no-verify"
+    exit 1
+fi
+
+echo -e "${GREEN}All checks passed!${NC}"
+exit 0
