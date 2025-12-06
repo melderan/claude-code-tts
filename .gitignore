@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Debug logs
+*.log
+
+# Temp files
+*.tmp
+*.wav
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
