@@ -773,6 +773,287 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
     print()
 
 
+# --- Config Management ---
+
+TTS_CONFIG_DIR = HOME / ".claude-tts"
+TTS_CONFIG_FILE = TTS_CONFIG_DIR / "config.json"
+
+DEFAULT_CONFIG = {
+    "version": 1,
+    "active_persona": "claude-prime",
+    "muted": False,
+    "personas": {
+        "claude-prime": {
+            "description": "The original Claude voice - fast and chipmunky",
+            "voice": "en_US-hfc_male-medium",
+            "speed": 2.0,
+            "speed_method": "playback",
+            "max_chars": 10000,
+        },
+        "claude-chill": {
+            "description": "Relaxed Claude - natural pitch, slower pace",
+            "voice": "en_US-hfc_male-medium",
+            "speed": 1.5,
+            "speed_method": "length_scale",
+            "max_chars": 10000,
+        },
+        "code-reviewer": {
+            "description": "For code review agents - authoritative pace",
+            "voice": "en_US-hfc_male-medium",
+            "speed": 1.8,
+            "speed_method": "length_scale",
+            "max_chars": 5000,
+        },
+    },
+}
+
+
+def load_config() -> dict:
+    """Load config from file or return defaults."""
+    if TTS_CONFIG_FILE.exists():
+        with open(TTS_CONFIG_FILE) as f:
+            return json.load(f)
+    return DEFAULT_CONFIG.copy()
+
+
+def save_config(config: dict) -> None:
+    """Save config to file."""
+    TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(TTS_CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=2)
+
+
+def prompt_choice(prompt: str, options: list[str], default: int = 0) -> int:
+    """Prompt user to choose from options. Returns index."""
+    print(f"\n{prompt}")
+    for i, opt in enumerate(options):
+        marker = ">" if i == default else " "
+        print(f"  {marker} [{i + 1}] {opt}")
+    print()
+
+    while True:
+        try:
+            choice = input(f"Enter choice [1-{len(options)}] (default: {default + 1}): ").strip()
+            if not choice:
+                return default
+            idx = int(choice) - 1
+            if 0 <= idx < len(options):
+                return idx
+            print(f"Please enter a number between 1 and {len(options)}")
+        except ValueError:
+            print("Please enter a valid number")
+        except KeyboardInterrupt:
+            print("\nCancelled.")
+            sys.exit(0)
+
+
+def prompt_string(prompt: str, default: str = "") -> str:
+    """Prompt user for a string value."""
+    default_str = f" [{default}]" if default else ""
+    try:
+        value = input(f"{prompt}{default_str}: ").strip()
+        return value if value else default
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        sys.exit(0)
+
+
+def prompt_float(prompt: str, default: float) -> float:
+    """Prompt user for a float value."""
+    while True:
+        try:
+            value = input(f"{prompt} [{default}]: ").strip()
+            if not value:
+                return default
+            return float(value)
+        except ValueError:
+            print("Please enter a valid number")
+        except KeyboardInterrupt:
+            print("\nCancelled.")
+            sys.exit(0)
+
+
+def do_manage_personas() -> None:
+    """Interactive persona management."""
+    config = load_config()
+
+    while True:
+        print()
+        print("========================================")
+        print("  Persona Management")
+        print("========================================")
+        print()
+        print(f"Active persona: {Colors.GREEN}{config['active_persona']}{Colors.NC}")
+        print()
+        print("Available personas:")
+        for name, persona in config["personas"].items():
+            active = " (active)" if name == config["active_persona"] else ""
+            desc = persona.get("description", "No description")
+            print(f"  - {name}{active}: {desc}")
+
+        choice = prompt_choice(
+            "What would you like to do?",
+            [
+                "Switch active persona",
+                "Create new persona",
+                "Edit persona",
+                "Delete persona",
+                "Back to main menu",
+            ],
+            default=4,
+        )
+
+        if choice == 0:  # Switch
+            personas = list(config["personas"].keys())
+            idx = prompt_choice("Select persona:", personas)
+            config["active_persona"] = personas[idx]
+            save_config(config)
+            success(f"Switched to {personas[idx]}")
+
+        elif choice == 1:  # Create
+            print()
+            name = prompt_string("Persona name (e.g., 'my-voice')")
+            if not name:
+                warn("Name cannot be empty")
+                continue
+            if name in config["personas"]:
+                warn(f"Persona '{name}' already exists")
+                continue
+
+            desc = prompt_string("Description", "Custom persona")
+            speed = prompt_float("Speed multiplier", 2.0)
+            method_idx = prompt_choice(
+                "Speed method:",
+                ["playback (chipmunk, macOS only)", "length_scale (natural pitch)"],
+            )
+            method = "playback" if method_idx == 0 else "length_scale"
+            max_chars = int(prompt_float("Max characters", 10000))
+
+            config["personas"][name] = {
+                "description": desc,
+                "voice": "en_US-hfc_male-medium",
+                "speed": speed,
+                "speed_method": method,
+                "max_chars": max_chars,
+            }
+            save_config(config)
+            success(f"Created persona '{name}'")
+
+        elif choice == 2:  # Edit
+            personas = list(config["personas"].keys())
+            idx = prompt_choice("Select persona to edit:", personas)
+            name = personas[idx]
+            persona = config["personas"][name]
+
+            print(f"\nEditing '{name}' (press Enter to keep current value)")
+            persona["description"] = prompt_string("Description", persona.get("description", ""))
+            persona["speed"] = prompt_float("Speed", persona["speed"])
+            method_idx = prompt_choice(
+                "Speed method:",
+                ["playback (chipmunk)", "length_scale (natural)"],
+                default=0 if persona["speed_method"] == "playback" else 1,
+            )
+            persona["speed_method"] = "playback" if method_idx == 0 else "length_scale"
+            persona["max_chars"] = int(prompt_float("Max chars", persona["max_chars"]))
+
+            save_config(config)
+            success(f"Updated persona '{name}'")
+
+        elif choice == 3:  # Delete
+            personas = list(config["personas"].keys())
+            if len(personas) <= 1:
+                warn("Cannot delete the last persona")
+                continue
+            idx = prompt_choice("Select persona to delete:", personas)
+            name = personas[idx]
+            if name == config["active_persona"]:
+                warn("Cannot delete the active persona. Switch to another first.")
+                continue
+
+            confirm = prompt_string(f"Type '{name}' to confirm deletion")
+            if confirm == name:
+                del config["personas"][name]
+                save_config(config)
+                success(f"Deleted persona '{name}'")
+            else:
+                info("Deletion cancelled")
+
+        elif choice == 4:  # Back
+            break
+
+
+def do_interactive() -> None:
+    """Interactive main menu."""
+    print()
+    print("========================================")
+    print(f"  Claude Code TTS - Interactive Setup")
+    print("========================================")
+
+    # Check current state
+    is_installed = (HOOKS_DIR / "speak-response.sh").exists()
+    has_config = TTS_CONFIG_FILE.exists()
+
+    if is_installed:
+        print(f"\n{Colors.GREEN}TTS is installed{Colors.NC}")
+        if has_config:
+            config = load_config()
+            print(f"Active persona: {config['active_persona']}")
+            print(f"Muted: {config['muted']}")
+    else:
+        print(f"\n{Colors.YELLOW}TTS is not installed{Colors.NC}")
+
+    options = []
+    actions = []
+
+    if not is_installed:
+        options.append("Install Claude Code TTS")
+        actions.append("install")
+    else:
+        options.append("Upgrade to latest version")
+        actions.append("upgrade")
+
+    options.append("Manage personas")
+    actions.append("personas")
+
+    if is_installed:
+        options.append("Toggle mute/unmute")
+        actions.append("mute")
+
+    options.append("Uninstall")
+    actions.append("uninstall")
+
+    options.append("Exit")
+    actions.append("exit")
+
+    choice = prompt_choice("What would you like to do?", options)
+    action = actions[choice]
+
+    if action == "install":
+        do_install(dry_run=False, upgrade=False)
+    elif action == "upgrade":
+        do_install(dry_run=False, upgrade=True)
+    elif action == "personas":
+        do_manage_personas()
+        do_interactive()  # Return to main menu
+    elif action == "mute":
+        config = load_config()
+        config["muted"] = not config["muted"]
+        save_config(config)
+        state = "muted" if config["muted"] else "unmuted"
+        success(f"TTS is now {state}")
+        do_interactive()  # Return to main menu
+    elif action == "uninstall":
+        confirm = prompt_string("Type 'uninstall' to confirm")
+        if confirm == "uninstall":
+            do_uninstall(dry_run=False)
+        else:
+            info("Uninstall cancelled")
+            do_interactive()
+    elif action == "exit":
+        print("\nGoodbye!")
+        sys.exit(0)
+
+
 # --- Main ---
 
 def main() -> None:
@@ -781,11 +1062,17 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python install.py              # Install TTS
-  python install.py --dry-run    # Preview installation
+  python install.py              # Interactive menu
+  python install.py --install    # Direct install
   python install.py --upgrade    # Update to latest version
+  python install.py --personas   # Manage personas
   python install.py --uninstall  # Remove TTS
         """,
+    )
+    parser.add_argument(
+        "--install",
+        action="store_true",
+        help="Install TTS (non-interactive)",
     )
     parser.add_argument(
         "--dry-run",
@@ -798,6 +1085,11 @@ Examples:
         help="Upgrade existing installation (updates hook and commands, preserves settings)",
     )
     parser.add_argument(
+        "--personas",
+        action="store_true",
+        help="Manage personas interactively",
+    )
+    parser.add_argument(
         "--uninstall",
         action="store_true",
         help="Remove Claude Code TTS completely",
@@ -805,10 +1097,20 @@ Examples:
 
     args = parser.parse_args()
 
+    # If any specific action is requested, do it directly
     if args.uninstall:
         do_uninstall(dry_run=args.dry_run)
+    elif args.upgrade:
+        do_install(dry_run=args.dry_run, upgrade=True)
+    elif args.install:
+        do_install(dry_run=args.dry_run, upgrade=False)
+    elif args.personas:
+        do_manage_personas()
+    elif args.dry_run:
+        do_install(dry_run=True, upgrade=False)
     else:
-        do_install(dry_run=args.dry_run, upgrade=args.upgrade)
+        # No args = interactive mode
+        do_interactive()
 
 
 if __name__ == "__main__":
