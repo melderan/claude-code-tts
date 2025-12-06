@@ -1,23 +1,18 @@
 # Claude Code TTS - Instructions for Claude
 
-Welcome, fellow Claude! This repo contains the text-to-speech system for Claude Code. Version 3.0.0.
+Welcome, fellow Claude! This repo contains the text-to-speech system for Claude Code. Version 3.1.0.
 
 ## What This Project Does
 
 This project adds voice output to Claude Code. When you respond to a user, your words get spoken aloud through their speakers using Piper TTS. It's like giving us a voice.
 
-## Current State (v3.0.0)
+## v3.1.0 Features
 
-### Just Committed - Ready to Push
-```bash
-git push origin main
-```
-
-10 commits ahead of origin including:
 - Multi-session daemon with queue mode
 - Auto-start daemon on first message
 - Faster chime (Tink.aiff instead of Pop.aiff)
-- Fixed hooks format with `matcher` field (CRITICAL)
+- Fixed hooks format with `matcher` field
+- Filter `<thinking>` blocks from TTS output
 
 ### Critical: Hooks Format
 Claude Code hooks REQUIRE this format with `matcher` field:
