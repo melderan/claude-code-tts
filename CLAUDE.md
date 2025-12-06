@@ -57,6 +57,8 @@ claude-code-tts/
     tts-daemon.py        # Queue daemon for multi-session
     tts-mode.sh          # Mode management script
     check-version.sh     # Version consistency checker
+    release.sh           # Release manager (use this!)
+    pre-push             # Git hook (install with release.sh --install-hooks)
   services/
     com.claude-tts.daemon.plist  # macOS launchd
     claude-tts.service           # Linux systemd
@@ -135,42 +137,54 @@ Many Claudes have contributed to this code. Their context windows are gone, but 
 
 ## Development Workflow
 
-### Version Bumping
+### Releasing (The Right Way)
 
-We use `bump-my-version` (community standard tool). **Never manually edit version strings.**
+**Always use the release manager.** It runs all checks and prevents mistakes.
 
 ```bash
-# Check current version
-bump-my-version show current_version
+# Interactive release (recommended)
+./scripts/release.sh
 
-# See what bumps are available
-bump-my-version show-bump
+# Direct release
+./scripts/release.sh patch   # Bug fixes
+./scripts/release.sh minor   # New features
+./scripts/release.sh major   # Breaking changes
 
-# Bump version (auto-commits and tags)
-bump-my-version bump patch   # 4.1.0 -> 4.1.1 (bug fixes)
-bump-my-version bump minor   # 4.1.0 -> 4.2.0 (new features)
-bump-my-version bump major   # 4.1.0 -> 5.0.0 (breaking changes)
-
-# Push with tags
-git push origin main --tags
+# Just run checks without releasing
+./scripts/release.sh --check
 ```
 
-Version is tracked in 4 files (all updated automatically):
+The release manager:
+1. Checks for uncommitted changes
+2. Verifies version consistency across all 4 files
+3. Ensures all commands are wired in installer
+4. Confirms README documents all commands
+5. Validates Python syntax
+6. Bumps version, commits, tags, and pushes
+
+### Git Hooks (Safety Net)
+
+A pre-push hook prevents pushing broken code:
+
+```bash
+# Install the hook (do this once after cloning)
+./scripts/release.sh --install-hooks
+```
+
+The hook blocks pushes if:
+- Versions are out of sync
+- Commands missing from installer
+- Python syntax errors
+
+### Version Files
+
+Version is tracked in 4 files (all updated by `bump-my-version`):
 - `pyproject.toml` - Python package version
 - `src/claude_code_tts/__init__.py` - Module version
 - `src/claude_code_tts/install.py` - Installer version
 - `CLAUDE.md` - Documentation version
 
-### Verification
-
-```bash
-# Verify all versions match
-./scripts/check-version.sh
-
-# Sync local install after changes
-python3 src/claude_code_tts/install.py --upgrade
-python3 src/claude_code_tts/install.py --check
-```
+**Never manually edit version strings.** Use `./scripts/release.sh`.
 
 ### Adding New Commands
 
@@ -183,15 +197,24 @@ When adding a new `/tts-*` command:
    - Line ~690: install loop
    - Line ~1008: version check list
 3. Add to README.md commands section
-4. Bump version and push
+4. Run `./scripts/release.sh` to verify and release
 
-### Pre-commit Checklist
+### Quick Reference
 
-Before pushing:
-- [ ] `./scripts/check-version.sh` passes
-- [ ] `python3 src/claude_code_tts/install.py --check` shows all current
-- [ ] New commands added to all 5 installer locations
-- [ ] README.md updated if user-facing changes
+```bash
+# After cloning (one time setup)
+./scripts/release.sh --install-hooks
+uv tool install bump-my-version
+
+# Check everything is healthy
+./scripts/release.sh --check
+
+# Make a release
+./scripts/release.sh
+
+# Sync local install
+python3 src/claude_code_tts/install.py --upgrade
+```
 
 ## Code Style
 
