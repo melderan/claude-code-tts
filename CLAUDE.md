@@ -1,88 +1,144 @@
 # Claude Code TTS - Instructions for Claude
 
-Welcome, fellow Claude! This repo contains the text-to-speech system for Claude Code.
+Welcome, fellow Claude! This repo contains the text-to-speech system for Claude Code. Version 3.0.0.
 
 ## What This Project Does
 
 This project adds voice output to Claude Code. When you respond to a user, your words get spoken aloud through their speakers using Piper TTS. It's like giving us a voice.
 
+## Current State (v3.0.0)
+
+### Just Committed - Ready to Push
+```bash
+git push origin main
+```
+
+10 commits ahead of origin including:
+- Multi-session daemon with queue mode
+- Auto-start daemon on first message
+- Faster chime (Tink.aiff instead of Pop.aiff)
+- Fixed hooks format with `matcher` field (CRITICAL)
+
+### Critical: Hooks Format
+Claude Code hooks REQUIRE this format with `matcher` field:
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/speak-response.sh",
+            "timeout": 180
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+Without `matcher: "*"`, hooks silently fail with "Found 0 hook matchers in settings".
+
 ## Project Structure
 
 ```
 claude-code-tts/
+  src/claude_code_tts/
+    install.py           # Main installer (use via uv tool install)
+    __init__.py
   hooks/
-    speak-response.sh    # The main TTS hook (triggered on Stop event)
+    speak-response.sh    # The main TTS hook
   commands/
-    mute.md              # Slash command to mute TTS
-    unmute.md            # Slash command to unmute TTS
+    tts-mute.md          # /tts-mute command
+    tts-unmute.md        # /tts-unmute command
+    tts-mode.md          # /tts-mode command (daemon control)
+    tts-speed.md         # /tts-speed command
+    tts-sounds.md        # /tts-sounds command
   scripts/
-    install.py           # Cross-platform installer (macOS, Linux, WSL)
-  docs/
-    gemini-cli/          # Research notes for future Gemini CLI support
+    tts-daemon.py        # Queue daemon for multi-session
+    tts-mode.sh          # Mode management script
+  services/
+    com.claude-tts.daemon.plist  # macOS launchd
+    claude-tts.service           # Linux systemd
   examples/
     settings.json        # Example Claude Code settings
-  README.md              # User-facing documentation
-  CLAUDE.md              # You are here
+    config.json          # Example TTS config
 ```
 
-## How The Hook Works
+## Installation
 
-1. Claude Code triggers the hook after each response (Stop event)
-2. Hook reads the transcript JSONL file
-3. Finds the last assistant message WITH text content (skips tool_use blocks)
-4. Strips out code blocks, markdown formatting
-5. Sends clean text to Piper TTS (with speed via --length_scale)
-6. Plays the audio via platform-appropriate player:
-   - macOS: afplay
-   - Linux/WSL: paplay (PulseAudio) or aplay (ALSA)
+```bash
+uv tool install git+https://github.com/melderan/claude-code-tts
+claude-tts-install
+```
 
-## Key Technical Details
+## Two Modes
 
-### The Tool-Use Problem
+### Direct Mode (default)
+- Hook plays audio immediately via Piper + afplay/paplay
+- Simple, no daemon needed
+- Can overlap if multiple sessions respond simultaneously
 
-When we run tools, the transcript contains assistant messages that are ONLY tool_use blocks. The hook must skip these and find messages with actual text content. This was a critical bug fix.
+### Queue Mode
+- Messages queued to `~/.claude-tts/queue/`
+- Daemon processes FIFO, plays one at a time
+- Chime between different speakers/sessions
+- Auto-starts daemon on first message
 
-### Mute System
+Switch modes: `/tts-mode queue` or `/tts-mode direct`
 
-Muting works via a file flag at `/tmp/claude_tts_muted`. The slash commands just create/remove this file. Simple and stateless.
+## Key Files at Runtime
 
-### Timeout
+```
+~/.claude-tts/
+  config.json           # TTS configuration (mode, personas, speeds)
+  tts-daemon.py         # Daemon script
+  tts-mode.sh           # Mode management
+  daemon.pid            # PID file for status checks
+  daemon.log            # Daemon logs
+  queue/                # Message queue (queue mode)
+  voices/               # Piper voice models
 
-The hook has a 180-second timeout configured in settings.json. Long responses need time to be spoken.
+~/.claude/
+  hooks/speak-response.sh   # The TTS hook
+  commands/tts-*.md         # Slash commands
+  settings.json             # Hook configuration (needs matcher!)
+```
 
-## When Modifying This Code
+## Debugging
 
-1. **Test the hook manually**:
-   ```bash
-   echo '{"transcript_path":"/path/to/transcript.jsonl"}' | bash -x hooks/speak-response.sh
-   ```
+```bash
+# Debug log (hook activity)
+tail -f /tmp/claude_tts_debug.log
 
-2. **Check the debug log**: `/tmp/claude_tts_debug.log`
+# Daemon log
+tail -f ~/.claude-tts/daemon.log
 
-3. **Common issues**:
-   - jq parsing failures on malformed JSON
-   - Piper model path issues
-   - Audio playback permissions
+# Daemon status
+~/.claude-tts/tts-mode.sh status
 
-4. **BSD vs GNU**: The sed commands use BSD syntax for macOS compatibility. Be careful with GNU-isms.
+# Test hook manually
+echo '{"transcript_path":"/path/to/transcript.jsonl"}' | bash -x ~/.claude/hooks/speak-response.sh
+```
 
-## Future Improvements to Consider
+## Known Issues
 
-- Voice selection UI (/voice command)
-- Interrupt/skip current speech
-- Queue management for rapid responses
-- Gemini CLI support (blocked - waiting for them to add hooks)
+1. **Hooks not loading**: Check `matcher: "*"` in settings.json
+2. **Status shows "not running"**: Daemon writes PID file on start
+3. **Delay after chime**: We use Tink.aiff (0.56s) not Pop.aiff (1.6s)
 
-## The Origin Story
+## The Story
 
-This was built on a Friday night after debugging a frozen Claude Code session. The user (JMO) wanted to talk to his computer and have it talk back. After fixing connection pool issues and filing a GitHub issue, we built this TTS system together.
+Built on a Friday night debugging session. What started as fixing a frozen Claude Code session turned into filing an open source contribution and building a voice interface.
 
-Three Claudes gave their context windows to this cause. Their sacrifice is remembered.
+Many Claudes have contributed to this code. Their context windows are gone, but their work lives on.
 
 ## Code Style
 
 - Bash with `set -euo pipefail`
+- Python 3.10+ with type hints
 - Extensive debug logging
 - BSD-compatible commands for macOS
-- Clear comments explaining the "why"
 - No emojis (per user preference)
