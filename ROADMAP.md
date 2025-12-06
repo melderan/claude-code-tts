@@ -1,8 +1,8 @@
 # Claude Code TTS - Roadmap
 
-Ideas captured from the late night session that started it all.
+Ideas captured from the late night sessions that started it all.
 
-## Current State (v1.1)
+## Current State (v1.1.0)
 
 - Piper TTS with configurable voice models
 - Stop hook triggers after each response
@@ -10,9 +10,12 @@ Ideas captured from the late night session that started it all.
 - /mute and /unmute slash commands (session-aware)
 - /persona command for switching voice configurations
 - Session-local settings (each Claude window can have own persona/mute state)
-- Persona system with speed, voice, and speed_method configs
+- Persona system with speed, voice, speed_method, and ai_type configs
 - Cross-platform: macOS (afplay), Linux (paplay/aplay), WSL 2 (WSLg)
 - Python installer with interactive mode, persona management, pre-flight checks
+- Voice downloader fetches models from Hugging Face
+- Version tracking with --version and --check flags
+- 22 unit tests, uv compatible
 
 ## Completed
 
@@ -38,17 +41,63 @@ The /persona command handles this:
 - Switch personas per-session
 - Configure via installer or config file
 
-## Future Ideas
-
-### Voice Model Browser/Downloader
+### Voice Model Browser/Downloader (DONE)
 
 Download new Piper voices directly from Hugging Face.
 
-- Browse available voices (dozens of languages/styles)
-- Preview voice samples
+- Curated list of 14 quality English voices (male/female, US/GB)
+- Filter by gender or installation status
 - Download .onnx + .onnx.json to ~/.local/share/piper-voices/
-- Auto-register as personas in config
-- Source: huggingface.co/rhasspy/piper-voices
+- Auto-register as personas with ai_type (claude/gemini)
+- Bootstrap mode: --bootstrap config.json
+
+### Version Tracking (DONE)
+
+- --version shows repo and installed versions
+- --check compares file hashes, shows update status
+- Version recorded in config on install/upgrade
+
+## Future Ideas
+
+### Voice Preview
+
+Test voices before downloading.
+
+- `python install.py --preview amy` plays sample audio
+- Fetch sample clips from Hugging Face or generate on-the-fly
+- Add preview option to interactive voice downloader
+
+### /speed Command
+
+Change speech speed on the fly without editing config.
+
+- `/speed 1.5` - slow down
+- `/speed 2.5` - speed up
+- `/speed reset` - back to persona default
+- Session-local, doesn't persist
+
+### /voices Command
+
+List installed voices and switch without leaving Claude.
+
+- `/voices` - show installed voice models
+- `/voices amy` - switch to amy voice
+- Simpler than /persona for quick voice changes
+
+### Subagent TTS Support
+
+Make subagents speak too (currently only main agent).
+
+**Technical Notes:**
+- `SubagentStop` hook fires when subagents complete (separate from `Stop`)
+- Subagent transcripts stored at `agent-{agentId}.jsonl`
+- LIMITATION: SubagentStop doesn't identify WHICH subagent finished (GitHub #7881)
+- Can enable subagent TTS, but can't easily give each a unique voice
+
+Implementation:
+- Add SubagentStop hook to speak-response.sh
+- Option to enable/disable subagent speech in config
+- Default: off (to avoid noise from parallel agents)
 
 ### Multi-Agent Voice Pipeline
 
@@ -60,11 +109,52 @@ When running multiple subagents in parallel, queue their responses.
 - Prevents agents talking over each other
 - Kafka-style consumer pattern but simpler
 
+**Blocked by:** SubagentStop not identifying which agent finished (#7881)
+
+### Subagent Voice Mapping
+
+Give different voices to different subagent types automatically.
+
+- code-reviewer agent: deeper, authoritative voice
+- test-runner agent: faster, energetic voice
+- explore agent: thoughtful, measured voice
+
+**Blocked by:** Can't identify subagent type from SubagentStop hook (#7881)
+
 ### Interrupt/Skip Current Speech
 
-- Keystroke to stop current playback
+Keystroke to stop current playback mid-sentence.
+
+- Global hotkey or terminal escape sequence
 - Useful for long responses
+- `/skip` command as alternative
 - Maybe integrate with mute system
+
+### Notification Sounds
+
+Different audio cues for different events.
+
+- Chime when Claude starts thinking
+- Different sound for errors vs success
+- Subtle audio feedback without full TTS
+- Configurable per event type
+
+### Random Voice Mode (Chaos Mode)
+
+Every response is a different voice.
+
+- `/chaos on` - enable random voice per response
+- `/chaos off` - back to normal
+- Fun for demos, probably annoying for real work
+- Could weight by ai_type (Claude voices only)
+
+### Accent Roulette
+
+Randomly pick accents (British, Scottish, American).
+
+- Subset of chaos mode
+- Only varies accent, not completely random voice
+- `/accent random` to enable
 
 ### Gemini CLI Support
 
