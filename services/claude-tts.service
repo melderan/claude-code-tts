@@ -1,0 +1,21 @@
+[Unit]
+Description=Claude Code TTS Daemon
+Documentation=https://github.com/melderan/claude-code-tts
+After=network.target sound.target
+
+[Service]
+Type=simple
+ExecStart=%h/.claude-tts/tts-daemon.py --foreground
+Restart=on-failure
+RestartSec=5
+
+# Environment
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin
+Environment=HOME=%h
+
+# Logging
+StandardOutput=append:%h/.claude-tts/daemon.stdout.log
+StandardError=append:%h/.claude-tts/daemon.stderr.log
+
+[Install]
+WantedBy=default.target
