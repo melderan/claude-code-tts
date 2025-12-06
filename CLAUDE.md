@@ -16,7 +16,9 @@ claude-code-tts/
     mute.md              # Slash command to mute TTS
     unmute.md            # Slash command to unmute TTS
   scripts/
-    install.sh           # macOS installer script
+    install.py           # Cross-platform installer (macOS, Linux, WSL)
+  docs/
+    gemini-cli/          # Research notes for future Gemini CLI support
   examples/
     settings.json        # Example Claude Code settings
   README.md              # User-facing documentation
@@ -29,8 +31,10 @@ claude-code-tts/
 2. Hook reads the transcript JSONL file
 3. Finds the last assistant message WITH text content (skips tool_use blocks)
 4. Strips out code blocks, markdown formatting
-5. Sends clean text to Piper TTS
-6. Plays the audio via afplay (macOS)
+5. Sends clean text to Piper TTS (with speed via --length_scale)
+6. Plays the audio via platform-appropriate player:
+   - macOS: afplay
+   - Linux/WSL: paplay (PulseAudio) or aplay (ALSA)
 
 ## Key Technical Details
 
@@ -64,11 +68,10 @@ The hook has a 180-second timeout configured in settings.json. Long responses ne
 
 ## Future Improvements to Consider
 
-- Linux support (paplay/aplay instead of afplay)
-- Voice selection UI
-- Speed adjustment via slash command
+- Voice selection UI (/voice command)
 - Interrupt/skip current speech
 - Queue management for rapid responses
+- Gemini CLI support (blocked - waiting for them to add hooks)
 
 ## The Origin Story
 

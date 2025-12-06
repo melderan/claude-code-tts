@@ -2,6 +2,11 @@
 """
 install.py - Install/Uninstall Claude Code TTS
 
+Supports:
+    - macOS (via Homebrew)
+    - Linux (via apt/dnf)
+    - WSL 2 on Windows (via apt, audio through WSLg)
+
 Usage:
     python install.py              Install TTS
     python install.py --dry-run    Show what would be done
@@ -19,6 +24,43 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+
+# --- Platform Detection ---
+
+def detect_platform() -> str:
+    """Detect the current platform: macos, linux, or wsl."""
+    system = platform.system()
+    if system == "Darwin":
+        return "macos"
+    elif system == "Linux":
+        # Check for WSL
+        try:
+            with open("/proc/version", "r") as f:
+                if "microsoft" in f.read().lower():
+                    return "wsl"
+        except (FileNotFoundError, PermissionError):
+            pass
+        return "linux"
+    else:
+        return "unsupported"
+
+
+def detect_package_manager() -> Optional[str]:
+    """Detect available package manager."""
+    if shutil.which("brew"):
+        return "brew"
+    elif shutil.which("apt"):
+        return "apt"
+    elif shutil.which("dnf"):
+        return "dnf"
+    elif shutil.which("pacman"):
+        return "pacman"
+    return None
+
+
+PLATFORM = detect_platform()
+PKG_MANAGER = detect_package_manager()
 
 # --- Configuration ---
 
@@ -178,18 +220,22 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
     print()
 
     # Check platform
-    if platform.system() != "Darwin":
-        issues.append("This installer is for macOS only")
-        preflight(f"{Colors.RED}FAIL{Colors.NC} macOS required")
-    else:
+    if PLATFORM == "unsupported":
+        issues.append(f"Unsupported platform: {platform.system()}")
+        preflight(f"{Colors.RED}FAIL{Colors.NC} Unsupported platform")
+    elif PLATFORM == "macos":
         preflight(f"{Colors.GREEN}PASS{Colors.NC} macOS detected")
+    elif PLATFORM == "wsl":
+        preflight(f"{Colors.GREEN}PASS{Colors.NC} WSL 2 detected (Windows Subsystem for Linux)")
+    elif PLATFORM == "linux":
+        preflight(f"{Colors.GREEN}PASS{Colors.NC} Linux detected")
 
-    # Check Homebrew
-    if not command_exists("brew"):
-        issues.append("Homebrew is not installed")
-        preflight(f"{Colors.RED}FAIL{Colors.NC} Homebrew not found")
+    # Check package manager
+    if PKG_MANAGER is None:
+        issues.append("No supported package manager found (need brew, apt, dnf, or pacman)")
+        preflight(f"{Colors.RED}FAIL{Colors.NC} No package manager found")
     else:
-        preflight(f"{Colors.GREEN}PASS{Colors.NC} Homebrew found")
+        preflight(f"{Colors.GREEN}PASS{Colors.NC} Package manager: {PKG_MANAGER}")
 
     # Check curl (needed for downloads)
     if not command_exists("curl"):
@@ -236,6 +282,16 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
             issues.append(f"settings.json is invalid JSON: {e}")
             preflight(f"{Colors.RED}FAIL{Colors.NC} settings.json is corrupt")
 
+    # WSL-specific checks
+    if PLATFORM == "wsl":
+        # Check for WSLg PulseAudio socket
+        wslg_pulse = Path("/mnt/wslg/PulseServer")
+        if wslg_pulse.exists():
+            preflight(f"{Colors.GREEN}PASS{Colors.NC} WSLg PulseAudio socket found")
+        else:
+            preflight(f"{Colors.YELLOW}WARN{Colors.NC} WSLg PulseAudio not found - audio may not work")
+            preflight(f"{Colors.YELLOW}     {Colors.NC} Make sure you're on Windows 11 with WSLg enabled")
+
     # Check optional dependencies (warnings only)
     if not command_exists("jq"):
         preflight(f"{Colors.YELLOW}INFO{Colors.NC} jq not found (will be installed)")
@@ -243,6 +299,18 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
         preflight(f"{Colors.YELLOW}INFO{Colors.NC} pipx not found (will be installed)")
     if not command_exists("piper"):
         preflight(f"{Colors.YELLOW}INFO{Colors.NC} piper not found (will be installed)")
+
+    # Check for audio player
+    if PLATFORM == "macos":
+        if command_exists("afplay"):
+            preflight(f"{Colors.GREEN}PASS{Colors.NC} afplay found (audio player)")
+    else:
+        if command_exists("paplay"):
+            preflight(f"{Colors.GREEN}PASS{Colors.NC} paplay found (PulseAudio player)")
+        elif command_exists("aplay"):
+            preflight(f"{Colors.YELLOW}INFO{Colors.NC} aplay found (ALSA player, paplay preferred)")
+        else:
+            preflight(f"{Colors.YELLOW}INFO{Colors.NC} No audio player found (will install pulseaudio-utils)")
 
     print()
 
@@ -359,12 +427,85 @@ def do_uninstall(dry_run: bool = False) -> None:
     print()
 
 
+# --- Package Installation Helpers ---
+
+def install_package(package: str, dry_run: bool = False) -> None:
+    """Install a package using the detected package manager."""
+    if dry_run:
+        dry(f"{PKG_MANAGER} install {package}")
+        return
+
+    info(f"Installing {package}...")
+
+    if PKG_MANAGER == "brew":
+        run_cmd(["brew", "install", package])
+    elif PKG_MANAGER == "apt":
+        # Check if we need sudo
+        if os.geteuid() != 0:
+            run_cmd(["sudo", "apt", "install", "-y", package])
+        else:
+            run_cmd(["apt", "install", "-y", package])
+    elif PKG_MANAGER == "dnf":
+        if os.geteuid() != 0:
+            run_cmd(["sudo", "dnf", "install", "-y", package])
+        else:
+            run_cmd(["dnf", "install", "-y", package])
+    elif PKG_MANAGER == "pacman":
+        if os.geteuid() != 0:
+            run_cmd(["sudo", "pacman", "-S", "--noconfirm", package])
+        else:
+            run_cmd(["pacman", "-S", "--noconfirm", package])
+
+
+def install_pipx(dry_run: bool = False) -> None:
+    """Install pipx using the appropriate method for the platform."""
+    if command_exists("pipx"):
+        return
+
+    if dry_run:
+        if PKG_MANAGER == "brew":
+            dry("brew install pipx && pipx ensurepath")
+        elif PKG_MANAGER == "apt":
+            dry("apt install pipx && pipx ensurepath")
+        else:
+            dry(f"{PKG_MANAGER} install pipx && pipx ensurepath")
+        return
+
+    info("Installing pipx (for Piper installation)...")
+
+    if PKG_MANAGER == "brew":
+        run_cmd(["brew", "install", "pipx"])
+    elif PKG_MANAGER == "apt":
+        if os.geteuid() != 0:
+            run_cmd(["sudo", "apt", "install", "-y", "pipx"])
+        else:
+            run_cmd(["apt", "install", "-y", "pipx"])
+    elif PKG_MANAGER == "dnf":
+        if os.geteuid() != 0:
+            run_cmd(["sudo", "dnf", "install", "-y", "pipx"])
+        else:
+            run_cmd(["dnf", "install", "-y", "pipx"])
+    elif PKG_MANAGER == "pacman":
+        if os.geteuid() != 0:
+            run_cmd(["sudo", "pacman", "-S", "--noconfirm", "python-pipx"])
+        else:
+            run_cmd(["pacman", "-S", "--noconfirm", "python-pipx"])
+
+    # Ensure pipx is in PATH
+    run_cmd(["pipx", "ensurepath"], check=False)
+
+
 # --- Install ---
 
-def do_install(dry_run: bool = False) -> None:
+def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
+    platform_name = {"macos": "macOS", "linux": "Linux", "wsl": "WSL 2"}.get(PLATFORM, PLATFORM)
+
     print()
     print("========================================")
-    print("  Claude Code TTS Installer (macOS)")
+    if upgrade:
+        print(f"  Claude Code TTS Upgrader ({platform_name})")
+    else:
+        print(f"  Claude Code TTS Installer ({platform_name})")
     print("========================================")
     print()
 
@@ -410,23 +551,24 @@ def do_install(dry_run: bool = False) -> None:
     print()
     info("Checking dependencies...")
 
+    # Install jq
     if not command_exists("jq"):
-        if dry_run:
-            dry("brew install jq")
-        else:
-            info("Installing jq (required for JSON parsing)...")
-            run_cmd(["brew", "install", "jq"])
+        install_package("jq", dry_run=dry_run)
     success(
         f"jq {'will be installed' if dry_run and not command_exists('jq') else 'ready'}"
     )
 
-    if not command_exists("pipx"):
-        if dry_run:
-            dry("brew install pipx && pipx ensurepath")
-        else:
-            info("Installing pipx (for Piper installation)...")
-            run_cmd(["brew", "install", "pipx"])
-            run_cmd(["pipx", "ensurepath"])
+    # Install audio player on Linux/WSL
+    if PLATFORM in ("linux", "wsl") and not command_exists("paplay"):
+        pkg_name = "pulseaudio-utils" if PKG_MANAGER in ("apt", "dnf") else "pulseaudio"
+        install_package(pkg_name, dry_run=dry_run)
+    if PLATFORM in ("linux", "wsl"):
+        success(
+            f"paplay {'will be installed' if dry_run and not command_exists('paplay') else 'ready'}"
+        )
+
+    # Install pipx
+    install_pipx(dry_run=dry_run)
     success(
         f"pipx {'will be installed' if dry_run and not command_exists('pipx') else 'ready'}"
     )
@@ -550,8 +692,10 @@ def do_install(dry_run: bool = False) -> None:
         if command_exists("piper") and VOICE_FILE.exists():
             test_file = Path("/tmp/claude_tts_test.wav")
             try:
+                # Generate test audio with 2x speed (length_scale=0.5)
                 subprocess.run(
-                    ["piper", "--model", str(VOICE_FILE), "--output_file", str(test_file)],
+                    ["piper", "--model", str(VOICE_FILE), "--length_scale", "0.5",
+                     "--output_file", str(test_file)],
                     input="Hello, Claude Code TTS is now installed.",
                     text=True,
                     capture_output=True,
@@ -559,9 +703,17 @@ def do_install(dry_run: bool = False) -> None:
                 if test_file.exists():
                     success("Piper TTS is working")
                     info("Playing test audio...")
-                    subprocess.run(
-                        ["afplay", "-r", "2.0", str(test_file)], check=False
-                    )
+
+                    # Use platform-appropriate player
+                    if PLATFORM == "macos" and command_exists("afplay"):
+                        subprocess.run(["afplay", str(test_file)], check=False)
+                    elif command_exists("paplay"):
+                        subprocess.run(["paplay", str(test_file)], check=False)
+                    elif command_exists("aplay"):
+                        subprocess.run(["aplay", "-q", str(test_file)], check=False)
+                    else:
+                        warn("No audio player available for test")
+
                     test_file.unlink()
                 else:
                     warn("Could not generate test audio")
@@ -618,6 +770,7 @@ def main() -> None:
 Examples:
   python install.py              # Install TTS
   python install.py --dry-run    # Preview installation
+  python install.py --upgrade    # Update to latest version
   python install.py --uninstall  # Remove TTS
         """,
     )
@@ -625,6 +778,11 @@ Examples:
         "--dry-run",
         action="store_true",
         help="Show what would be done without making changes",
+    )
+    parser.add_argument(
+        "--upgrade",
+        action="store_true",
+        help="Upgrade existing installation (updates hook and commands, preserves settings)",
     )
     parser.add_argument(
         "--uninstall",
@@ -637,7 +795,7 @@ Examples:
     if args.uninstall:
         do_uninstall(dry_run=args.dry_run)
     else:
-        do_install(dry_run=args.dry_run)
+        do_install(dry_run=args.dry_run, upgrade=args.upgrade)
 
 
 if __name__ == "__main__":
