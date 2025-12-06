@@ -2,9 +2,14 @@
   "hooks": {
     "Stop": [
       {
-        "type": "command",
-        "command": "~/.claude/hooks/speak-response.sh",
-        "timeout": 180
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/speak-response.sh",
+            "timeout": 180
+          }
+        ]
       }
     ]
   }
