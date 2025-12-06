@@ -137,7 +137,7 @@ if [[ -f "$TTS_CONFIG_FILE" ]]; then
     [[ -n "$PERSONA_MAX_CHARS" ]] && TTS_MAX_CHARS="$PERSONA_MAX_CHARS"
 
     # Session speed override takes priority over persona
-    if [[ -n "$SESSION_SPEED" && "$SESSION_SPEED" != "null" ]]; then
+    if [[ -n "${SESSION_SPEED:-}" && "${SESSION_SPEED:-}" != "null" ]]; then
         TTS_SPEED="$SESSION_SPEED"
         debug "Using session speed override: $SESSION_SPEED"
     fi
