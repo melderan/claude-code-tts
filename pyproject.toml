@@ -1,6 +1,6 @@
 [project]
 name = "claude-code-tts"
-version = "3.0.0"
+version = "4.0.1"
 description = "Text-to-speech for Claude Code using Piper TTS"
 readme = "README.md"
 license = { text = "MIT" }
@@ -71,3 +71,35 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["claude_code_tts"]
+
+[tool.bumpversion]
+current_version = "4.0.1"
+commit = true
+tag = true
+tag_name = "v{new_version}"
+message = "chore: bump version to {new_version}"
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "src/claude_code_tts/__init__.py"
+search = '__version__ = "{current_version}"'
+replace = '__version__ = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "src/claude_code_tts/install.py"
+search = '__version__ = "{current_version}"'
+replace = '__version__ = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "CLAUDE.md"
+search = "Version {current_version}"
+replace = "Version {new_version}"
+
+[[tool.bumpversion.files]]
+filename = "CLAUDE.md"
+search = "## v{current_version} Features"
+replace = "## v{new_version} Features"
