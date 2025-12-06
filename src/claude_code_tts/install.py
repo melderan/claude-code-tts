@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 # --- Platform Detection ---
@@ -292,14 +292,15 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
         preflight(f"{Colors.GREEN}PASS{Colors.NC} curl found")
 
     # Check source files exist
-    src_hook = REPO_DIR / "hooks" / "speak-response.sh"
-    if not src_hook.exists():
-        issues.append(f"Source hook not found: {src_hook}")
-        preflight(f"{Colors.RED}FAIL{Colors.NC} Source hook missing")
-    else:
-        preflight(f"{Colors.GREEN}PASS{Colors.NC} Source hook found")
+    for hook_name in ["speak-response.sh", "play-sound.sh"]:
+        src_hook = REPO_DIR / "hooks" / hook_name
+        if not src_hook.exists():
+            issues.append(f"Source hook not found: {src_hook}")
+            preflight(f"{Colors.RED}FAIL{Colors.NC} Source {hook_name} missing")
+        else:
+            preflight(f"{Colors.GREEN}PASS{Colors.NC} Source {hook_name} found")
 
-    for cmd_name in ["mute.md", "unmute.md"]:
+    for cmd_name in ["mute.md", "unmute.md", "speed.md", "sounds.md"]:
         src_cmd = REPO_DIR / "commands" / cmd_name
         if not src_cmd.exists():
             issues.append(f"Source command not found: {src_cmd}")
@@ -390,19 +391,18 @@ def do_uninstall(dry_run: bool = False) -> None:
     if SETTINGS_FILE.exists():
         backup.backup_file(SETTINGS_FILE)
 
-    # Remove hook script
-    hook_file = HOOKS_DIR / "speak-response.sh"
-    if hook_file.exists():
-        if dry_run:
-            dry(f"rm {hook_file}")
-        else:
-            hook_file.unlink()
-        success(f"Removed hook: {hook_file}")
-    else:
-        info("Hook not found (already removed)")
+    # Remove hook scripts
+    for hook_name in ["speak-response.sh", "play-sound.sh"]:
+        hook_file = HOOKS_DIR / hook_name
+        if hook_file.exists():
+            if dry_run:
+                dry(f"rm {hook_file}")
+            else:
+                hook_file.unlink()
+            success(f"Removed hook: {hook_file}")
 
     # Remove slash commands
-    for cmd_name in ["mute.md", "unmute.md"]:
+    for cmd_name in ["mute.md", "unmute.md", "speed.md", "sounds.md"]:
         cmd_file = COMMANDS_DIR / cmd_name
         if cmd_file.exists():
             if dry_run:
@@ -578,8 +578,11 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
     files_to_backup = [
         SETTINGS_FILE,
         HOOKS_DIR / "speak-response.sh",
+        HOOKS_DIR / "play-sound.sh",
         COMMANDS_DIR / "mute.md",
         COMMANDS_DIR / "unmute.md",
+        COMMANDS_DIR / "speed.md",
+        COMMANDS_DIR / "sounds.md",
     ]
 
     backed_up_count = 0
@@ -664,28 +667,29 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
         COMMANDS_DIR.mkdir(parents=True, exist_ok=True)
     success("Directories ready")
 
-    # --- Install hook script ---
+    # --- Install hook scripts ---
 
     print()
-    src_hook = REPO_DIR / "hooks" / "speak-response.sh"
-    dst_hook = HOOKS_DIR / "speak-response.sh"
-    if dry_run:
-        dry(f"cp {src_hook} -> {dst_hook}")
-    else:
-        shutil.copy(src_hook, dst_hook)
-        dst_hook.chmod(0o755)
-    success(f"Hook: {dst_hook}")
+    for hook_name in ["speak-response.sh", "play-sound.sh"]:
+        src_hook = REPO_DIR / "hooks" / hook_name
+        dst_hook = HOOKS_DIR / hook_name
+        if dry_run:
+            dry(f"cp {src_hook} -> {dst_hook}")
+        else:
+            shutil.copy(src_hook, dst_hook)
+            dst_hook.chmod(0o755)
+    success(f"Hooks: speak-response.sh, play-sound.sh")
 
     # --- Install slash commands ---
 
-    for cmd_name in ["mute.md", "unmute.md"]:
+    for cmd_name in ["mute.md", "unmute.md", "speed.md", "sounds.md"]:
         src_cmd = REPO_DIR / "commands" / cmd_name
         dst_cmd = COMMANDS_DIR / cmd_name
         if dry_run:
             dry(f"cp {src_cmd} -> {dst_cmd}")
         else:
             shutil.copy(src_cmd, dst_cmd)
-    success("Commands: /mute, /unmute")
+    success("Commands: /mute, /unmute, /speed, /sounds")
 
     # --- Configure settings.json ---
 
@@ -834,6 +838,17 @@ DEFAULT_CONFIG = {
     "version": 1,
     "active_persona": "claude-prime",
     "muted": False,
+    "sounds": {
+        "enabled": False,
+        "volume": 0.5,
+        "events": {
+            "thinking": None,
+            "ready": None,
+            "error": "alert",
+            "muted": "beep",
+            "unmuted": "beep",
+        },
+    },
     "personas": {
         "claude-prime": {
             "description": "The original Claude voice - fast and chipmunky",
@@ -911,8 +926,11 @@ def check_for_updates() -> dict:
     # Files to check
     files_to_check = [
         (HOOKS_DIR / "speak-response.sh", REPO_DIR / "hooks" / "speak-response.sh"),
+        (HOOKS_DIR / "play-sound.sh", REPO_DIR / "hooks" / "play-sound.sh"),
         (COMMANDS_DIR / "mute.md", REPO_DIR / "commands" / "mute.md"),
         (COMMANDS_DIR / "unmute.md", REPO_DIR / "commands" / "unmute.md"),
+        (COMMANDS_DIR / "speed.md", REPO_DIR / "commands" / "speed.md"),
+        (COMMANDS_DIR / "sounds.md", REPO_DIR / "commands" / "sounds.md"),
     ]
 
     for installed, repo in files_to_check:

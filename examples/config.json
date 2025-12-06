@@ -2,6 +2,17 @@
   "version": 1,
   "active_persona": "claude-prime",
   "muted": false,
+  "sounds": {
+    "enabled": false,
+    "volume": 0.5,
+    "events": {
+      "thinking": null,
+      "ready": null,
+      "error": "alert",
+      "muted": "beep",
+      "unmuted": "beep"
+    }
+  },
   "personas": {
     "claude-prime": {
       "description": "The original Claude voice - fast and chipmunky",

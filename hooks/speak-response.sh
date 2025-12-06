@@ -109,7 +109,10 @@ if [[ -f "$TTS_CONFIG_FILE" ]]; then
                 ACTIVE_PERSONA="$SESSION_PERSONA"
             fi
 
-            debug "Session overrides - muted:$CONFIG_MUTED persona:$ACTIVE_PERSONA"
+            # Session-specific speed override
+            SESSION_SPEED=$(jq -r ".sessions[\"$TTS_SESSION\"].speed // empty" "$TTS_CONFIG_FILE" 2>/dev/null)
+
+            debug "Session overrides - muted:$CONFIG_MUTED persona:$ACTIVE_PERSONA speed:${SESSION_SPEED:-default}"
         else
             debug "Session '$TTS_SESSION' not in config, using global settings"
         fi
@@ -132,6 +135,12 @@ if [[ -f "$TTS_CONFIG_FILE" ]]; then
     [[ -n "$PERSONA_SPEED" ]] && TTS_SPEED="$PERSONA_SPEED"
     [[ -n "$PERSONA_SPEED_METHOD" ]] && TTS_SPEED_METHOD="$PERSONA_SPEED_METHOD"
     [[ -n "$PERSONA_MAX_CHARS" ]] && TTS_MAX_CHARS="$PERSONA_MAX_CHARS"
+
+    # Session speed override takes priority over persona
+    if [[ -n "$SESSION_SPEED" && "$SESSION_SPEED" != "null" ]]; then
+        TTS_SPEED="$SESSION_SPEED"
+        debug "Using session speed override: $SESSION_SPEED"
+    fi
 
     # Voice needs path expansion
     if [[ -n "$PERSONA_VOICE" ]]; then
