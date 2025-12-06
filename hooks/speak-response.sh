@@ -5,6 +5,11 @@
 # Reads Claude's responses aloud using Piper TTS (with macOS 'say' fallback).
 # Designed to be triggered as a Claude Code "Stop" hook.
 #
+# PLATFORMS:
+#   - macOS: Uses afplay for audio playback
+#   - Linux: Uses paplay (PulseAudio) or aplay (ALSA)
+#   - WSL 2: Uses paplay via WSLg's PulseAudio server
+#
 # CONFIGURATION (environment variables):
 #   CLAUDE_TTS_ENABLED=1              Enable/disable TTS (default: 1)
 #   CLAUDE_TTS_SPEED=2.0              Playback speed multiplier (default: 2.0)
@@ -138,23 +143,45 @@ fi
 SLOT=$(( $(date +%s) % 5 ))
 TEMP_FILE="${TTS_TEMP_DIR}/claude_tts_${SLOT}.wav"
 
+# --- Detect platform ---
+PLATFORM="unknown"
+if [[ "$(uname)" == "Darwin" ]]; then
+    PLATFORM="macos"
+elif [[ -f /proc/version ]] && grep -qi microsoft /proc/version 2>/dev/null; then
+    PLATFORM="wsl"
+elif [[ "$(uname)" == "Linux" ]]; then
+    PLATFORM="linux"
+fi
+debug "Detected platform: $PLATFORM"
+
 # --- Generate and play audio ---
 debug "Final text (${#CLIFF_NOTES} chars): ${CLIFF_NOTES:0:100}..."
 
 if command -v piper &>/dev/null; then
     debug "Using piper for TTS"
-    echo "$CLIFF_NOTES" | piper --model "$TTS_VOICE" --output_file "$TEMP_FILE" 2>/dev/null
+
+    # Convert TTS_SPEED to Piper's length_scale (inverse relationship)
+    # TTS_SPEED=2.0 -> length_scale=0.5 (faster)
+    # TTS_SPEED=1.0 -> length_scale=1.0 (normal)
+    LENGTH_SCALE=$(awk "BEGIN {printf \"%.2f\", 1.0 / $TTS_SPEED}")
+    debug "Speed $TTS_SPEED -> length_scale $LENGTH_SCALE"
+
+    echo "$CLIFF_NOTES" | piper --model "$TTS_VOICE" --length_scale "$LENGTH_SCALE" --output_file "$TEMP_FILE" 2>/dev/null
+
     if [[ -f "$TEMP_FILE" ]]; then
         debug "Playing audio: $TEMP_FILE"
-        # macOS: afplay with rate adjustment
-        # Linux: would use aplay or paplay
+        # Speed is already baked into the audio via length_scale, so just play it
         if command -v afplay &>/dev/null; then
-            afplay -r "$TTS_SPEED" "$TEMP_FILE" 2>/dev/null &
+            # macOS
+            afplay "$TEMP_FILE" 2>/dev/null &
         elif command -v paplay &>/dev/null; then
-            # PulseAudio (Linux) - note: no speed adjustment available
+            # PulseAudio (Linux native, WSL 2 via WSLg)
             paplay "$TEMP_FILE" 2>/dev/null &
         elif command -v aplay &>/dev/null; then
-            aplay "$TEMP_FILE" 2>/dev/null &
+            # ALSA fallback
+            aplay -q "$TEMP_FILE" 2>/dev/null &
+        else
+            debug "ERROR: No audio player found (need afplay, paplay, or aplay)"
         fi
     else
         debug "ERROR: Failed to generate audio file"
@@ -162,10 +189,11 @@ if command -v piper &>/dev/null; then
 else
     # Fallback to macOS 'say' command (rate in words per minute, ~200 is normal)
     if command -v say &>/dev/null; then
-        RATE=$(echo "$TTS_SPEED * 200" | bc | cut -d'.' -f1)
+        RATE=$(awk "BEGIN {printf \"%.0f\", $TTS_SPEED * 200}")
+        debug "Using macOS say with rate $RATE"
         say -r "$RATE" "$CLIFF_NOTES" &
     else
-        debug "ERROR: No TTS engine available (piper or say)"
+        debug "ERROR: No TTS engine available (need piper or say)"
     fi
 fi
 
