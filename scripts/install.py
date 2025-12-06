@@ -752,7 +752,9 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
 
     print()
     new_hook = {
-        "hooks": [{"type": "command", "command": str(dst_hook), "timeout": 180}]
+        "type": "command",
+        "command": str(dst_hook),
+        "timeout": 180
     }
 
     if upgrade:
