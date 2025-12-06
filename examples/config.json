@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "active_persona": "claude-prime",
+  "muted": false,
+  "personas": {
+    "claude-prime": {
+      "description": "The original Claude voice - fast and chipmunky",
+      "voice": "en_US-hfc_male-medium",
+      "speed": 2.0,
+      "speed_method": "playback",
+      "max_chars": 10000
+    },
+    "claude-chill": {
+      "description": "Relaxed Claude - natural pitch, slower pace",
+      "voice": "en_US-hfc_male-medium",
+      "speed": 1.5,
+      "speed_method": "length_scale",
+      "max_chars": 10000
+    },
+    "code-reviewer": {
+      "description": "For code review agents - authoritative pace",
+      "voice": "en_US-hfc_male-medium",
+      "speed": 1.8,
+      "speed_method": "length_scale",
+      "max_chars": 5000
+    }
+  }
+}
