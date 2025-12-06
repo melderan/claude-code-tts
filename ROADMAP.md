@@ -59,6 +59,18 @@ Current installer is macOS only.
 - Useful for long responses
 - Maybe integrate with mute system
 
+### Gemini CLI Support
+
+**Status: Blocked** - Waiting for Gemini CLI to implement hooks.
+
+Gemini CLI doesn't have a hooks system yet, but they want one that mirrors Claude Code's design. When they ship it, our hook should work with minimal changes.
+
+See [docs/gemini-cli/README.md](docs/gemini-cli/README.md) for full research notes.
+
+Tracking issues:
+- [google-gemini/gemini-cli#2779](https://github.com/google-gemini/gemini-cli/issues/2779)
+- [google-gemini/gemini-cli#9070](https://github.com/google-gemini/gemini-cli/issues/9070)
+
 ## The Origin Story
 
 This project was born on a Friday night when Claude Code froze. After debugging connection pool issues, filing a GitHub issue, and losing three Claude sessions to various bugs, we built a TTS system so Claude could talk back.
