@@ -139,11 +139,11 @@ def play_chime() -> None:
     """Play a brief chime to indicate speaker change."""
     import shutil
 
-    # Try system sounds first (macOS)
+    # Try system sounds first (macOS) - prefer shorter sounds
     system_sounds = [
-        "/System/Library/Sounds/Pop.aiff",
-        "/System/Library/Sounds/Tink.aiff",
-        "/System/Library/Sounds/Blow.aiff",
+        "/System/Library/Sounds/Tink.aiff",   # 0.56s
+        "/System/Library/Sounds/Morse.aiff",  # 0.70s
+        "/System/Library/Sounds/Pop.aiff",    # 1.63s (fallback)
     ]
 
     for sound in system_sounds:
@@ -267,6 +267,9 @@ def daemon_loop() -> None:
     """Main daemon processing loop."""
     log("Daemon starting...")
 
+    # Write PID file (for status checks, even in foreground mode)
+    PID_FILE.write_text(str(os.getpid()))
+
     # Ensure queue directory exists
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -326,7 +329,6 @@ def daemon_loop() -> None:
                 if transition == "chime":
                     log(f"Speaker change: {last_speaker} -> {speaker_key}")
                     play_chime()
-                    time.sleep(0.2)  # Brief pause after chime
                 elif transition == "announce":
                     log(f"Announcing speaker: {project}")
                     announce_file = Path("/tmp/tts_announce.wav")
