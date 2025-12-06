@@ -8,21 +8,41 @@
       "voice": "en_US-hfc_male-medium",
       "speed": 2.0,
       "speed_method": "playback",
-      "max_chars": 10000
+      "max_chars": 10000,
+      "ai_type": "claude"
     },
     "claude-chill": {
       "description": "Relaxed Claude - natural pitch, slower pace",
       "voice": "en_US-hfc_male-medium",
       "speed": 1.5,
       "speed_method": "length_scale",
-      "max_chars": 10000
+      "max_chars": 10000,
+      "ai_type": "claude"
     },
     "code-reviewer": {
       "description": "For code review agents - authoritative pace",
       "voice": "en_US-hfc_male-medium",
       "speed": 1.8,
       "speed_method": "length_scale",
-      "max_chars": 5000
+      "max_chars": 5000,
+      "ai_type": "claude"
+    },
+    "gemini-default": {
+      "description": "Default Gemini voice - female, natural pace",
+      "voice": "en_US-ljspeech-high",
+      "speed": 1.8,
+      "speed_method": "length_scale",
+      "max_chars": 10000,
+      "ai_type": "gemini"
+    },
+    "gemini-amy": {
+      "description": "Amy voice for Gemini - clear and friendly",
+      "voice": "en_US-amy-medium",
+      "speed": 1.6,
+      "speed_method": "length_scale",
+      "max_chars": 10000,
+      "ai_type": "gemini"
     }
-  }
+  },
+  "sessions": {}
 }
