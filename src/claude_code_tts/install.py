@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "3.1.0"
+__version__ = "4.0.0"
 
 
 # --- Platform Detection ---
@@ -301,7 +301,7 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
         else:
             preflight(f"{Colors.GREEN}PASS{Colors.NC} Source {hook_name} found")
 
-    for cmd_name in ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md"]:
+    for cmd_name in ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md", "tts-persona.md"]:
         src_cmd = REPO_DIR / "commands" / cmd_name
         if not src_cmd.exists():
             issues.append(f"Source command not found: {src_cmd}")
@@ -403,8 +403,8 @@ def do_uninstall(dry_run: bool = False) -> None:
             success(f"Removed hook: {hook_file}")
 
     # Remove slash commands
-    for cmd_name in ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md",
-                      "mute.md", "unmute.md", "speed.md", "sounds.md"]:  # Include old names for cleanup
+    for cmd_name in ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md", "tts-persona.md",
+                      "mute.md", "unmute.md", "speed.md", "sounds.md", "persona.md"]:  # Include old names for cleanup
         cmd_file = COMMANDS_DIR / cmd_name
         if cmd_file.exists():
             if dry_run:
@@ -586,6 +586,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
         COMMANDS_DIR / "tts-speed.md",
         COMMANDS_DIR / "tts-sounds.md",
         COMMANDS_DIR / "tts-mode.md",
+        COMMANDS_DIR / "tts-persona.md",
         TTS_CONFIG_DIR / "tts-daemon.py",
     ]
 
@@ -686,14 +687,14 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
 
     # --- Install slash commands ---
 
-    for cmd_name in ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md"]:
+    for cmd_name in ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md", "tts-persona.md"]:
         src_cmd = REPO_DIR / "commands" / cmd_name
         dst_cmd = COMMANDS_DIR / cmd_name
         if dry_run:
             dry(f"cp {src_cmd} -> {dst_cmd}")
         else:
             shutil.copy(src_cmd, dst_cmd)
-    success("Commands: /tts-mute, /tts-unmute, /tts-speed, /tts-sounds, /tts-mode")
+    success("Commands: /tts-mute, /tts-unmute, /tts-speed, /tts-sounds, /tts-mode, /tts-persona")
 
     # Clean up old command names (v1.x -> v2.x migration)
     for old_cmd in ["mute.md", "unmute.md", "speed.md", "sounds.md"]:
@@ -1004,6 +1005,7 @@ def check_for_updates() -> dict:
         (COMMANDS_DIR / "tts-speed.md", REPO_DIR / "commands" / "tts-speed.md"),
         (COMMANDS_DIR / "tts-sounds.md", REPO_DIR / "commands" / "tts-sounds.md"),
         (COMMANDS_DIR / "tts-mode.md", REPO_DIR / "commands" / "tts-mode.md"),
+        (COMMANDS_DIR / "tts-persona.md", REPO_DIR / "commands" / "tts-persona.md"),
         (TTS_CONFIG_DIR / "tts-daemon.py", REPO_DIR / "scripts" / "tts-daemon.py"),
     ]
 

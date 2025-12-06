@@ -30,7 +30,7 @@ claude-tts-install
 ```bash
 git clone https://github.com/melderan/claude-code-tts.git
 cd claude-code-tts
-python3 scripts/install.py
+python3 src/claude_code_tts/install.py
 ```
 
 The installer auto-detects your platform and will:
@@ -44,10 +44,10 @@ The installer auto-detects your platform and will:
 ### Installer Options
 
 ```bash
-python3 scripts/install.py --dry-run    # Preview what will be installed
-python3 scripts/install.py --upgrade    # Update to latest version
-python3 scripts/install.py --uninstall  # Remove TTS completely
-python3 scripts/install.py --help       # Show all options
+python3 src/claude_code_tts/install.py --dry-run    # Preview what will be installed
+python3 src/claude_code_tts/install.py --upgrade    # Update to latest version
+python3 src/claude_code_tts/install.py --uninstall  # Remove TTS completely
+python3 src/claude_code_tts/install.py --help       # Show all options
 ```
 
 ## Usage
@@ -61,6 +61,7 @@ After installation, just use Claude Code normally. Every response will be spoken
 - `/tts-mode` - Manage queue mode and daemon
 - `/tts-speed` - Adjust playback speed
 - `/tts-sounds` - Configure sound effects
+- `/tts-persona` - Switch voice personas per session
 
 ### Multi-Session Mode
 
@@ -126,6 +127,7 @@ When Claude runs tools (file reads, bash commands, etc.), the transcript contain
     tts-mode.md             # /tts-mode command
     tts-speed.md            # /tts-speed command
     tts-sounds.md           # /tts-sounds command
+    tts-persona.md          # /tts-persona command
   settings.json             # Hook configuration
 
 ~/.claude-tts/

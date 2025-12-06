@@ -2,7 +2,7 @@
 
 Ideas captured from the late night sessions that started it all.
 
-## Current State (v1.1.0)
+## Current State (v3.1.0)
 
 - Piper TTS with configurable voice models
 - Stop hook triggers after each response
