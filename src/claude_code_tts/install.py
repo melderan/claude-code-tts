@@ -309,6 +309,14 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
         else:
             preflight(f"{Colors.GREEN}PASS{Colors.NC} Source {cmd_name} found")
 
+    for script_name in ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh"]:
+        src_script = REPO_DIR / "scripts" / script_name
+        if not src_script.exists():
+            issues.append(f"Source script not found: {src_script}")
+            preflight(f"{Colors.RED}FAIL{Colors.NC} Source {script_name} missing")
+        else:
+            preflight(f"{Colors.GREEN}PASS{Colors.NC} Source {script_name} found")
+
     # Check write permissions for target directories
     test_dirs = [HOME / ".claude", HOME / ".local" / "share"]
     for test_dir in test_dirs:
@@ -588,6 +596,9 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
         COMMANDS_DIR / "tts-mode.md",
         COMMANDS_DIR / "tts-persona.md",
         TTS_CONFIG_DIR / "tts-daemon.py",
+        TTS_CONFIG_DIR / "tts-mode.sh",
+        TTS_CONFIG_DIR / "tts-mute.sh",
+        TTS_CONFIG_DIR / "tts-unmute.sh",
     ]
 
     backed_up_count = 0
@@ -708,7 +719,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
 
     TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    for script_name in ["tts-daemon.py", "tts-mode.sh"]:
+    for script_name in ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh"]:
         src_script = REPO_DIR / "scripts" / script_name
         dst_script = TTS_CONFIG_DIR / script_name
         if src_script.exists():
@@ -718,7 +729,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
                 shutil.copy(src_script, dst_script)
                 dst_script.chmod(0o755)
 
-    success("Scripts: tts-daemon.py, tts-mode.sh")
+    success("Scripts: tts-daemon.py, tts-mode.sh, tts-mute.sh, tts-unmute.sh")
 
     # --- Install service files ---
 
@@ -1007,6 +1018,9 @@ def check_for_updates() -> dict:
         (COMMANDS_DIR / "tts-mode.md", REPO_DIR / "commands" / "tts-mode.md"),
         (COMMANDS_DIR / "tts-persona.md", REPO_DIR / "commands" / "tts-persona.md"),
         (TTS_CONFIG_DIR / "tts-daemon.py", REPO_DIR / "scripts" / "tts-daemon.py"),
+        (TTS_CONFIG_DIR / "tts-mode.sh", REPO_DIR / "scripts" / "tts-mode.sh"),
+        (TTS_CONFIG_DIR / "tts-mute.sh", REPO_DIR / "scripts" / "tts-mute.sh"),
+        (TTS_CONFIG_DIR / "tts-unmute.sh", REPO_DIR / "scripts" / "tts-unmute.sh"),
     ]
 
     for installed, repo in files_to_check:
