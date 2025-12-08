@@ -179,7 +179,14 @@ if [[ -f "$TTS_CONFIG_FILE" ]]; then
 
             debug "Session overrides - muted:$CONFIG_MUTED persona:$ACTIVE_PERSONA speed:${SESSION_SPEED:-default}"
         else
-            debug "Session '$TTS_SESSION' not in config, using global settings"
+            # Session not in config - check default_muted setting
+            DEFAULT_MUTED=$(jq -r '.default_muted // false' "$TTS_CONFIG_FILE" 2>/dev/null)
+            if [[ "$DEFAULT_MUTED" == "true" ]]; then
+                CONFIG_MUTED="true"
+                debug "Session '$TTS_SESSION' not in config, default_muted=true"
+            else
+                debug "Session '$TTS_SESSION' not in config, using global settings"
+            fi
         fi
     fi
 
