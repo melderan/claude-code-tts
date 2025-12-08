@@ -915,6 +915,7 @@ DEFAULT_CONFIG = {
     "mode": "direct",  # "direct" = immediate playback, "queue" = daemon handles playback
     "active_persona": "claude-prime",
     "muted": False,
+    "default_muted": True,  # New sessions are muted by default; use /tts-unmute to enable
     "queue": {
         "max_depth": 20,
         "max_age_seconds": 300,
