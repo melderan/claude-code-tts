@@ -136,13 +136,26 @@ if [[ -z "$ARG" || "$ARG" == "list" ]]; then
     echo "Effective: $effective"
 
 elif [[ "$ARG" == "reset" ]]; then
-    # Reset to global persona
+    # Reset session persona (will fall back to project or global)
     jq --arg s "$SESSION" '
         if .sessions[$s] then .sessions[$s] |= del(.persona) else . end
     ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
 
-    global_persona=$(jq -r '.active_persona // "default"' "$CONFIG_FILE")
-    echo "Reset to global persona: $global_persona"
+    # Show effective persona after reset (project > global)
+    read -r project_persona global_persona < <(
+        jq -r --arg s "$SESSION" '[
+            (.project_personas[$s] // ""),
+            (.active_persona // "default")
+        ] | @tsv' "$CONFIG_FILE"
+    )
+
+    if [[ -n "$project_persona" ]]; then
+        echo "Session persona cleared"
+        echo "Effective: $project_persona (project default)"
+    else
+        echo "Session persona cleared"
+        echo "Effective: $global_persona (global default)"
+    fi
 
 else
     # Set persona for session
