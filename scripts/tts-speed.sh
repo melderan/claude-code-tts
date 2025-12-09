@@ -13,25 +13,44 @@ set -euo pipefail
 CONFIG_FILE="$HOME/.claude-tts/config.json"
 PROJECTS_DIR="$HOME/.claude/projects"
 
-# --- Session detection (same as other scripts) ---
+# --- Session detection (must match speak-response.sh) ---
+# Claude Code creates project folders like: ~/.claude/projects/-Users-foo-bar-project/
+# The folder name is the path with / and _ replaced by -
+# We need to find the LONGEST matching project that contains our current PWD
 get_session_id() {
     if [[ -n "${CLAUDE_TTS_SESSION:-}" ]]; then
         echo "$CLAUDE_TTS_SESSION"
         return
     fi
+
+    # Convert PWD to Claude Code format: /Users/foo/_bar -> -Users-foo--bar
+    # Both / and _ are replaced with -
     local pwd_transformed
-    pwd_transformed=$(echo "$PWD" | sed 's|/|-|g')
+    pwd_transformed=$(echo "$PWD" | tr '/_' '--')
+
+    # Look for the LONGEST project folder that matches our PWD prefix
+    local best_match=""
+    local best_length=0
+
     if [[ -d "$PROJECTS_DIR" ]]; then
         for project_dir in "$PROJECTS_DIR"/*/; do
             local project_name
             project_name=$(basename "$project_dir")
             if [[ "$pwd_transformed" == "$project_name"* ]]; then
-                echo "$project_name"
-                return
+                local len=${#project_name}
+                if (( len > best_length )); then
+                    best_match="$project_name"
+                    best_length=$len
+                fi
             fi
         done
     fi
-    echo "$pwd_transformed"
+
+    if [[ -n "$best_match" ]]; then
+        echo "$best_match"
+    else
+        echo "$pwd_transformed"
+    fi
 }
 
 SESSION=$(get_session_id)
