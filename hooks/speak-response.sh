@@ -152,8 +152,8 @@ if [[ -f "$TTS_CONFIG_FILE" ]]; then
     # Single jq call to extract all config values at once (much faster than multiple calls)
     # Output format: tab-separated values for reliable parsing
     CONFIG_JSON=$(jq -r --arg s "$TTS_SESSION" '
-        # Determine effective persona (session override or global)
-        (.sessions[$s].persona // .active_persona // "default") as $persona |
+        # Determine effective persona: session > project > global
+        (.sessions[$s].persona // .project_personas[$s] // .active_persona // "default") as $persona |
         # Check if session has explicit muted setting
         (if .sessions[$s] | has("muted") then .sessions[$s].muted
          elif .muted == true then true
