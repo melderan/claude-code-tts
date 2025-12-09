@@ -63,9 +63,9 @@ fi
 ARG="${1:-}"
 
 if [[ -z "$ARG" ]]; then
-    # Show current speed - use single jq call
+    # Show current speed - use single jq call (session > project > global)
     CONFIG_DATA=$(jq -r --arg s "$SESSION" '
-        (.sessions[$s].persona // .active_persona // "default") as $persona |
+        (.sessions[$s].persona // .project_personas[$s] // .active_persona // "default") as $persona |
         [
             $persona,
             (.personas[$persona].speed // 2.0),
@@ -91,7 +91,7 @@ elif [[ "$ARG" == "reset" ]]; then
     ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
 
     persona_speed=$(jq -r --arg s "$SESSION" '
-        .personas[.sessions[$s].persona // .active_persona // "default"].speed // 2.0
+        .personas[.sessions[$s].persona // .project_personas[$s] // .active_persona // "default"].speed // 2.0
     ' "$CONFIG_FILE")
     echo "Speed reset to persona default: ${persona_speed}x"
 

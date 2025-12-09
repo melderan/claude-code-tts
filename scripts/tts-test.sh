@@ -49,8 +49,28 @@ if [[ -n "$TEST_PERSONA" ]]; then
         exit 1
     fi
 else
-    # Use current session persona or global
-    PERSONA=$(jq -r '.active_persona // "claude-prime"' "$CONFIG_FILE")
+    # Use current session persona (session > project > global)
+    # Need session ID for project_personas lookup
+    PROJECTS_DIR="$HOME/.claude/projects"
+    pwd_transformed=$(echo "$PWD" | tr '/_' '--')
+    best_match=""
+    best_length=0
+    if [[ -d "$PROJECTS_DIR" ]]; then
+        for project_dir in "$PROJECTS_DIR"/*/; do
+            project_name=$(basename "$project_dir")
+            if [[ "$pwd_transformed" == "$project_name"* ]]; then
+                len=${#project_name}
+                if (( len > best_length )); then
+                    best_match="$project_name"
+                    best_length=$len
+                fi
+            fi
+        done
+    fi
+    SESSION="${best_match:-$pwd_transformed}"
+    PERSONA=$(jq -r --arg s "$SESSION" '
+        .sessions[$s].persona // .project_personas[$s] // .active_persona // "claude-prime"
+    ' "$CONFIG_FILE")
 fi
 
 # Get persona settings
