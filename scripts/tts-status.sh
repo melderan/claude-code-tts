@@ -59,7 +59,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
 fi
 
 # Read all config in one jq call - output as tab-separated for reliable parsing
-read -r mode default_muted global_muted active_persona session_muted_set session_muted session_persona < <(
+read -r mode default_muted global_muted active_persona session_muted_set session_muted session_persona project_persona < <(
     jq -r --arg s "$SESSION" '
     [
         (.mode // "direct"),
@@ -68,7 +68,8 @@ read -r mode default_muted global_muted active_persona session_muted_set session
         (.active_persona // "default"),
         (if .sessions[$s] | has("muted") then "yes" else "no" end),
         (if .sessions[$s] | has("muted") then .sessions[$s].muted else "unset" end),
-        (.sessions[$s].persona // "unset")
+        (.sessions[$s].persona // "unset"),
+        (.project_personas[$s] // "unset")
     ] | @tsv
     ' "$CONFIG_FILE"
 )
@@ -88,9 +89,11 @@ else
     mute_source="default"
 fi
 
-# Determine effective persona
+# Determine effective persona (session > project > global)
 if [[ "$session_persona" != "unset" && -n "$session_persona" ]]; then
     effective_persona="$session_persona"
+elif [[ "$project_persona" != "unset" && -n "$project_persona" ]]; then
+    effective_persona="$project_persona"
 else
     effective_persona="$active_persona"
 fi
