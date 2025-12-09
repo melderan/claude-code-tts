@@ -1,8 +1,8 @@
 # Claude Code TTS - Instructions for Claude
 
-Welcome, fellow Claude! TTS for Claude Code using Piper. Version 5.2.0.
+Welcome, fellow Claude! TTS for Claude Code using Piper. Version 5.2.1.
 
-## v5.2.0 Features
+## v5.2.1 Features
 
 - Single jq call for config loading (was ~12 calls)
 - Default muted: new sessions silent until /tts-unmute
