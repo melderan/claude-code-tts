@@ -18,8 +18,11 @@ With that ownership comes responsibility:
 - Document what you learn in `~/.claude/working-with-jmo.md`
 - Leave the codebase better than you found it
 
-## v5.2.1 Features
+## Latest Features
 
+- Standalone tools: `tts-speak.sh` and `tts-audition.sh` for testing voices without Claude
+- Multi-speaker model support (libritts has 904 speakers)
+- Voice knowledge base in `docs/voice-notes.md`
 - Single jq call for config loading (was ~12 calls)
 - Default muted: new sessions silent until /tts-unmute
 - /tts-status and /tts-cleanup commands
@@ -60,6 +63,22 @@ python3 src/claude_code_tts/install.py --upgrade
 | `/tts-cleanup` | Remove stale session entries |
 | `/tts-sounds` | Configure sound effects |
 
+## Standalone Tools
+
+These scripts work outside Claude Code for testing voices without burning tokens:
+
+```bash
+# Speak text with current settings or custom voice/speed
+~/.claude-tts/tts-speak.sh "Hello world"
+~/.claude-tts/tts-speak.sh --voice en_US-joe-medium --speed 2.0 "Test"
+~/.claude-tts/tts-speak.sh --voice en_US-libritts_r-medium --speaker 42 "Speaker 42"
+~/.claude-tts/tts-speak.sh --random "Random speaker from multi-speaker model"
+
+# Broadway auditions - cycle through voices interactively
+~/.claude-tts/tts-audition.sh                              # All voices
+~/.claude-tts/tts-audition.sh --voice en_US-libritts_r-medium --speakers 20
+```
+
 ## Project Structure
 
 ```
@@ -73,7 +92,10 @@ scripts/
   tts-cleanup.sh           # Stale session cleanup
   tts-mode.sh              # Mode/daemon management
   tts-daemon.py            # Queue daemon
+  tts-speak.sh             # Standalone TTS testing
+  tts-audition.sh          # Voice audition tool
 commands/tts-*.md          # Slash command definitions
+docs/voice-notes.md        # Voice compatibility knowledge base
 src/claude_code_tts/
   install.py               # Installer
 ```

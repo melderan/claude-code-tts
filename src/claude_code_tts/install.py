@@ -311,7 +311,7 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
         else:
             preflight(f"{Colors.GREEN}PASS{Colors.NC} Source {cmd_name} found")
 
-    for script_name in ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh"]:
+    for script_name in ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh"]:
         src_script = REPO_DIR / "scripts" / script_name
         if not src_script.exists():
             issues.append(f"Source script not found: {src_script}")
@@ -612,6 +612,8 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
         TTS_CONFIG_DIR / "tts-cleanup.sh",
         TTS_CONFIG_DIR / "tts-random.sh",
         TTS_CONFIG_DIR / "tts-test.sh",
+        TTS_CONFIG_DIR / "tts-speak.sh",
+        TTS_CONFIG_DIR / "tts-audition.sh",
     ]
 
     backed_up_count = 0
@@ -732,7 +734,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
 
     TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    for script_name in ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh"]:
+    for script_name in ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh"]:
         src_script = REPO_DIR / "scripts" / script_name
         dst_script = TTS_CONFIG_DIR / script_name
         if src_script.exists():
@@ -1045,6 +1047,8 @@ def check_for_updates() -> dict:
         (TTS_CONFIG_DIR / "tts-cleanup.sh", REPO_DIR / "scripts" / "tts-cleanup.sh"),
         (TTS_CONFIG_DIR / "tts-random.sh", REPO_DIR / "scripts" / "tts-random.sh"),
         (TTS_CONFIG_DIR / "tts-test.sh", REPO_DIR / "scripts" / "tts-test.sh"),
+        (TTS_CONFIG_DIR / "tts-speak.sh", REPO_DIR / "scripts" / "tts-speak.sh"),
+        (TTS_CONFIG_DIR / "tts-audition.sh", REPO_DIR / "scripts" / "tts-audition.sh"),
     ]
 
     for installed, repo in files_to_check:
