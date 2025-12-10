@@ -31,8 +31,8 @@ get_session_id() {
     pwd_transformed=$(echo "$PWD" | tr '/_' '--')
 
     # Look for the LONGEST project folder that matches our PWD prefix
-    # This is critical: -Users-jwmoore would match everything, but we want
-    # the most specific match like -Users-jwmoore-vault-code-repos-myproject
+    # This is critical: -Users-alice would match everything, but we want
+    # the most specific match like -Users-alice-projects-myproject
     local best_match=""
     local best_length=0
 
