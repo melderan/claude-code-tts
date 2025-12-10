@@ -56,12 +56,16 @@ After installation, just use Claude Code normally. Every response will be spoken
 
 ### Commands
 
-- `/tts-mute` - Silence TTS temporarily
-- `/tts-unmute` - Re-enable TTS
-- `/tts-mode` - Manage queue mode and daemon
-- `/tts-speed` - Adjust playback speed
-- `/tts-sounds` - Configure sound effects
+- `/tts-mute` - Silence TTS for this session
+- `/tts-unmute` - Re-enable TTS for this session
+- `/tts-status` - Show current session status (mute, persona, mode, daemon)
+- `/tts-speed` - Adjust playback speed (0.5-4.0)
 - `/tts-persona` - Switch voice personas per session
+- `/tts-mode` - Manage queue mode and daemon
+- `/tts-sounds` - Configure sound effects
+- `/tts-cleanup` - Remove stale session entries from config
+- `/tts-random` - Generate a random persona from installed voices
+- `/tts-test` - Test TTS with a sample workflow message
 
 ### Multi-Session Mode
 
@@ -124,19 +128,28 @@ When Claude runs tools (file reads, bash commands, etc.), the transcript contain
   commands/
     tts-mute.md             # /tts-mute command
     tts-unmute.md           # /tts-unmute command
-    tts-mode.md             # /tts-mode command
+    tts-status.md           # /tts-status command
     tts-speed.md            # /tts-speed command
-    tts-sounds.md           # /tts-sounds command
     tts-persona.md          # /tts-persona command
+    tts-mode.md             # /tts-mode command
+    tts-sounds.md           # /tts-sounds command
+    tts-cleanup.md          # /tts-cleanup command
+    tts-random.md           # /tts-random command
+    tts-test.md             # /tts-test command
   settings.json             # Hook configuration
 
 ~/.claude-tts/
   config.json               # TTS configuration
   tts-daemon.py             # Queue daemon
-  tts-mode.sh               # Mode management script
-  voices/                   # Piper voice models
+  tts-*.sh                  # Command scripts
+  tts-speak.sh              # Standalone TTS testing tool
+  tts-audition.sh           # Voice audition tool
   queue/                    # Message queue (queue mode)
   services/                 # launchd/systemd service files
+
+~/.local/share/piper-voices/
+  *.onnx                    # Piper voice models
+  *.onnx.json               # Voice config files
 ```
 
 ## Debugging
