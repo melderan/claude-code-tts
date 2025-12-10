@@ -2,20 +2,24 @@
 
 Ideas captured from the late night sessions that started it all.
 
-## Current State (v3.1.0)
+## Current State (v5.2.1)
 
 - Piper TTS with configurable voice models
 - Stop hook triggers after each response
 - Smart filtering skips tool_use blocks, finds actual text
-- /mute and /unmute slash commands (session-aware)
-- /persona command for switching voice configurations
+- /tts-mute and /tts-unmute slash commands (session-aware)
+- /tts-persona command for switching voice configurations
+- /tts-speed command for runtime speed adjustment
+- /tts-status and /tts-cleanup commands
 - Session-local settings (each Claude window can have own persona/mute state)
 - Persona system with speed, voice, speed_method, and ai_type configs
+- Project personas for sticky per-repo voice defaults
+- Queue mode with daemon for parallel agent support
 - Cross-platform: macOS (afplay), Linux (paplay/aplay), WSL 2 (WSLg)
 - Python installer with interactive mode, persona management, pre-flight checks
 - Voice downloader fetches models from Hugging Face
 - Version tracking with --version and --check flags
-- 22 unit tests, uv compatible
+- Default muted: new sessions silent until /tts-unmute
 
 ## Completed
 
@@ -58,6 +62,63 @@ Download new Piper voices directly from Hugging Face.
 - Version recorded in config on install/upgrade
 
 ## Future Ideas
+
+### Standalone TTS Tools (tts-speak, tts-bench)
+
+Tools to test and explore voices without burning Claude tokens.
+
+**tts-speak.sh** - Low-level speech tool:
+- `~/.claude-tts/tts-speak.sh "Hello world"` - speak with current settings
+- `~/.claude-tts/tts-speak.sh --voice en_US-joe-medium --speed 2.0 "Hello"` - specify voice/speed
+- Works completely independently of Claude Code
+
+**tts-bench.sh** - Voice comparison tool:
+- Run same text through multiple voice/speed/method combinations
+- Play back-to-back for easy comparison
+- Output timing and quality metrics
+- Help find optimal settings for each voice
+
+### Persona Builder TUI (tts-builder)
+
+Interactive terminal UI for creating personas without Claude.
+
+- Browse available voices with arrow keys
+- Adjust speed in real-time, hear changes instantly
+- Toggle between playback/length_scale methods
+- Type custom test phrases
+- Save as named persona when satisfied
+- Built with gum/fzf or Python curses
+
+### /tts-explore Command
+
+Interactive voice exploration mode within Claude Code.
+
+- List voices and let user pick (or "surprise me")
+- Set temporarily without touching config
+- Speak sample lines for evaluation
+- User can say "faster", "slower", "try length_scale", "next voice"
+- "keep it" saves as named persona
+- Natural conversation-driven voice tuning
+
+### /tts-discover Command
+
+Auto-suggest personas based on repository context.
+
+- Reads CLAUDE.md, README, package.json, pyproject.toml
+- Understands project vibe (infrastructure, web app, CLI tool, etc.)
+- Suggests appropriate voice/speed/method combination
+- Feeds directly into /tts-explore for refinement
+- Example: K8s operator gets steady, authoritative voice
+
+### Hybrid Speed Method
+
+Combine length_scale and playback for best of both worlds.
+
+- Generate with moderate length_scale (e.g., 1.5x) to keep natural pitch
+- Also apply playback speedup (e.g., 1.3x) for combined ~2x speed
+- New config option: `"speed_method": "hybrid"`
+- Separate controls: `"length_scale": 1.5, "playback_boost": 1.3`
+- Gets faster speed without the chipmunk effect
 
 ### Voice Preview
 
