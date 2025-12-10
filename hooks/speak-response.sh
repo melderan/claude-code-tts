@@ -283,7 +283,17 @@ CLIFF_NOTES=$(echo "$CLIFF_NOTES" | sed 's/`[^`]*`//g')
 CLIFF_NOTES=$(echo "$CLIFF_NOTES" | sed 's/^##* *//g')             # Headers
 CLIFF_NOTES=$(echo "$CLIFF_NOTES" | sed 's/\*\*//g')               # Bold markers
 CLIFF_NOTES=$(echo "$CLIFF_NOTES" | sed 's/\*//g')                 # Italic markers
-CLIFF_NOTES=$(echo "$CLIFF_NOTES" | sed 's/\[.*\](.*)/removed_link/g') # Links
+
+# Remove lines that are just bullet points with URLs (plain or markdown links)
+# This catches "- https://..." and "- [text](url)" patterns
+CLIFF_NOTES=$(echo "$CLIFF_NOTES" | sed '/^[[:space:]]*[-*][[:space:]]*http/d')
+CLIFF_NOTES=$(echo "$CLIFF_NOTES" | sed '/^[[:space:]]*[-*][[:space:]]*\[.*\](http/d')
+
+# Replace remaining markdown links with just the link text (not "removed_link")
+CLIFF_NOTES=$(echo "$CLIFF_NOTES" | sed 's/\[\([^]]*\)\]([^)]*)/ \1 /g')
+
+# Remove any bare URLs that might remain
+CLIFF_NOTES=$(echo "$CLIFF_NOTES" | sed 's/https*:\/\/[^[:space:]]*//g')
 
 # Clean up whitespace
 CLIFF_NOTES=$(echo "$CLIFF_NOTES" | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
