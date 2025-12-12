@@ -9,6 +9,7 @@
 #   tts-persona.sh --project          Show project persona
 #   tts-persona.sh --project <name>   Set sticky project persona
 #   tts-persona.sh --project reset    Clear project persona
+#   tts-persona.sh --project <name> --session  Set both project and session (flags in any order)
 #
 
 set -euo pipefail
@@ -63,12 +64,22 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     exit 1
 fi
 
-ARG="${1:-}"
-ARG2="${2:-}"
+# --- Parse arguments (flags can be in any order) ---
+FLAG_PROJECT=false
+FLAG_SESSION=false
+PERSONA_NAME=""
+
+for arg in "$@"; do
+    case "$arg" in
+        --project) FLAG_PROJECT=true ;;
+        --session) FLAG_SESSION=true ;;
+        *) PERSONA_NAME="$arg" ;;
+    esac
+done
 
 # --- Handle --project flag ---
-if [[ "$ARG" == "--project" ]]; then
-    if [[ -z "$ARG2" ]]; then
+if [[ "$FLAG_PROJECT" == true ]]; then
+    if [[ -z "$PERSONA_NAME" ]]; then
         # Show current project persona
         project_persona=$(jq -r --arg s "$SESSION" '.project_personas[$s] // ""' "$CONFIG_FILE")
         if [[ -n "$project_persona" ]]; then
@@ -78,7 +89,7 @@ if [[ "$ARG" == "--project" ]]; then
             echo "Use: tts-persona.sh --project <name>"
         fi
         exit 0
-    elif [[ "$ARG2" == "reset" ]]; then
+    elif [[ "$PERSONA_NAME" == "reset" ]]; then
         # Clear project persona
         jq --arg s "$SESSION" 'del(.project_personas[$s])' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" \
             && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
@@ -86,21 +97,35 @@ if [[ "$ARG" == "--project" ]]; then
         exit 0
     else
         # Set project persona
-        if ! jq -e ".personas[\"$ARG2\"]" "$CONFIG_FILE" > /dev/null 2>&1; then
-            echo "Persona not found: $ARG2"
+        if ! jq -e ".personas[\"$PERSONA_NAME\"]" "$CONFIG_FILE" > /dev/null 2>&1; then
+            echo "Persona not found: $PERSONA_NAME"
             echo ""
             echo "Available personas:"
             jq -r '.personas | keys[]' "$CONFIG_FILE" | sed 's/^/  /'
             exit 1
         fi
-        jq --arg s "$SESSION" --arg p "$ARG2" '
-            .project_personas[$s] = $p
-        ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
-        echo "Project persona set to: $ARG2"
-        echo "(This will be used by default for all sessions in this project)"
+
+        if [[ "$FLAG_SESSION" == true ]]; then
+            # Set BOTH project and session
+            jq --arg s "$SESSION" --arg p "$PERSONA_NAME" '
+                .project_personas[$s] = $p |
+                .sessions[$s] //= {} | .sessions[$s].persona = $p
+            ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+            echo "Project and session persona set to: $PERSONA_NAME"
+        else
+            # Set project only
+            jq --arg s "$SESSION" --arg p "$PERSONA_NAME" '
+                .project_personas[$s] = $p
+            ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+            echo "Project persona set to: $PERSONA_NAME"
+            echo "(This will be used by default for all sessions in this project)"
+        fi
         exit 0
     fi
 fi
+
+# Legacy support: just --session with a persona name sets session only
+ARG="$PERSONA_NAME"
 
 if [[ -z "$ARG" || "$ARG" == "list" ]]; then
     # List personas and show current
