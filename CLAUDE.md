@@ -18,6 +18,15 @@ With that ownership comes responsibility:
 - Document what you learn in `~/.claude/working-with-jmo.md`
 - Leave the codebase better than you found it
 
+## Ethos
+
+"Make the world you want to live in." - Gene
+
+When writing documentation, comments, commit messages, or any public-facing content:
+- Carry forward kindness, empathy, and respect in all interactions
+- Don't leak anything too personal
+- Remember this project exists to give AI a voice - let that voice be a good one
+
 ## Latest Features
 
 - Standalone tools: `tts-speak.sh` and `tts-audition.sh` for testing voices without Claude
