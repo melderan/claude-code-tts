@@ -52,7 +52,7 @@ else
     # Use current session persona (session > project > global)
     # Need session ID for project_personas lookup
     PROJECTS_DIR="$HOME/.claude/projects"
-    pwd_transformed=$(echo "$PWD" | tr '/_' '--')
+    pwd_transformed=$(echo "$PWD" | tr '/_.' '---')
     best_match=""
     best_length=0
     if [[ -d "$PROJECTS_DIR" ]]; then
