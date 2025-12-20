@@ -66,6 +66,7 @@ After installation, just use Claude Code normally. Every response will be spoken
 - `/tts-cleanup` - Remove stale session entries from config
 - `/tts-random` - Generate a random persona from installed voices
 - `/tts-test` - Test TTS with a sample workflow message
+- `/tts-discover` - Auto-suggest a persona based on repo context
 
 ### Multi-Session Mode
 
@@ -136,6 +137,7 @@ When Claude runs tools (file reads, bash commands, etc.), the transcript contain
     tts-cleanup.md          # /tts-cleanup command
     tts-random.md           # /tts-random command
     tts-test.md             # /tts-test command
+    tts-discover.md         # /tts-discover command
   settings.json             # Hook configuration
 
 ~/.claude-tts/
