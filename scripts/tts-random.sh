@@ -29,9 +29,9 @@ get_session_id() {
     fi
 
     # Convert PWD to Claude Code format: /Users/foo/_bar -> -Users-foo--bar
-    # Both / and _ are replaced with -
+    # Characters /, _, and . are replaced with -
     local pwd_transformed
-    pwd_transformed=$(echo "$PWD" | tr '/_' '--')
+    pwd_transformed=$(echo "$PWD" | tr '/_.' '---')
 
     # Look for the LONGEST project folder that matches our PWD prefix
     local best_match=""
