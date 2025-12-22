@@ -79,6 +79,42 @@ else
     ERRORS=1
 fi
 
+# --- Check 6: Feature/fix commits must include version bump ---
+echo -n "Checking version bumps in feature commits... "
+
+# Get commits being pushed (not yet on remote)
+REMOTE_HEAD=$(git rev-parse @{u} 2>/dev/null || echo "")
+if [[ -n "$REMOTE_HEAD" ]]; then
+    # Find feat: or fix: commits without version file changes
+    BAD_COMMITS=""
+    while IFS= read -r commit_line; do
+        COMMIT_HASH=$(echo "$commit_line" | cut -d' ' -f1)
+        COMMIT_MSG=$(echo "$commit_line" | cut -d' ' -f2-)
+
+        # Check if this is a feat: or fix: commit
+        if echo "$COMMIT_MSG" | grep -qE "^(feat|fix)(\(.+\))?:"; then
+            # Check if version files were changed in this commit
+            VERSION_FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r "$COMMIT_HASH" | grep -E "(pyproject\.toml|__version__|CLAUDE\.md)" || true)
+            if [[ -z "$VERSION_FILES_CHANGED" ]]; then
+                BAD_COMMITS="$BAD_COMMITS\n  ${COMMIT_HASH:0:7} $COMMIT_MSG"
+            fi
+        fi
+    done < <(git log --oneline "$REMOTE_HEAD"..HEAD 2>/dev/null)
+
+    if [[ -z "$BAD_COMMITS" ]]; then
+        echo -e "${GREEN}OK${NC}"
+    else
+        echo -e "${RED}FAIL${NC}"
+        echo -e "  These feat:/fix: commits are missing version bumps:$BAD_COMMITS"
+        echo ""
+        echo -e "  ${YELLOW}Use ./scripts/commit-feature.sh instead of git commit${NC}"
+        echo "  Or amend the commit to include version changes."
+        ERRORS=1
+    fi
+else
+    echo -e "${YELLOW}SKIP${NC} (no upstream to compare)"
+fi
+
 echo ""
 
 if [[ "$ERRORS" -eq 1 ]]; then
