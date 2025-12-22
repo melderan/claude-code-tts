@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "5.4.0"
+__version__ = "5.5.0"
 
 
 # --- Platform Detection ---
