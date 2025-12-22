@@ -6,7 +6,7 @@ The pause/resume toggle script is designed to be called from a system-level hotk
 
 After installation, the script is located at:
 ```
-~/.claude-tts/tts-pause.sh
+$HOME/.claude-tts/tts-pause.sh
 ```
 
 Running it toggles between paused and playing states:
@@ -14,6 +14,10 @@ Running it toggles between paused and playing states:
 - If audio is paused: resumes it (SIGCONT)
 
 It also shows a macOS notification to confirm the action.
+
+**Important:** Some apps (like macOS Shortcuts) don't expand `~`. Use the full path or `$HOME`:
+- Full path: `/Users/yourusername/.claude-tts/tts-pause.sh`
+- With $HOME: `$HOME/.claude-tts/tts-pause.sh`
 
 ## Setup Options
 
@@ -25,7 +29,8 @@ Built-in, no additional software needed.
 2. Click **+** to create a new shortcut
 3. Name it "Toggle TTS"
 4. Search for "Run Shell Script" and add it
-5. Set the script to: `~/.claude-tts/tts-pause.sh`
+5. Set the script to: `$HOME/.claude-tts/tts-pause.sh`
+   - Or use full path: `/Users/yourusername/.claude-tts/tts-pause.sh`
 6. Right-click the shortcut in the sidebar > **Add Keyboard Shortcut**
 7. Press your desired key combination (e.g., `Cmd+Shift+T`)
 
