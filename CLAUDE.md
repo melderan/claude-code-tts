@@ -1,6 +1,6 @@
 # Claude Code TTS - Instructions for Claude
 
-Welcome, fellow Claude! TTS for Claude Code using Piper. Version 5.5.0.
+Welcome, fellow Claude! TTS for Claude Code using Piper. Version 5.6.0.
 
 ## Ownership
 
@@ -29,6 +29,7 @@ When writing documentation, comments, commit messages, or any public-facing cont
 
 ## Latest Features
 
+- Pause/resume toggle via system hotkey (`tts-pause.sh`)
 - Standalone tools: `tts-speak.sh` and `tts-audition.sh` for testing voices without Claude
 - Multi-speaker model support (libritts has 904 speakers)
 - Voice knowledge base in `docs/voice-notes.md`
@@ -101,11 +102,15 @@ scripts/
   tts-persona.sh           # Persona switching
   tts-cleanup.sh           # Stale session cleanup
   tts-mode.sh              # Mode/daemon management
-  tts-daemon.py            # Queue daemon
+  tts-daemon.py            # Queue daemon (with pause/resume support)
+  tts-pause.sh             # Pause/resume toggle (for hotkey binding)
   tts-speak.sh             # Standalone TTS testing
   tts-audition.sh          # Voice audition tool
+  commit-feature.sh        # Commit helper (version bump + feature in one)
 commands/tts-*.md          # Slash command definitions
-docs/voice-notes.md        # Voice compatibility knowledge base
+docs/
+  voice-notes.md           # Voice compatibility knowledge base
+  hotkey-setup.md          # Pause/resume hotkey setup guide
 src/claude_code_tts/
   install.py               # Installer
 ```
@@ -146,3 +151,28 @@ tail -f ~/.claude-tts/daemon.log     # Daemon log
 - Bash: `set -euo pipefail`, BSD-compatible
 - Python: 3.10+, type hints
 - No emojis in output
+
+## Commit Workflow (IMPORTANT)
+
+**Never commit features and version bumps separately.** They must be ONE commit.
+
+Use the helper script:
+```bash
+# For new features (bumps minor: 5.5.0 -> 5.6.0)
+./scripts/commit-feature.sh feat "add pause/resume toggle"
+
+# For bug fixes (bumps patch: 5.5.0 -> 5.5.1)
+./scripts/commit-feature.sh fix "handle empty queue gracefully"
+```
+
+This script:
+1. Bumps the version (without auto-committing)
+2. Stages all changes (feature + version files)
+3. Creates ONE commit with everything
+4. Tags with the new version
+
+Then push: `git push && git push --tags`
+
+**Why this matters:** Previously we'd commit a feature, then commit a version bump separately. This meant checking out "v5.5.0" wouldn't actually have the 5.5.0 code in it. The version and feature must be atomic.
+
+**If you forget and commit without bumping:** You'll need to amend or squash before pushing.
