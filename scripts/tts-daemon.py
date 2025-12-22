@@ -67,6 +67,38 @@ def load_config() -> dict:
     return {}
 
 
+# --- Playback State (for pause/resume) ---
+
+PLAYBACK_STATE_FILE = TTS_CONFIG_DIR / "playback.json"
+
+
+def read_playback_state() -> dict:
+    """Read current playback state."""
+    if PLAYBACK_STATE_FILE.exists():
+        try:
+            with open(PLAYBACK_STATE_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {"paused": False, "audio_pid": None}
+
+
+def write_playback_state(audio_pid: Optional[int] = None, paused: Optional[bool] = None) -> None:
+    """Update playback state atomically."""
+    state = read_playback_state()
+    if audio_pid is not None:
+        state["audio_pid"] = audio_pid
+    if paused is not None:
+        state["paused"] = paused
+    state["updated_at"] = time.time()
+
+    # Atomic write
+    tmp = PLAYBACK_STATE_FILE.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    tmp.rename(PLAYBACK_STATE_FILE)
+
+
 def get_queue_config() -> dict:
     """Get queue-specific config with defaults."""
     config = load_config()
@@ -113,7 +145,7 @@ def get_audio_player() -> tuple[str, list[str]]:
 
 
 def play_audio(wav_file: Path, speed: float = 1.0) -> bool:
-    """Play a WAV file. Returns True on success."""
+    """Play a WAV file with pause/resume support. Returns True on success."""
     player_name, player_cmd = get_audio_player()
 
     if player_name == "none":
@@ -128,10 +160,47 @@ def play_audio(wav_file: Path, speed: float = 1.0) -> bool:
             cmd.extend(["-r", str(speed)])
 
         cmd.append(str(wav_file))
-        subprocess.run(cmd, check=True, capture_output=True)
-        return True
-    except subprocess.CalledProcessError as e:
+
+        # Use Popen instead of run to get PID for pause/resume
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        write_playback_state(audio_pid=proc.pid)
+
+        # Poll for completion, checking pause state
+        while proc.poll() is None:
+            state = read_playback_state()
+            if state.get("paused") and proc.poll() is None:
+                # SIGSTOP the audio process
+                try:
+                    os.kill(proc.pid, signal.SIGSTOP)
+                    log(f"Audio paused (PID {proc.pid})")
+                except ProcessLookupError:
+                    break
+
+                # Wait for resume
+                while True:
+                    time.sleep(0.1)
+                    state = read_playback_state()
+                    if not state.get("paused"):
+                        # SIGCONT to resume
+                        try:
+                            os.kill(proc.pid, signal.SIGCONT)
+                            log(f"Audio resumed (PID {proc.pid})")
+                        except ProcessLookupError:
+                            pass
+                        break
+                    # Check if process died while paused
+                    if proc.poll() is not None:
+                        break
+            else:
+                time.sleep(0.05)  # Small poll interval
+
+        # Clear PID from state
+        write_playback_state(audio_pid=None)
+
+        return proc.returncode == 0
+    except Exception as e:
         log(f"Audio playback failed: {e}", "ERROR")
+        write_playback_state(audio_pid=None)
         return False
 
 
@@ -288,6 +357,12 @@ def daemon_loop() -> None:
 
             # Enforce max depth
             enforce_max_depth(config["max_depth"])
+
+            # Check pause state before processing new messages
+            state = read_playback_state()
+            if state.get("paused"):
+                time.sleep(poll_interval)
+                continue
 
             # Get pending messages
             messages = get_queue_messages()
