@@ -107,9 +107,23 @@ if [[ -f "$PID_FILE" ]]; then
     fi
 fi
 
+# Playback/pause state
+PLAYBACK_FILE="$HOME/.claude-tts/playback.json"
+if [[ -f "$PLAYBACK_FILE" ]]; then
+    pause_state=$(jq -r '.paused // false' "$PLAYBACK_FILE")
+    audio_pid=$(jq -r '.audio_pid // empty' "$PLAYBACK_FILE")
+else
+    pause_state="false"
+    audio_pid=""
+fi
+
 # Output
 echo "Session:  ${SESSION}"
 echo "Muted:    ${effective_muted} (${mute_source})"
+echo "Paused:   ${pause_state}"
+if [[ -n "$audio_pid" ]] && kill -0 "$audio_pid" 2>/dev/null; then
+    echo "Playing:  yes (PID $audio_pid)"
+fi
 echo "Persona:  ${effective_persona}"
 echo "Mode:     ${mode}"
 echo "Daemon:   ${daemon_status}"
