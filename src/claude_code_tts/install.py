@@ -21,14 +21,16 @@ import os
 import platform
 import random
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "5.7.1"
+__version__ = "5.7.2"
 
 
 # --- Platform Detection ---
@@ -750,6 +752,31 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
                 dst_script.chmod(0o755)
 
     success("Scripts installed")
+
+    # --- Restart daemon if running (picks up new code) ---
+    daemon_pid_file = TTS_CONFIG_DIR / "daemon.pid"
+    if daemon_pid_file.exists():
+        try:
+            pid = int(daemon_pid_file.read_text().strip())
+            os.kill(pid, 0)  # Check if running
+            if dry_run:
+                dry("Restart TTS daemon to pick up new code")
+            else:
+                info("Restarting TTS daemon to pick up new code...")
+                os.kill(pid, signal.SIGTERM)
+                time.sleep(1)
+                # Daemon will auto-restart via launchd/systemd, or we start it
+                daemon_script = TTS_CONFIG_DIR / "tts-daemon.py"
+                if daemon_script.exists():
+                    subprocess.Popen(
+                        ["python3", str(daemon_script), "start"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                    time.sleep(0.5)
+                success("Daemon restarted")
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass  # Daemon not running, nothing to restart
 
     # --- Install service files ---
 
