@@ -2,7 +2,7 @@
 
 Ideas captured from the late night sessions that started it all.
 
-## Current State (v5.2.1)
+## Current State (v5.8.4)
 
 - Piper TTS with configurable voice models
 - Stop hook triggers after each response
@@ -22,6 +22,16 @@ Ideas captured from the late night sessions that started it all.
 - Default muted: new sessions silent until /tts-unmute
 
 ## Completed
+
+### Pause/Resume Toggle (DONE)
+
+System-level pause/resume for TTS playback via hotkey.
+
+- Kill audio on pause, save interrupted message
+- Replay from beginning on resume
+- Lock file prevents duplicate daemons (`--lockpick` for recovery)
+- macOS notifications on pause/resume
+- Pause state shown in `/tts-status`
 
 ### Voice Identity Per Session (DONE)
 
@@ -62,6 +72,41 @@ Download new Piper voices directly from Hugging Face.
 - Version recorded in config on install/upgrade
 
 ## Future Ideas
+
+### --check Output Clarity
+
+The `--check` command shows "current" for all files but can show a version mismatch (e.g., "Installed: 5.8.0, Repo: 5.8.1"). This is confusing because if files are current, the versions should match. Options:
+- If all files match, report installed = repo version
+- Don't show version comparison in --check (it's about file contents, not versions)
+- Update config.json version during --check if all files match
+
+### Pause/Resume Enhancements
+
+**Skip current message**: Hotkey to skip the currently playing message and move to next in queue. Useful when Claude starts a long response you don't need to hear.
+
+**Pause indicator in prompt**: Show a visual indicator in the terminal when TTS is paused (like `[PAUSED]` in the status line).
+
+### Queue Management
+
+**Queue preview**: Command to see what's queued without playing: `/tts-queue` to list pending messages.
+
+**Priority messages**: Allow certain sessions/projects to have priority in the queue (e.g., urgent notifications jump ahead).
+
+**Clear queue**: `/tts-clear` to drop all pending messages.
+
+### Volume Control
+
+Adjust TTS volume independent of system volume.
+
+### Health Check Command
+
+`/tts-health` to verify piper, voices, daemon, hooks all working.
+
+### Installer Improvements
+
+**Dry-run mode**: `--dry-run` flag to show what would be installed without making changes.
+
+**Uninstall command**: Clean uninstall that removes all TTS files and settings.
 
 ### Standalone TTS Tools (tts-speak, tts-bench)
 
