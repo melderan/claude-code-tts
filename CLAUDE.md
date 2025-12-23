@@ -176,3 +176,23 @@ Then push: `git push && git push --tags`
 **Why this matters:** Previously we'd commit a feature, then commit a version bump separately. This meant checking out "v5.5.0" wouldn't actually have the 5.5.0 code in it. The version and feature must be atomic.
 
 **If you forget and commit without bumping:** You'll need to amend or squash before pushing.
+
+## Testing Changes (IMPORTANT)
+
+**Always use the installer to deploy changes - never copy files directly.**
+
+```bash
+# After making changes, use the installer to deploy:
+python3 src/claude_code_tts/install.py --upgrade
+
+# To verify what would be updated without changing anything:
+python3 src/claude_code_tts/install.py --check
+```
+
+**Why this matters:** Copying files directly (e.g., `cp scripts/foo.sh ~/.claude-tts/`) bypasses the installer and causes version tracking to get out of sync. The installer:
+- Creates backups before overwriting
+- Restarts the daemon to pick up new code
+- Updates the version in config.json
+- Runs verification checks
+
+If you find yourself wanting to copy files directly, stop and use `--upgrade` instead.
