@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import fcntl
 import json
 import os
 import signal
@@ -30,8 +31,12 @@ TTS_CONFIG_DIR = HOME / ".claude-tts"
 TTS_CONFIG_FILE = TTS_CONFIG_DIR / "config.json"
 QUEUE_DIR = TTS_CONFIG_DIR / "queue"
 PID_FILE = TTS_CONFIG_DIR / "daemon.pid"
+LOCK_FILE = TTS_CONFIG_DIR / "daemon.lock"
 LOG_FILE = TTS_CONFIG_DIR / "daemon.log"
 VOICES_DIR = HOME / ".local" / "share" / "piper-voices"
+
+# Global lock file handle (kept open while daemon runs)
+_lock_fd = None
 
 # Default voice model
 DEFAULT_VOICE = "en_US-hfc_male-medium"
@@ -57,6 +62,74 @@ def log(msg: str, level: str = "INFO") -> None:
 # Global flag for daemon vs foreground mode
 DAEMON_MODE = False
 
+
+# --- Lock File ---
+
+def acquire_lock(lockpick: bool = False) -> bool:
+    """Acquire exclusive lock to prevent duplicate daemons.
+
+    Args:
+        lockpick: If True, forcibly take the lock (for recovery from unclean shutdown)
+
+    Returns:
+        True if lock acquired, False if another daemon is running.
+    """
+    global _lock_fd
+
+    try:
+        # Create lock file if needed
+        LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _lock_fd = open(LOCK_FILE, 'w')
+
+        if lockpick:
+            # Force acquire - used for recovery
+            try:
+                fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # Someone has the lock - try to kill them
+                if PID_FILE.exists():
+                    try:
+                        old_pid = int(PID_FILE.read_text().strip())
+                        os.kill(old_pid, signal.SIGTERM)
+                        time.sleep(1)
+                    except (ValueError, ProcessLookupError):
+                        pass
+                # Try again
+                fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:
+            # Normal acquire - fail if locked
+            fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        # Write our PID to lock file
+        _lock_fd.write(str(os.getpid()))
+        _lock_fd.flush()
+        return True
+
+    except BlockingIOError:
+        if _lock_fd:
+            _lock_fd.close()
+            _lock_fd = None
+        return False
+    except Exception as e:
+        log(f"Lock acquisition failed: {e}", "ERROR")
+        if _lock_fd:
+            _lock_fd.close()
+            _lock_fd = None
+        return False
+
+
+def release_lock() -> None:
+    """Release the daemon lock."""
+    global _lock_fd
+    if _lock_fd:
+        try:
+            fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+            _lock_fd.close()
+        except Exception:
+            pass
+        _lock_fd = None
+
+
 # --- Config Loading ---
 
 def load_config() -> dict:
@@ -76,27 +149,54 @@ def read_playback_state() -> dict:
     """Read current playback state."""
     if PLAYBACK_STATE_FILE.exists():
         try:
-            with open(PLAYBACK_STATE_FILE) as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
+            # Force fresh read from disk (bypass any OS caching)
+            fd = os.open(str(PLAYBACK_STATE_FILE), os.O_RDONLY)
+            try:
+                data = os.read(fd, 10000).decode('utf-8')
+                return json.loads(data)
+            finally:
+                os.close(fd)
+        except (json.JSONDecodeError, IOError, OSError):
             pass
-    return {"paused": False, "audio_pid": None}
+    return {"paused": False, "audio_pid": None, "current_message": None}
 
 
-def write_playback_state(audio_pid: Optional[int] = None, paused: Optional[bool] = None) -> None:
+def write_playback_state(
+    audio_pid: Optional[int] = None,
+    paused: Optional[bool] = None,
+    current_message: Optional[dict] = "UNSET"  # Use sentinel to distinguish None from unset
+) -> None:
     """Update playback state atomically."""
     state = read_playback_state()
     if audio_pid is not None:
         state["audio_pid"] = audio_pid
     if paused is not None:
         state["paused"] = paused
+    if current_message != "UNSET":
+        state["current_message"] = current_message
     state["updated_at"] = time.time()
 
-    # Atomic write
+    # Atomic write with sync
     tmp = PLAYBACK_STATE_FILE.with_suffix(".tmp")
     with open(tmp, "w") as f:
         json.dump(state, f)
+        f.flush()
+        os.fsync(f.fileno())
     tmp.rename(PLAYBACK_STATE_FILE)
+
+
+def clear_current_message() -> None:
+    """Clear the current message (called after successful playback)."""
+    write_playback_state(current_message=None)
+
+
+def get_interrupted_message() -> Optional[dict]:
+    """Get the interrupted message if any, and clear it."""
+    state = read_playback_state()
+    msg = state.get("current_message")
+    if msg:
+        write_playback_state(current_message=None)
+    return msg
 
 
 def get_queue_config() -> dict:
@@ -144,13 +244,17 @@ def get_audio_player() -> tuple[str, list[str]]:
         return ("none", [])
 
 
-def play_audio(wav_file: Path, speed: float = 1.0) -> bool:
-    """Play a WAV file with pause/resume support. Returns True on success."""
+def play_audio(wav_file: Path, speed: float = 1.0) -> tuple[bool, bool]:
+    """Play a WAV file. Returns (success, was_killed).
+
+    was_killed=True means audio was interrupted by pause (should replay on resume).
+    was_killed=False means audio completed normally or had an error.
+    """
     player_name, player_cmd = get_audio_player()
 
     if player_name == "none":
         log("No audio player available", "ERROR")
-        return False
+        return (False, False)
 
     try:
         cmd = player_cmd.copy()
@@ -161,47 +265,41 @@ def play_audio(wav_file: Path, speed: float = 1.0) -> bool:
 
         cmd.append(str(wav_file))
 
-        # Use Popen instead of run to get PID for pause/resume
+        # Use Popen to get PID for kill-on-pause
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         write_playback_state(audio_pid=proc.pid)
+        log(f"Audio started (PID {proc.pid}), polling for pause...")
 
         # Poll for completion, checking pause state
+        poll_count = 0
         while proc.poll() is None:
             state = read_playback_state()
-            if state.get("paused") and proc.poll() is None:
-                # SIGSTOP the audio process
+            poll_count += 1
+            if poll_count % 20 == 0:  # Log every ~1 second
+                log(f"Poll #{poll_count}: paused={state.get('paused')}, pid={proc.pid}")
+            if state.get("paused"):
+                # Kill the audio process immediately (user paused)
+                log(f"Audio killed for pause (PID {proc.pid})")
                 try:
-                    os.kill(proc.pid, signal.SIGSTOP)
-                    log(f"Audio paused (PID {proc.pid})")
-                except ProcessLookupError:
-                    break
-
-                # Wait for resume
-                while True:
-                    time.sleep(0.1)
-                    state = read_playback_state()
-                    if not state.get("paused"):
-                        # SIGCONT to resume
-                        try:
-                            os.kill(proc.pid, signal.SIGCONT)
-                            log(f"Audio resumed (PID {proc.pid})")
-                        except ProcessLookupError:
-                            pass
-                        break
-                    # Check if process died while paused
-                    if proc.poll() is not None:
-                        break
-            else:
-                time.sleep(0.05)  # Small poll interval
+                    proc.terminate()
+                    proc.wait(timeout=1)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                write_playback_state(audio_pid=None)
+                return (False, True)  # was_killed=True
+            time.sleep(0.05)  # Small poll interval
 
         # Clear PID from state
         write_playback_state(audio_pid=None)
 
-        return proc.returncode == 0
+        return (proc.returncode == 0, False)
     except Exception as e:
         log(f"Audio playback failed: {e}", "ERROR")
         write_playback_state(audio_pid=None)
-        return False
+        return (False, False)
 
 
 def play_chime() -> None:
@@ -332,8 +430,14 @@ def enforce_max_depth(max_depth: int) -> int:
 
 # --- Main Daemon Loop ---
 
-def daemon_loop() -> None:
+def daemon_loop(lockpick: bool = False) -> None:
     """Main daemon processing loop."""
+    # Acquire exclusive lock to prevent duplicate daemons
+    if not acquire_lock(lockpick=lockpick):
+        log("Another daemon is already running. Exiting.", "ERROR")
+        print("Another daemon is already running. Use --lockpick to force takeover.")
+        sys.exit(1)
+
     log("Daemon starting...")
 
     # Write PID file (for status checks, even in foreground mode)
@@ -362,6 +466,38 @@ def daemon_loop() -> None:
             state = read_playback_state()
             if state.get("paused"):
                 time.sleep(poll_interval)
+                continue
+
+            # Check for interrupted message to replay first
+            interrupted = get_interrupted_message()
+            if interrupted:
+                log(f"Replaying interrupted message: {interrupted.get('text', '')[:50]}...")
+                session_id = interrupted.get("session_id", "unknown")
+                text = interrupted.get("text", "")
+                persona = interrupted.get("persona", "claude-prime")
+
+                audio_file = Path(f"/tmp/tts_queue_{session_id}.wav")
+                persona_config = get_persona_config(persona)
+                speed = persona_config.get("speed", 2.0)
+
+                if generate_speech(text, persona, audio_file):
+                    # Save as current message in case interrupted again
+                    write_playback_state(current_message=interrupted)
+
+                    if persona_config.get("speed_method") == "playback":
+                        success, was_killed = play_audio(audio_file, speed)
+                    else:
+                        success, was_killed = play_audio(audio_file)
+
+                    audio_file.unlink(missing_ok=True)
+
+                    if was_killed:
+                        # Interrupted again, leave current_message for next resume
+                        log("Interrupted message paused again")
+                        continue
+                    else:
+                        # Completed, clear current_message
+                        clear_current_message()
                 continue
 
             # Get pending messages
@@ -418,16 +554,35 @@ def daemon_loop() -> None:
 
             last_speaker = speaker_key
 
-            # Play the pre-generated audio immediately
+            # Save message info before playing (for replay if interrupted)
+            current_msg_info = {
+                "session_id": session_id,
+                "project": project,
+                "text": text,
+                "persona": persona,
+            }
+            write_playback_state(current_message=current_msg_info)
+            log(f"Saved current_message for potential replay")
+
+            # Play the pre-generated audio
             if persona_config.get("speed_method") == "playback":
-                play_audio(audio_file, speed)
+                success, was_killed = play_audio(audio_file, speed)
             else:
-                play_audio(audio_file)
+                success, was_killed = play_audio(audio_file)
 
             audio_file.unlink(missing_ok=True)
 
-            # Remove processed message
-            msg_file.unlink(missing_ok=True)
+            if was_killed:
+                # Audio was interrupted by pause - leave current_message for replay
+                log("Message interrupted, will replay on resume")
+                # Don't delete the queue file yet - but actually we should since
+                # the message is saved in current_message. Let's delete it.
+                msg_file.unlink(missing_ok=True)
+                continue
+            else:
+                # Completed normally - clear current_message and remove queue file
+                clear_current_message()
+                msg_file.unlink(missing_ok=True)
 
         except KeyboardInterrupt:
             log("Received interrupt, shutting down...")
@@ -436,6 +591,7 @@ def daemon_loop() -> None:
             log(f"Error in daemon loop: {e}", "ERROR")
             time.sleep(1)  # Avoid tight error loop
 
+    release_lock()
     log("Daemon stopped")
 
 
@@ -457,12 +613,14 @@ def is_daemon_running() -> tuple[bool, Optional[int]]:
         return False, None
 
 
-def start_daemon() -> bool:
+def start_daemon(lockpick: bool = False) -> bool:
     """Start the daemon in background. Returns True on success."""
-    running, pid = is_daemon_running()
-    if running:
-        print(f"Daemon already running (PID: {pid})")
-        return False
+    if not lockpick:
+        running, pid = is_daemon_running()
+        if running:
+            print(f"Daemon already running (PID: {pid})")
+            print("Use --lockpick to force takeover")
+            return False
 
     # Fork to background
     try:
@@ -516,8 +674,8 @@ def start_daemon() -> bool:
     global DAEMON_MODE
     DAEMON_MODE = True
 
-    # Run the daemon
-    daemon_loop()
+    # Run the daemon (lockpick already handled in parent check above)
+    daemon_loop(lockpick=lockpick)
     return True
 
 
@@ -588,13 +746,15 @@ def daemon_status() -> None:
             pass
 
 
-def run_foreground() -> None:
+def run_foreground(lockpick: bool = False) -> None:
     """Run daemon in foreground (for debugging)."""
-    running, pid = is_daemon_running()
-    if running:
-        print(f"Background daemon is running (PID: {pid})")
-        print("Stop it first with: python tts-daemon.py stop")
-        return
+    if not lockpick:
+        running, pid = is_daemon_running()
+        if running:
+            print(f"Background daemon is running (PID: {pid})")
+            print("Stop it first with: python tts-daemon.py stop")
+            print("Or use --lockpick to force takeover")
+            return
 
     print("Running in foreground (Ctrl+C to stop)...")
     print(f"Queue directory: {QUEUE_DIR}")
@@ -604,7 +764,7 @@ def run_foreground() -> None:
     DAEMON_MODE = False
 
     try:
-        daemon_loop()
+        daemon_loop(lockpick=lockpick)
     except KeyboardInterrupt:
         print("\nStopped")
 
@@ -623,11 +783,13 @@ Commands:
 
 Options:
   --foreground    Run in foreground (for debugging)
+  --lockpick      Force takeover if another daemon is running
 
 Examples:
   python tts-daemon.py start
   python tts-daemon.py status
   python tts-daemon.py --foreground
+  python tts-daemon.py --foreground --lockpick  # Force restart
         """,
     )
 
@@ -642,13 +804,18 @@ Examples:
         action="store_true",
         help="Run in foreground",
     )
+    parser.add_argument(
+        "--lockpick",
+        action="store_true",
+        help="Force takeover if another daemon is running (use after unclean shutdown)",
+    )
 
     args = parser.parse_args()
 
     if args.foreground:
-        run_foreground()
+        run_foreground(lockpick=args.lockpick)
     elif args.command == "start":
-        start_daemon()
+        start_daemon(lockpick=args.lockpick)
     elif args.command == "stop":
         stop_daemon()
     elif args.command == "status":
