@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "5.8.3"
+__version__ = "5.8.4"
 
 
 # --- Platform Detection ---
