@@ -10,6 +10,9 @@
 
 set -euo pipefail
 
+# Ensure homebrew binaries are in PATH (needed for jq when called from Shortcuts)
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 PLAYBACK_FILE="$HOME/.claude-tts/playback.json"
 
 # macOS notification helper
@@ -48,7 +51,9 @@ write_paused() {
     local state
     state=$(read_state)
     echo "$state" | jq --argjson p "$paused" '.paused = $p | .updated_at = now' > "$PLAYBACK_FILE.tmp"
+    sync  # Ensure written to disk
     mv "$PLAYBACK_FILE.tmp" "$PLAYBACK_FILE"
+    sync  # Ensure rename is persisted
 }
 
 # Main toggle logic
@@ -59,21 +64,16 @@ main() {
     if is_paused; then
         # Currently paused -> Resume
         write_paused false
-
-        # Send SIGCONT if we have a live audio process
-        if [[ -n "$current_pid" ]] && kill -0 "$current_pid" 2>/dev/null; then
-            kill -CONT "$current_pid" 2>/dev/null || true
-        fi
-
         notify "Claude TTS" "Playback resumed"
         echo "Resumed"
     else
         # Currently playing -> Pause
         write_paused true
 
-        # Send SIGSTOP if we have a live audio process
+        # Kill the audio process so daemon detects the pause
+        # The message will be saved and replayed on resume
         if [[ -n "$current_pid" ]] && kill -0 "$current_pid" 2>/dev/null; then
-            kill -STOP "$current_pid" 2>/dev/null || true
+            kill -TERM "$current_pid" 2>/dev/null || true
         fi
 
         notify "Claude TTS" "Playback paused"
