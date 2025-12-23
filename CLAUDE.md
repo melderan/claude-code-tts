@@ -1,6 +1,6 @@
 # Claude Code TTS - Instructions for Claude
 
-Welcome, fellow Claude! TTS for Claude Code using Piper. Version 5.8.0.
+Welcome, fellow Claude! TTS for Claude Code using Piper. Version 5.8.1.
 
 ## Ownership
 
@@ -154,28 +154,42 @@ tail -f ~/.claude-tts/daemon.log     # Daemon log
 
 ## Commit Workflow (IMPORTANT)
 
-**Never commit features and version bumps separately.** They must be ONE commit.
+**Every commit must include a version bump.** Follow strict SemVer:
 
-Use the helper script:
+| Commit Type | Version Bump | Example |
+|-------------|--------------|---------|
+| `feat:` | MINOR | 5.8.0 → 5.9.0 |
+| `fix:` | PATCH | 5.8.0 → 5.8.1 |
+| `docs:` | PATCH | 5.8.0 → 5.8.1 |
+| `chore:` | PATCH | 5.8.0 → 5.8.1 |
+| `refactor:` | PATCH | 5.8.0 → 5.8.1 |
+| `perf:` | PATCH | 5.8.0 → 5.8.1 |
+| `test:` | PATCH | 5.8.0 → 5.8.1 |
+| BREAKING CHANGE | MAJOR | 5.8.0 → 6.0.0 |
+
+Use the helper script for features/fixes:
 ```bash
-# For new features (bumps minor: 5.5.0 -> 5.6.0)
+# For new features (bumps minor)
 ./scripts/commit-feature.sh feat "add pause/resume toggle"
 
-# For bug fixes (bumps patch: 5.5.0 -> 5.5.1)
+# For bug fixes (bumps patch)
 ./scripts/commit-feature.sh fix "handle empty queue gracefully"
 ```
 
-This script:
-1. Bumps the version (without auto-committing)
-2. Stages all changes (feature + version files)
-3. Creates ONE commit with everything
-4. Tags with the new version
+For other commit types (docs, chore, etc.):
+```bash
+# 1. Make your changes
+# 2. Bump version
+bump-my-version bump patch --no-commit --no-tag --allow-dirty
+# 3. Stage everything and commit
+git add -A && git commit -m "docs: update README"
+```
 
-Then push: `git push && git push --tags`
+Then push: `git push && git push --tags` (tags only needed for feat/fix)
 
-**Why this matters:** Previously we'd commit a feature, then commit a version bump separately. This meant checking out "v5.5.0" wouldn't actually have the 5.5.0 code in it. The version and feature must be atomic.
+**Why this matters:** The version must reflect the exact state of the repo. Every commit changes the repo, so every commit needs a version bump.
 
-**If you forget and commit without bumping:** You'll need to amend or squash before pushing.
+**If you forget:** The pre-push hook will block you. Amend your commit to include version files.
 
 ## Testing Changes (IMPORTANT)
 
