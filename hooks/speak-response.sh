@@ -237,7 +237,7 @@ while IFS= read -r line; do
         fi
         debug "Skipping assistant message with no text (tool_use only)"
     fi
-done < <(tac "$TRANSCRIPT_PATH" 2>/dev/null)
+done < <(utac "$TRANSCRIPT_PATH" 2>/dev/null || tail -r "$TRANSCRIPT_PATH" 2>/dev/null || tac "$TRANSCRIPT_PATH" 2>/dev/null)
 
 if [[ -z "$LAST_ASSISTANT" ]]; then
     debug "No assistant message with text found"
