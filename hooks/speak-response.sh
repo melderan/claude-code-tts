@@ -49,8 +49,9 @@ WATERMARK=$(tts_read_watermark)
 CURRENT_LINES=$(wc -l < "$TRANSCRIPT_PATH" | tr -d ' ')
 tts_debug "Stop: watermark=$WATERMARK current=$CURRENT_LINES"
 
-# Clean up state file (this turn is done, next turn starts fresh)
-tts_clear_watermark
+# Set watermark to current line count so next turn's PostToolUse
+# doesn't re-scan old lines (don't clear -- that causes replays)
+tts_write_watermark "$CURRENT_LINES"
 
 if [[ "$CURRENT_LINES" -le "$WATERMARK" ]]; then
     tts_debug "Stop: no new lines since last PostToolUse speak"
