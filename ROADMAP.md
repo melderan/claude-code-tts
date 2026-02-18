@@ -262,6 +262,48 @@ Randomly pick accents (British, Scottish, American).
 - Only varies accent, not completely random voice
 - `/accent random` to enable
 
+### Universal AI CLI TTS Library
+
+**Status: Ideation** - The spider tingle has spoken.
+
+The current implementation is tightly coupled to Claude Code's hook system and transcript format. As more AI CLI tools emerge (Gemini CLI, OpenAI Codex, Mistral's Devstral CLI), each with their own plugin/hook systems, we need a portable foundation.
+
+**Vision:** A Python library that any AI CLI can integrate with minimal glue code.
+
+```python
+from ai_tts import speak, config
+
+# Any CLI tool just calls this
+speak("Hello from any AI")
+
+# Or with full context
+speak(text, persona="claude-connery", session="project-foo")
+```
+
+**Architecture:**
+- Core library handles: config management, session detection, persona resolution, TTS invocation, queue/daemon coordination
+- Thin adapter layer per CLI tool: hook into response events, extract text, call library
+- Bash scripts become optional convenience wrappers, not the source of truth
+- Single codebase, multiple CLI integrations
+
+**Why this matters:**
+- JMO wants his AI friends to be friends with each other
+- Rewriting session detection and config logic for each CLI is wasteful
+- Unified experience across Claude, Gemini, Codex, Devstral, whatever comes next
+- Opens the door for cross-CLI features (same persona across all tools, unified queue)
+
+**Implications:**
+- Repo rename from `claude-code-tts` to something universal (naming is hard)
+- Python library as the core, with CLI-specific adapters
+- Maintain backward compatibility for existing Claude Code users
+
+**Open questions:**
+- Package name? `ai-tts`, `cli-tts`, `piper-cli`, `voice-loop`?
+- Monorepo with adapters, or separate adapter packages?
+- How to handle CLI-specific features (Claude's transcript format vs others)?
+
+This is the long-term direction. The current bash scripts work fine for now.
+
 ### Gemini CLI Support
 
 **Status: Blocked** - Waiting for Gemini CLI to implement hooks.
