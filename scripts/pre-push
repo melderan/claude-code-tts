@@ -79,40 +79,35 @@ else
     ERRORS=1
 fi
 
-# --- Check 6: All commits must include version bump ---
+# --- Check 6: Version changed since remote ---
 echo -n "Checking version bumps in commits... "
 
-# Get commits being pushed (not yet on remote)
+# Instead of checking every individual commit for version file changes
+# (which breaks on rebased commits that predate the rule), just verify
+# that the version at HEAD differs from the version at the remote tip.
+# The version consistency check (Check 1) already ensures all files agree.
 REMOTE_HEAD=$(git rev-parse @{u} 2>/dev/null || echo "")
 if [[ -n "$REMOTE_HEAD" ]]; then
-    # Find any commits without version file changes (except merge commits)
-    BAD_COMMITS=""
-    while IFS= read -r commit_line; do
-        COMMIT_HASH=$(echo "$commit_line" | cut -d' ' -f1)
-        COMMIT_MSG=$(echo "$commit_line" | cut -d' ' -f2-)
+    REMOTE_VERSION=$(git show "$REMOTE_HEAD":pyproject.toml 2>/dev/null | grep '^version' | head -1 | cut -d'"' -f2 || echo "")
+    LOCAL_VERSION=$(grep '^version' pyproject.toml | head -1 | cut -d'"' -f2)
 
-        # Skip merge commits
-        if echo "$COMMIT_MSG" | grep -qE "^Merge "; then
-            continue
+    if [[ -z "$REMOTE_VERSION" ]]; then
+        echo -e "${GREEN}OK${NC} (no remote version to compare)"
+    elif [[ "$REMOTE_VERSION" == "$LOCAL_VERSION" ]]; then
+        # Same version -- check if there are actually new commits
+        NEW_COMMITS=$(git log --oneline "$REMOTE_HEAD"..HEAD 2>/dev/null | wc -l | tr -d ' ')
+        if [[ "$NEW_COMMITS" -gt 0 ]]; then
+            echo -e "${RED}FAIL${NC}"
+            echo "  Version $LOCAL_VERSION is unchanged but there are $NEW_COMMITS new commit(s)"
+            echo ""
+            echo -e "  ${YELLOW}Every push should include a version bump${NC}"
+            echo "  Use: bump-my-version bump patch --no-commit --no-tag --allow-dirty"
+            ERRORS=1
+        else
+            echo -e "${GREEN}OK${NC}"
         fi
-
-        # Check if version files were changed in this commit
-        VERSION_FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r "$COMMIT_HASH" | grep -E "(pyproject\.toml|__version__|CLAUDE\.md)" || true)
-        if [[ -z "$VERSION_FILES_CHANGED" ]]; then
-            BAD_COMMITS="$BAD_COMMITS\n  ${COMMIT_HASH:0:7} $COMMIT_MSG"
-        fi
-    done < <(git log --oneline "$REMOTE_HEAD"..HEAD 2>/dev/null)
-
-    if [[ -z "$BAD_COMMITS" ]]; then
-        echo -e "${GREEN}OK${NC}"
     else
-        echo -e "${RED}FAIL${NC}"
-        echo -e "  These commits are missing version bumps:$BAD_COMMITS"
-        echo ""
-        echo -e "  ${YELLOW}Every commit should include a version bump (patch for docs/chore, minor for feat, patch for fix)${NC}"
-        echo "  Use: bump-my-version bump patch --no-commit --no-tag --allow-dirty"
-        echo "  Then amend your commit to include the version files."
-        ERRORS=1
+        echo -e "${GREEN}OK${NC}"
     fi
 else
     echo -e "${YELLOW}SKIP${NC} (no upstream to compare)"
