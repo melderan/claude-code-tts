@@ -8,7 +8,7 @@
 # Coordinates with speak-response.sh (Stop hook) via a watermark
 # state file to prevent double-speaking.
 
-set -euo pipefail
+set -uo pipefail
 
 # --- Source shared library ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

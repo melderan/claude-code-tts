@@ -11,7 +11,7 @@
 #   - Linux: Uses paplay (PulseAudio) or aplay (ALSA)
 #   - WSL 2: Uses paplay via WSLg's PulseAudio server
 
-set -euo pipefail
+set -uo pipefail
 
 # --- Source shared library ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
