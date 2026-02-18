@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "5.8.4"
+__version__ = "5.9.0"
 
 
 # --- Platform Detection ---
@@ -297,7 +297,7 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
         preflight(f"{Colors.GREEN}PASS{Colors.NC} curl found")
 
     # Check source files exist
-    for hook_name in ["speak-response.sh", "play-sound.sh"]:
+    for hook_name in ["speak-response.sh", "speak-intermediate.sh", "play-sound.sh"]:
         src_hook = REPO_DIR / "hooks" / hook_name
         if not src_hook.exists():
             issues.append(f"Source hook not found: {src_hook}")
@@ -313,7 +313,7 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
         else:
             preflight(f"{Colors.GREEN}PASS{Colors.NC} Source {cmd_name} found")
 
-    for script_name in ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh", "tts-builder.sh", "tts-builder.py", "tts-discover.sh", "tts-pause.sh"]:
+    for script_name in ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh", "tts-builder.sh", "tts-builder.py", "tts-discover.sh", "tts-pause.sh", "tts-lib.sh"]:
         src_script = REPO_DIR / "scripts" / script_name
         if not src_script.exists():
             issues.append(f"Source script not found: {src_script}")
@@ -405,7 +405,7 @@ def do_uninstall(dry_run: bool = False) -> None:
         backup.backup_file(SETTINGS_FILE)
 
     # Remove hook scripts
-    for hook_name in ["speak-response.sh", "play-sound.sh"]:
+    for hook_name in ["speak-response.sh", "speak-intermediate.sh", "play-sound.sh"]:
         hook_file = HOOKS_DIR / hook_name
         if hook_file.exists():
             if dry_run:
@@ -593,6 +593,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
     files_to_backup = [
         SETTINGS_FILE,
         HOOKS_DIR / "speak-response.sh",
+        HOOKS_DIR / "speak-intermediate.sh",
         HOOKS_DIR / "play-sound.sh",
         COMMANDS_DIR / "tts-mute.md",
         COMMANDS_DIR / "tts-unmute.md",
@@ -708,7 +709,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
     # --- Install hook scripts ---
 
     print()
-    for hook_name in ["speak-response.sh", "play-sound.sh"]:
+    for hook_name in ["speak-response.sh", "speak-intermediate.sh", "play-sound.sh"]:
         src_hook = REPO_DIR / "hooks" / hook_name
         dst_hook = HOOKS_DIR / hook_name
         if dry_run:
@@ -716,7 +717,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
         else:
             shutil.copy(src_hook, dst_hook)
             dst_hook.chmod(0o755)
-    success(f"Hooks: speak-response.sh, play-sound.sh")
+    success(f"Hooks: speak-response.sh, speak-intermediate.sh, play-sound.sh")
 
     # --- Install slash commands ---
 
@@ -741,7 +742,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
 
     TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    for script_name in ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh", "tts-builder.sh", "tts-builder.py", "tts-discover.sh", "tts-pause.sh"]:
+    for script_name in ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh", "tts-builder.sh", "tts-builder.py", "tts-discover.sh", "tts-pause.sh", "tts-lib.sh"]:
         src_script = REPO_DIR / "scripts" / script_name
         dst_script = TTS_CONFIG_DIR / script_name
         if src_script.exists():
@@ -810,52 +811,86 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
     # --- Configure settings.json ---
 
     print()
-    new_hook = {
+    stop_hook_entry = {
         "matcher": "*",
         "hooks": [
             {
                 "type": "command",
-                "command": str(dst_hook),
+                "command": str(HOOKS_DIR / "speak-response.sh"),
                 "timeout": 180
             }
         ]
     }
+    post_tool_hook_entry = {
+        "matcher": "*",
+        "hooks": [
+            {
+                "type": "command",
+                "command": str(HOOKS_DIR / "speak-intermediate.sh"),
+                "timeout": 30
+            }
+        ]
+    }
+
+    def _ensure_tts_hooks(settings: dict) -> bool:
+        """Ensure both Stop and PostToolUse TTS hooks are registered. Returns True if changes were made."""
+        changed = False
+        if "hooks" not in settings:
+            settings["hooks"] = {}
+
+        # Ensure Stop hook
+        if "Stop" not in settings["hooks"]:
+            settings["hooks"]["Stop"] = []
+        has_stop = any("speak-response.sh" in h.get("hooks", [{}])[0].get("command", "") for h in settings["hooks"]["Stop"] if h.get("hooks"))
+        if not has_stop:
+            settings["hooks"]["Stop"].append(stop_hook_entry)
+            changed = True
+
+        # Ensure PostToolUse hook
+        if "PostToolUse" not in settings["hooks"]:
+            settings["hooks"]["PostToolUse"] = []
+        has_post = any("speak-intermediate.sh" in h.get("hooks", [{}])[0].get("command", "") for h in settings["hooks"]["PostToolUse"] if h.get("hooks"))
+        if not has_post:
+            settings["hooks"]["PostToolUse"].append(post_tool_hook_entry)
+            changed = True
+
+        return changed
 
     if upgrade:
-        # In upgrade mode, skip settings.json modification - just update files
-        info("Upgrade mode: keeping existing settings.json configuration")
-        success("Settings preserved")
-    elif SETTINGS_FILE.exists():
-        info("Configuring Claude Code settings...")
-        with open(SETTINGS_FILE) as f:
-            content = f.read()
-
-        if "speak-response.sh" in content:
-            success("TTS hook already configured in settings.json")
-        else:
-            if dry_run:
-                dry("Add TTS hook to settings.json (preserving existing hooks)")
-            else:
-                # Load, modify, save
-                with open(SETTINGS_FILE) as f:
-                    settings = json.load(f)
-
-                if "hooks" not in settings:
-                    settings["hooks"] = {}
-                if "Stop" not in settings["hooks"]:
-                    settings["hooks"]["Stop"] = []
-
-                settings["hooks"]["Stop"].append(new_hook)
-
+        # In upgrade mode, check if PostToolUse hook needs to be added
+        if SETTINGS_FILE.exists():
+            with open(SETTINGS_FILE) as f:
+                settings = json.load(f)
+            if _ensure_tts_hooks(settings):
                 with open(SETTINGS_FILE, "w") as f:
                     json.dump(settings, f, indent=2)
-                success("Hook added to settings.json (preserving existing hooks)")
+                success("Settings updated (added PostToolUse intermediate speech hook)")
+            else:
+                info("Upgrade mode: keeping existing settings.json configuration")
+                success("Settings preserved")
+        else:
+            info("Upgrade mode: keeping existing settings.json configuration")
+            success("Settings preserved")
+    elif SETTINGS_FILE.exists():
+        info("Configuring Claude Code settings...")
+        if dry_run:
+            dry("Add TTS hooks to settings.json (preserving existing hooks)")
+        else:
+            with open(SETTINGS_FILE) as f:
+                settings = json.load(f)
+            if _ensure_tts_hooks(settings):
+                with open(SETTINGS_FILE, "w") as f:
+                    json.dump(settings, f, indent=2)
+                success("TTS hooks added to settings.json (preserving existing hooks)")
+            else:
+                success("TTS hooks already configured in settings.json")
     else:
         info("Configuring Claude Code settings...")
         if dry_run:
             dry(f"Create {SETTINGS_FILE} with hook configuration")
         else:
-            settings = {"hooks": {"Stop": [new_hook]}}
+            settings = {}
+            _ensure_tts_hooks(settings)
             SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(SETTINGS_FILE, "w") as f:
                 json.dump(settings, f, indent=2)
@@ -1058,6 +1093,7 @@ def check_for_updates() -> dict:
     # Files to check
     files_to_check = [
         (HOOKS_DIR / "speak-response.sh", REPO_DIR / "hooks" / "speak-response.sh"),
+        (HOOKS_DIR / "speak-intermediate.sh", REPO_DIR / "hooks" / "speak-intermediate.sh"),
         (HOOKS_DIR / "play-sound.sh", REPO_DIR / "hooks" / "play-sound.sh"),
         (COMMANDS_DIR / "tts-mute.md", REPO_DIR / "commands" / "tts-mute.md"),
         (COMMANDS_DIR / "tts-unmute.md", REPO_DIR / "commands" / "tts-unmute.md"),
