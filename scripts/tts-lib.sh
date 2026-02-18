@@ -45,6 +45,7 @@ tts_load_config() {
     TTS_SPEED="${CLAUDE_TTS_SPEED:-2.0}"
     TTS_SPEED_METHOD=""
     TTS_VOICE="${CLAUDE_TTS_VOICE:-$HOME/.local/share/piper-voices/en_US-hfc_male-medium.onnx}"
+    TTS_VOICE_KOKORO=""
     TTS_MAX_CHARS="${CLAUDE_TTS_MAX_CHARS:-10000}"
     TTS_MUTED="false"
     TTS_MODE="direct"
@@ -62,19 +63,28 @@ tts_load_config() {
              else false end) as $muted |
             [
                 (.mode // "direct"),
-                $muted,
+                ($muted | tostring),
                 $persona,
-                (.sessions[$s].speed // ""),
-                (.personas[$persona].speed // ""),
-                (.personas[$persona].speed_method // ""),
-                (.personas[$persona].voice // ""),
-                (.personas[$persona].max_chars // "")
-            ] | @tsv
+                (.sessions[$s].speed // "-" | tostring),
+                (.personas[$persona].speed // "-" | tostring),
+                (.personas[$persona].speed_method // "-"),
+                (.personas[$persona].voice // "-"),
+                (.personas[$persona].max_chars // "-" | tostring),
+                (.personas[$persona].voice_kokoro // "-")
+            ] | join("|")
         ' "$TTS_CONFIG_FILE" 2>/dev/null)
 
         if [[ -n "$CONFIG_JSON" ]]; then
-            IFS=$'\t' read -r TTS_MODE CONFIG_MUTED ACTIVE_PERSONA SESSION_SPEED \
-                PERSONA_SPEED PERSONA_SPEED_METHOD PERSONA_VOICE PERSONA_MAX_CHARS <<< "$CONFIG_JSON"
+            IFS='|' read -r TTS_MODE CONFIG_MUTED ACTIVE_PERSONA SESSION_SPEED \
+                PERSONA_SPEED PERSONA_SPEED_METHOD PERSONA_VOICE PERSONA_MAX_CHARS \
+                PERSONA_VOICE_KOKORO <<< "$CONFIG_JSON"
+            # Normalize sentinels back to empty
+            [[ "$SESSION_SPEED" == "-" ]] && SESSION_SPEED=""
+            [[ "$PERSONA_SPEED" == "-" ]] && PERSONA_SPEED=""
+            [[ "$PERSONA_SPEED_METHOD" == "-" ]] && PERSONA_SPEED_METHOD=""
+            [[ "$PERSONA_VOICE" == "-" ]] && PERSONA_VOICE=""
+            [[ "$PERSONA_MAX_CHARS" == "-" ]] && PERSONA_MAX_CHARS=""
+            [[ "$PERSONA_VOICE_KOKORO" == "-" ]] && PERSONA_VOICE_KOKORO=""
 
             tts_debug "TTS mode: $TTS_MODE"
             tts_debug "Session: $TTS_SESSION"
@@ -98,7 +108,9 @@ tts_load_config() {
                 TTS_VOICE="$HOME/.local/share/piper-voices/${PERSONA_VOICE}.onnx"
             fi
 
-            tts_debug "Config loaded - speed:$TTS_SPEED method:$TTS_SPEED_METHOD max_chars:$TTS_MAX_CHARS"
+            [[ -n "$PERSONA_VOICE_KOKORO" ]] && TTS_VOICE_KOKORO="$PERSONA_VOICE_KOKORO"
+
+            tts_debug "Config loaded - speed:$TTS_SPEED method:$TTS_SPEED_METHOD max_chars:$TTS_MAX_CHARS kokoro:$TTS_VOICE_KOKORO"
         fi
     fi
 
@@ -238,7 +250,16 @@ tts_speak() {
     local slot=$(( $(date +%s) % 5 ))
     local temp_file="/tmp/claude_tts_${slot}.wav"
 
-    if command -v piper &>/dev/null; then
+    if command -v swift-kokoro &>/dev/null && [[ -n "$TTS_VOICE_KOKORO" ]]; then
+        # Swift Kokoro backend (CoreML, Apple Silicon native)
+        echo "$text" | swift-kokoro --voice "$TTS_VOICE_KOKORO" --output "$temp_file" 2>/dev/null
+
+        if [[ -f "$temp_file" ]]; then
+            if command -v afplay &>/dev/null; then
+                afplay -r "$TTS_SPEED" "$temp_file" 2>/dev/null &
+            fi
+        fi
+    elif command -v piper &>/dev/null; then
         if [[ "$TTS_SPEED_METHOD" == "length_scale" ]]; then
             local length_scale=$(awk "BEGIN {printf \"%.2f\", 1.0 / $TTS_SPEED}")
             echo "$text" | piper --model "$TTS_VOICE" --length_scale "$length_scale" --output_file "$temp_file" 2>/dev/null
