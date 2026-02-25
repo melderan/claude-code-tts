@@ -11,7 +11,10 @@
 
 set -euo pipefail
 
-CONFIG_FILE="$HOME/.claude-tts/config.json"
+# shellcheck source=tts-lib.sh
+source "$HOME/.claude-tts/tts-lib.sh" 2>/dev/null || source "$(dirname "$0")/tts-lib.sh"
+
+CONFIG_FILE="$TTS_CONFIG_FILE"
 VOICES_DIR="$HOME/.local/share/piper-voices"
 
 # --- Parse arguments ---
@@ -50,24 +53,7 @@ if [[ -n "$TEST_PERSONA" ]]; then
     fi
 else
     # Use current session persona (session > project > global)
-    # Need session ID for project_personas lookup
-    PROJECTS_DIR="$HOME/.claude/projects"
-    pwd_transformed=$(echo "$PWD" | tr '/_.' '---')
-    best_match=""
-    best_length=0
-    if [[ -d "$PROJECTS_DIR" ]]; then
-        for project_dir in "$PROJECTS_DIR"/*/; do
-            project_name=$(basename "$project_dir")
-            if [[ "$pwd_transformed" == "$project_name"* ]]; then
-                len=${#project_name}
-                if (( len > best_length )); then
-                    best_match="$project_name"
-                    best_length=$len
-                fi
-            fi
-        done
-    fi
-    SESSION="${best_match:-$pwd_transformed}"
+    SESSION=$(get_session_id)
     PERSONA=$(jq -r --arg s "$SESSION" '
         .sessions[$s].persona // .project_personas[$s] // .active_persona // "claude-prime"
     ' "$CONFIG_FILE")
