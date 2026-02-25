@@ -537,13 +537,14 @@ def daemon_loop(lockpick: bool = False) -> None:
 
                 audio_file = Path(f"/tmp/tts_queue_{session_id}.wav")
                 persona_config = get_persona_config(persona)
-                speed = persona_config.get("speed", 2.0)
+                speed = interrupted.get("speed", persona_config.get("speed", 2.0))
+                i_speed_method = interrupted.get("speed_method", persona_config.get("speed_method", "playback"))
 
                 if generate_speech(text, persona, audio_file):
                     # Save as current message in case interrupted again
                     write_playback_state(current_message=interrupted)
 
-                    if persona_config.get("speed_method") == "playback":
+                    if i_speed_method == "playback":
                         _, was_killed = play_audio(audio_file, speed)
                     else:
                         _, was_killed = play_audio(audio_file)
@@ -584,7 +585,9 @@ def daemon_loop(lockpick: bool = False) -> None:
             log(f"Speaking for {project}: {text[:50]}...")
             audio_file = Path(f"/tmp/tts_queue_{session_id}.wav")
             persona_config = get_persona_config(persona)
-            speed = persona_config.get("speed", 2.0)
+            # Use speed from queue message (includes session overrides) or fall back to persona
+            speed = msg.get("speed", persona_config.get("speed", 2.0))
+            speed_method = msg.get("speed_method", persona_config.get("speed_method", "playback"))
 
             if not generate_speech(text, persona, audio_file):
                 log(f"Failed to generate speech for message from {project}", "ERROR")
@@ -603,7 +606,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                     log(f"Announcing speaker: {project}")
                     announce_file = Path("/tmp/tts_announce.wav")
                     if generate_speech(f"{project} says:", persona, announce_file):
-                        announce_speed = speed if persona_config.get("speed_method") == "playback" else None
+                        announce_speed = speed if speed_method == "playback" else None
                         if announce_speed:
                             play_audio(announce_file, announce_speed)
                         else:
@@ -619,12 +622,14 @@ def daemon_loop(lockpick: bool = False) -> None:
                 "project": project,
                 "text": text,
                 "persona": persona,
+                "speed": speed,
+                "speed_method": speed_method,
             }
             write_playback_state(current_message=current_msg_info)
             log(f"Saved current_message for potential replay")
 
             # Play the pre-generated audio
-            if persona_config.get("speed_method") == "playback":
+            if speed_method == "playback":
                 _, was_killed = play_audio(audio_file, speed)
             else:
                 _, was_killed = play_audio(audio_file)
