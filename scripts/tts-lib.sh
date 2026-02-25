@@ -60,8 +60,8 @@ get_session_id() {
 }
 
 # --- Load config from config.json ---
-# Sets: TTS_MODE, TTS_MUTED, TTS_SPEED, TTS_SPEED_METHOD, TTS_VOICE,
-#       TTS_MAX_CHARS, ACTIVE_PERSONA, PROJECT_NAME
+# Sets: TTS_MODE, TTS_MUTED, TTS_INTERMEDIATE, TTS_SPEED, TTS_SPEED_METHOD,
+#       TTS_VOICE, TTS_MAX_CHARS, ACTIVE_PERSONA, PROJECT_NAME
 tts_load_config() {
     # Defaults
     TTS_SPEED="${CLAUDE_TTS_SPEED:-2.0}"
@@ -70,6 +70,7 @@ tts_load_config() {
     TTS_VOICE_KOKORO=""
     TTS_MAX_CHARS="${CLAUDE_TTS_MAX_CHARS:-10000}"
     TTS_MUTED="false"
+    TTS_INTERMEDIATE="true"
     TTS_MODE="direct"
     PROJECT_NAME="session-${TTS_SESSION:0:8}"
     ACTIVE_PERSONA="claude-prime"
@@ -92,14 +93,15 @@ tts_load_config() {
                 (.personas[$persona].speed_method // "-"),
                 (.personas[$persona].voice // "-"),
                 (.personas[$persona].max_chars // "-" | tostring),
-                (.personas[$persona].voice_kokoro // "-")
+                (.personas[$persona].voice_kokoro // "-"),
+                (if .sessions[$s] | has("intermediate") then (.sessions[$s].intermediate | tostring) else "true" end)
             ] | join("|")
         ' "$TTS_CONFIG_FILE" 2>/dev/null)
 
         if [[ -n "$CONFIG_JSON" ]]; then
             IFS='|' read -r TTS_MODE CONFIG_MUTED ACTIVE_PERSONA SESSION_SPEED \
                 PERSONA_SPEED PERSONA_SPEED_METHOD PERSONA_VOICE PERSONA_MAX_CHARS \
-                PERSONA_VOICE_KOKORO <<< "$CONFIG_JSON"
+                PERSONA_VOICE_KOKORO SESSION_INTERMEDIATE <<< "$CONFIG_JSON"
             # Normalize sentinels back to empty
             [[ "$SESSION_SPEED" == "-" ]] && SESSION_SPEED=""
             [[ "$PERSONA_SPEED" == "-" ]] && PERSONA_SPEED=""
@@ -131,6 +133,10 @@ tts_load_config() {
             fi
 
             [[ -n "$PERSONA_VOICE_KOKORO" ]] && TTS_VOICE_KOKORO="$PERSONA_VOICE_KOKORO"
+
+            if [[ "${SESSION_INTERMEDIATE:-}" == "false" ]]; then
+                TTS_INTERMEDIATE="false"
+            fi
 
             tts_debug "Config loaded - speed:$TTS_SPEED method:$TTS_SPEED_METHOD max_chars:$TTS_MAX_CHARS kokoro:$TTS_VOICE_KOKORO"
         fi
