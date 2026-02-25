@@ -304,6 +304,7 @@ def play_audio(wav_file: Path, speed: float = 1.0) -> tuple[bool, bool]:
             poll_count += 1
             if poll_count % 20 == 0:  # Log every ~1 second
                 log(f"Poll #{poll_count}: paused={state.get('paused')}, pid={proc.pid}")
+                write_heartbeat()  # Keep heartbeat fresh during playback
             if state.get("paused"):
                 # Kill the audio process immediately (user paused)
                 log(f"Audio killed for pause (PID {proc.pid})")
@@ -481,9 +482,13 @@ def daemon_loop(lockpick: bool = False) -> None:
         sys.exit(1)
 
     # Graceful shutdown handler -- sets flag, loop finishes current work
+    _shutdown_by_signal = False
+
     def handle_shutdown(signum: int, frame: object) -> None:
         global _shutdown_requested
+        nonlocal _shutdown_by_signal
         _shutdown_requested = True
+        _shutdown_by_signal = True
         log(f"Shutdown requested (signal {signum}), finishing current work...")
 
     signal.signal(signal.SIGTERM, handle_shutdown)
@@ -655,9 +660,11 @@ def daemon_loop(lockpick: bool = False) -> None:
             log(f"Error in daemon loop: {e}", "ERROR")
             time.sleep(1)  # Avoid tight error loop
 
-    # Graceful shutdown -- announce and clean up
+    # Graceful shutdown -- announce only if not killed by signal (avoids
+    # talking over active speech from other sessions during installer restarts)
     log("Shutting down gracefully...")
-    speak_announcement("Voice daemon shutting down. Catch you later.")
+    if not _shutdown_by_signal:
+        speak_announcement("Voice daemon shutting down. Catch you later.")
     HEARTBEAT_FILE.unlink(missing_ok=True)
     release_lock()
     log("Daemon stopped")
