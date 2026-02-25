@@ -212,42 +212,27 @@ tts_speak() {
         if [[ -f "$pid_file" ]]; then
             local daemon_pid=$(cat "$pid_file" 2>/dev/null)
             if [[ -n "$daemon_pid" ]] && kill -0 "$daemon_pid" 2>/dev/null; then
-                # PID alive -- check heartbeat freshness
                 if [[ -f "$heartbeat_file" ]]; then
                     local last_beat=$(cat "$heartbeat_file" 2>/dev/null)
                     local now=$(date +%s)
                     local age=$(( now - ${last_beat%%.*} ))
                     if (( age < 30 )); then
                         daemon_healthy=true
-                    else
-                        tts_debug "Daemon stale (heartbeat ${age}s old), restarting..."
-                        kill "$daemon_pid" 2>/dev/null || true
-                        sleep 1
                     fi
                 else
-                    # No heartbeat file yet (old daemon version?) -- trust PID
                     daemon_healthy=true
                 fi
             fi
         fi
 
         if [[ "$daemon_healthy" == "false" ]]; then
-            # Use a lock file to prevent multiple hooks from racing to restart
-            local restart_lock="$HOME/.claude-tts/daemon.restarting"
-            if ( set -o noclobber; echo $$ > "$restart_lock" ) 2>/dev/null; then
-                tts_debug "Daemon not healthy, starting..."
-                "$HOME/.claude-tts/tts-mode.sh" start >/dev/null 2>&1 &
-                sleep 0.5
-                rm -f "$restart_lock"
-            else
-                tts_debug "Another hook is already restarting daemon, waiting..."
-                sleep 1
-            fi
+            tts_debug "Daemon not healthy, falling back to direct mode"
+            TTS_MODE="direct"
+        else
+            tts_debug "Queue mode: writing to daemon queue"
+            tts_write_queue "$text" "$TTS_SESSION" "$PROJECT_NAME" "${ACTIVE_PERSONA:-claude-prime}"
+            return 0
         fi
-
-        tts_debug "Queue mode: writing to daemon queue"
-        tts_write_queue "$text" "$TTS_SESSION" "$PROJECT_NAME" "${ACTIVE_PERSONA:-claude-prime}"
-        return 0
     fi
 
     # Direct mode
