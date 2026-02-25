@@ -292,6 +292,7 @@ tts_write_queue() {
     local msg_id=$(head -c 8 /dev/urandom | xxd -p)
     local queue_file="$TTS_QUEUE_DIR/${timestamp}_${msg_id}.json"
 
+    # Include resolved speed and method so the daemon respects session overrides
     cat > "$queue_file" << EOF
 {
   "id": "$msg_id",
@@ -299,11 +300,13 @@ tts_write_queue() {
   "session_id": "$session_id",
   "project": "$project",
   "text": $(echo "$text" | jq -Rs .),
-  "persona": "$persona"
+  "persona": "$persona",
+  "speed": ${TTS_SPEED:-2.0},
+  "speed_method": "${TTS_SPEED_METHOD:-playback}"
 }
 EOF
 
-    tts_debug "Wrote to queue: $queue_file"
+    tts_debug "Wrote to queue: $queue_file (speed=${TTS_SPEED:-2.0})"
 }
 
 # --- Speak text (queue or direct) ---
