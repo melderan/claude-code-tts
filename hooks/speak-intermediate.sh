@@ -48,6 +48,12 @@ if [[ "$TTS_MUTED" == "true" ]]; then
     exit 0
 fi
 
+# Exit if intermediate speech disabled for this session
+if [[ "$TTS_INTERMEDIATE" == "false" ]]; then
+    tts_debug "PostToolUse: intermediate disabled, skipping"
+    exit 0
+fi
+
 # --- Check watermark: only process new transcript lines ---
 WATERMARK=$(tts_read_watermark)
 CURRENT_LINES=$(wc -l < "$TRANSCRIPT_PATH" | tr -d ' ')

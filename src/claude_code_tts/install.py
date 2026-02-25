@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "5.11.2"
+__version__ = "5.12.0"
 
 
 # --- Platform Detection ---
@@ -116,8 +116,8 @@ TTS_CONFIG_FILE = TTS_CONFIG_DIR / "config.json"
 # Adding a new file = one edit to this dict.
 MANIFEST: dict[str, list[str]] = {
     "hooks": ["speak-response.sh", "speak-intermediate.sh", "play-sound.sh"],
-    "commands": ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md", "tts-persona.md", "tts-status.md", "tts-cleanup.md", "tts-random.md", "tts-test.md", "tts-discover.md"],
-    "scripts": ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh", "tts-builder.sh", "tts-builder.py", "tts-discover.sh", "tts-pause.sh", "tts-lib.sh", "tts-filter.py", "tts-sounds.sh"],
+    "commands": ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md", "tts-persona.md", "tts-status.md", "tts-cleanup.md", "tts-random.md", "tts-test.md", "tts-discover.md", "tts-intermediate.md"],
+    "scripts": ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh", "tts-builder.sh", "tts-builder.py", "tts-discover.sh", "tts-pause.sh", "tts-lib.sh", "tts-filter.py", "tts-sounds.sh", "tts-intermediate.sh"],
 }
 
 
