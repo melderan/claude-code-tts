@@ -43,18 +43,29 @@ get_mode() {
     fi
 }
 
-# Check if daemon is running
+# Check if daemon process is actually alive (not just registered with service manager)
 daemon_running() {
-    if is_macos; then
-        launchctl list 2>/dev/null | grep -q "$LAUNCHD_LABEL" && return 0
-    else
-        systemctl --user is-active "$SYSTEMD_SERVICE" &>/dev/null && return 0
+    # Check PID file first -- most reliable indicator of actual process
+    if [[ -f "$PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
     fi
 
-    # Fallback to PID file
-    if [[ -f "$PID_FILE" ]]; then
-        kill -0 "$(cat "$PID_FILE")" 2>/dev/null && return 0
+    # Check heartbeat file as secondary indicator
+    local heartbeat="$HOME/.claude-tts/daemon.heartbeat"
+    if [[ -f "$heartbeat" ]]; then
+        local last_beat now age
+        last_beat=$(cat "$heartbeat" 2>/dev/null)
+        now=$(date +%s)
+        age=$(( now - ${last_beat%%.*} ))
+        if (( age < 10 )); then
+            return 0
+        fi
     fi
+
     return 1
 }
 
@@ -179,7 +190,6 @@ cmd_stop() {
         if launchctl list 2>/dev/null | grep -q "$LAUNCHD_LABEL"; then
             echo "Stopping via launchd..."
             launchctl stop "$LAUNCHD_LABEL"
-            echo "Daemon stopped"
         elif [[ -f "$DAEMON_SCRIPT" ]]; then
             python3 "$DAEMON_SCRIPT" stop
         fi
@@ -187,16 +197,36 @@ cmd_stop() {
         if systemctl --user is-active "$SYSTEMD_SERVICE" &>/dev/null; then
             echo "Stopping via systemd..."
             systemctl --user stop "$SYSTEMD_SERVICE"
-            echo "Daemon stopped"
         elif [[ -f "$DAEMON_SCRIPT" ]]; then
             python3 "$DAEMON_SCRIPT" stop
         fi
     fi
+
+    # Wait for the process to actually die (graceful shutdown needs time for goodbye speech)
+    local waited=0
+    while daemon_running && (( waited < 15 )); do
+        sleep 1
+        waited=$(( waited + 1 ))
+        if (( waited % 3 == 0 )); then
+            echo "  Waiting for daemon to finish... (${waited}s)"
+        fi
+    done
+
+    if daemon_running; then
+        echo "Daemon did not stop gracefully, forcing..."
+        if [[ -f "$PID_FILE" ]]; then
+            kill -9 "$(cat "$PID_FILE")" 2>/dev/null || true
+            rm -f "$PID_FILE"
+        fi
+    fi
+    echo "Daemon stopped"
 }
 
 cmd_restart() {
     cmd_stop
-    sleep 1
+    # Clean up stale state from the old daemon
+    rm -f "$PID_FILE" "$HOME/.claude-tts/daemon.heartbeat" "$HOME/.claude-tts/daemon.lock"
+    sleep 0.5
     cmd_start
 }
 
