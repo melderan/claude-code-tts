@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "5.9.11"
+__version__ = "5.9.12"
 
 
 # --- Platform Detection ---
@@ -765,7 +765,13 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
             else:
                 info("Restarting TTS daemon to pick up new code...")
                 os.kill(pid, signal.SIGTERM)
-                time.sleep(1)
+                # Wait for the old daemon to actually die (up to 10s)
+                for _ in range(100):
+                    try:
+                        os.kill(pid, 0)
+                        time.sleep(0.1)
+                    except ProcessLookupError:
+                        break
                 # Daemon will auto-restart via launchd/systemd, or we start it
                 daemon_script = TTS_CONFIG_DIR / "tts-daemon.py"
                 if daemon_script.exists():

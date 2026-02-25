@@ -340,7 +340,7 @@ tts_speak() {
                     local last_beat=$(cat "$heartbeat_file" 2>/dev/null)
                     local now=$(date +%s)
                     local age=$(( now - ${last_beat%%.*} ))
-                    if (( age < 10 )); then
+                    if (( age < 30 )); then
                         daemon_healthy=true
                     else
                         tts_debug "Daemon stale (heartbeat ${age}s old), restarting..."
