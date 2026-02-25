@@ -160,31 +160,7 @@ tts_should_exit() {
 # --- Filter text for speech ---
 # Takes raw text as $1, prints filtered text to stdout
 tts_filter_text() {
-    local text="$1"
-
-    # Remove <thinking> blocks
-    text=$(echo "$text" | perl -0777 -pe 's/<thinking>[\s\S]*?<\/thinking>//g')
-    # Remove fenced code blocks
-    text=$(echo "$text" | perl -0777 -pe 's/```[\s\S]*?```//g')
-    # Remove indented code blocks
-    text=$(echo "$text" | grep -v '^    ' || echo "$text")
-    # Remove inline code
-    text=$(echo "$text" | sed 's/`[^`]*`//g')
-    # Remove markdown formatting
-    text=$(echo "$text" | sed 's/^##* *//g')
-    text=$(echo "$text" | sed 's/\*\*//g')
-    text=$(echo "$text" | sed 's/\*//g')
-    # Remove URL-only bullet lines
-    text=$(echo "$text" | sed '/^[[:space:]]*[-*][[:space:]]*http/d')
-    text=$(echo "$text" | sed '/^[[:space:]]*[-*][[:space:]]*\[.*\](http/d')
-    # Replace markdown links with link text
-    text=$(echo "$text" | sed 's/\[\([^]]*\)\]([^)]*)/ \1 /g')
-    # Remove bare URLs
-    text=$(echo "$text" | sed 's/https*:\/\/[^[:space:]]*//g')
-    # Clean whitespace
-    text=$(echo "$text" | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
-    echo "$text"
+    echo "$1" | python3 "$HOME/.claude-tts/tts-filter.py"
 }
 
 # --- Write to queue for daemon ---
