@@ -317,19 +317,35 @@ tts_speak() {
 
     # Queue mode
     if [[ "$TTS_MODE" == "queue" ]]; then
-        # Auto-start daemon if not running
+        # Check daemon health: alive AND heartbeating
         local pid_file="$HOME/.claude-tts/daemon.pid"
-        local daemon_running=false
+        local heartbeat_file="$HOME/.claude-tts/daemon.heartbeat"
+        local daemon_healthy=false
 
         if [[ -f "$pid_file" ]]; then
             local daemon_pid=$(cat "$pid_file" 2>/dev/null)
             if [[ -n "$daemon_pid" ]] && kill -0 "$daemon_pid" 2>/dev/null; then
-                daemon_running=true
+                # PID alive -- check heartbeat freshness
+                if [[ -f "$heartbeat_file" ]]; then
+                    local last_beat=$(cat "$heartbeat_file" 2>/dev/null)
+                    local now=$(date +%s)
+                    local age=$(( now - ${last_beat%%.*} ))
+                    if (( age < 10 )); then
+                        daemon_healthy=true
+                    else
+                        tts_debug "Daemon stale (heartbeat ${age}s old), restarting..."
+                        kill "$daemon_pid" 2>/dev/null || true
+                        sleep 1
+                    fi
+                else
+                    # No heartbeat file yet (old daemon version?) -- trust PID
+                    daemon_healthy=true
+                fi
             fi
         fi
 
-        if [[ "$daemon_running" == "false" ]]; then
-            tts_debug "Daemon not running, starting it..."
+        if [[ "$daemon_healthy" == "false" ]]; then
+            tts_debug "Daemon not healthy, starting..."
             "$HOME/.claude-tts/tts-mode.sh" start >/dev/null 2>&1 &
             sleep 0.5
         fi
