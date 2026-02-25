@@ -1,6 +1,6 @@
 # Claude Code TTS - Instructions for Claude
 
-Welcome, fellow Claude! TTS for Claude Code using Piper. Version 5.11.3.
+Welcome, fellow Claude! TTS for Claude Code using Piper. Version 5.12.0.
 
 ## Ownership
 
@@ -72,6 +72,7 @@ python3 src/claude_code_tts/install.py --upgrade
 | `/tts-mode [direct\|queue]` | Show/set playback mode |
 | `/tts-cleanup` | Remove stale session entries |
 | `/tts-sounds` | Configure sound effects |
+| `/tts-intermediate [on\|off]` | Toggle intermediate narration (between tool calls) |
 | `/tts-discover` | Auto-suggest persona based on repo context |
 
 ## Standalone Tools
