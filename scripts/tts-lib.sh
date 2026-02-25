@@ -25,7 +25,7 @@ tts_read_input() {
     tts_debug "Transcript path: $TRANSCRIPT_PATH"
 }
 
-# --- Detect session from transcript path ---
+# --- Detect session from transcript path (used by hooks) ---
 # Sets: TTS_SESSION
 tts_detect_session() {
     TTS_SESSION="${CLAUDE_TTS_SESSION:-}"
@@ -35,6 +35,116 @@ tts_detect_session() {
             tts_debug "Auto-detected session: $TTS_SESSION"
         fi
     fi
+}
+
+# --- Detect session from PWD (used by command scripts) ---
+# Finds the most recently active Claude session whose project folder
+# matches the current working directory. Falls back to PWD transformation.
+# Prints the session ID to stdout.
+get_session_id() {
+    # Explicit override
+    if [[ -n "${CLAUDE_TTS_SESSION:-}" ]]; then
+        echo "$CLAUDE_TTS_SESSION"
+        return
+    fi
+
+    local projects_dir="$HOME/.claude/projects"
+    [[ -d "$projects_dir" ]] || { echo "unknown"; return; }
+
+    # Strategy 1: Find the most recently modified transcript (.jsonl) whose
+    # project folder contains our PWD. The active Claude session is writing
+    # to its transcript right now, so it will be the most recent.
+    #
+    # We check: does the project folder name, when converted back to a path,
+    # match as a prefix of PWD? Claude names projects by replacing / with -.
+    local best_match=""
+    local best_mtime=0
+
+    for project_dir in "$projects_dir"/*/; do
+        local project_name
+        project_name=$(basename "$project_dir")
+
+        # Find the most recent .jsonl in this project
+        local latest_jsonl=""
+        local latest_mtime=0
+        for f in "$project_dir"*.jsonl; do
+            [[ -f "$f" ]] || continue
+            local mtime
+            mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+            if (( mtime > latest_mtime )); then
+                latest_mtime=$mtime
+                latest_jsonl="$f"
+            fi
+        done
+
+        # Skip projects with no recent transcript
+        [[ -n "$latest_jsonl" ]] || continue
+
+        # Check if this project matches our PWD.
+        # Convert PWD to Claude format and see if it starts with project_name.
+        local pwd_transformed
+        pwd_transformed=$(echo "$PWD" | tr '/_.' '---')
+        if [[ "$pwd_transformed" == "$project_name"* ]]; then
+            if (( latest_mtime > best_mtime )); then
+                best_mtime=$latest_mtime
+                best_match="$project_name"
+            fi
+        fi
+    done
+
+    if [[ -n "$best_match" ]]; then
+        echo "$best_match"
+        return
+    fi
+
+    # Strategy 2: If PWD-based matching failed (worktrees, unusual paths),
+    # find the most recently active session overall. When you run /tts-unmute,
+    # YOUR session is the one actively writing a transcript right now.
+    local now
+    now=$(date +%s)
+    best_match=""
+    best_mtime=0
+
+    for project_dir in "$projects_dir"/*/; do
+        local project_name
+        project_name=$(basename "$project_dir")
+        for f in "$project_dir"*.jsonl; do
+            [[ -f "$f" ]] || continue
+            local mtime
+            mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+            # Only consider transcripts active in the last 30 seconds
+            local age=$(( now - mtime ))
+            if (( age <= 30 && mtime > best_mtime )); then
+                best_mtime=$mtime
+                best_match="$project_name"
+            fi
+        done
+    done
+
+    if [[ -n "$best_match" ]]; then
+        echo "$best_match"
+        return
+    fi
+
+    # Strategy 3: Fall back to longest prefix match (original behavior)
+    local pwd_transformed
+    pwd_transformed=$(echo "$PWD" | tr '/_.' '---')
+    best_match=""
+    local best_length=0
+
+    for project_dir in "$projects_dir"/*/; do
+        local project_name
+        project_name=$(basename "$project_dir")
+        if [[ "$pwd_transformed" == "$project_name"* ]]; then
+            local len=${#project_name}
+            if (( len > best_length )); then
+                best_match="$project_name"
+                best_length=$len
+            fi
+        fi
+    done
+
+    echo "${best_match:-$pwd_transformed}"
 }
 
 # --- Load config from config.json ---

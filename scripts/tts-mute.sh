@@ -12,8 +12,10 @@
 
 set -euo pipefail
 
-CONFIG_FILE="$HOME/.claude-tts/config.json"
-PROJECTS_DIR="$HOME/.claude/projects"
+# shellcheck source=tts-lib.sh
+source "$HOME/.claude-tts/tts-lib.sh" 2>/dev/null || source "$(dirname "$0")/tts-lib.sh"
+
+CONFIG_FILE="$TTS_CONFIG_FILE"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "Config file not found: $CONFIG_FILE"
@@ -38,51 +40,6 @@ if [[ "${1:-}" == "--all" ]]; then
     echo "Use /tts-unmute to restore voice for a specific session."
     exit 0
 fi
-
-# --- Session detection (must match speak-response.sh) ---
-# Claude Code creates project folders like: ~/.claude/projects/-Users-foo-bar-project/
-# The folder name is the path with / and _ replaced by -
-# We need to find the LONGEST matching project that contains our current PWD
-get_session_id() {
-    # If explicitly set, use that
-    if [[ -n "${CLAUDE_TTS_SESSION:-}" ]]; then
-        echo "$CLAUDE_TTS_SESSION"
-        return
-    fi
-
-    # Convert PWD to Claude Code format: /Users/foo/_bar -> -Users-foo--bar
-    # Characters /, _, and . are replaced with -
-    local pwd_transformed
-    pwd_transformed=$(echo "$PWD" | tr '/_.' '---')
-
-    # Look for the LONGEST project folder that matches our PWD prefix
-    # This is critical: -Users-alice would match everything, but we want
-    # the most specific match like -Users-alice-projects-myproject
-    local best_match=""
-    local best_length=0
-
-    if [[ -d "$PROJECTS_DIR" ]]; then
-        for project_dir in "$PROJECTS_DIR"/*/; do
-            local project_name
-            project_name=$(basename "$project_dir")
-            # Check if our transformed PWD starts with this project name
-            if [[ "$pwd_transformed" == "$project_name"* ]]; then
-                local len=${#project_name}
-                if (( len > best_length )); then
-                    best_match="$project_name"
-                    best_length=$len
-                fi
-            fi
-        done
-    fi
-
-    if [[ -n "$best_match" ]]; then
-        echo "$best_match"
-    else
-        # Fallback: use transformed PWD
-        echo "$pwd_transformed"
-    fi
-}
 
 SESSION=$(get_session_id)
 
