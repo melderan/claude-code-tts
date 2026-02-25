@@ -16,6 +16,7 @@ import argparse
 import fcntl
 import json
 import os
+import secrets
 import signal
 import subprocess
 import sys
@@ -372,6 +373,80 @@ def speak_announcement(text: str, persona: str = "claude-prime") -> None:
         audio_file.unlink(missing_ok=True)
 
 
+def handle_control_message(msg: dict) -> None:
+    """Handle a control message with pre_action, speech, and post_action.
+
+    Control messages flow through the queue like regular messages but carry
+    actions that execute before and/or after speech. This makes the queue
+    the single coordination point for all daemon state transitions.
+    """
+    pre_action = msg.get("pre_action")
+    post_action = msg.get("post_action")
+    text = msg.get("text", "")
+    persona = msg.get("persona", "claude-prime")
+
+    log(f"Control message: pre={pre_action}, post={post_action}, text={text[:50]!r}")
+
+    # --- Pre-action ---
+    if pre_action == "drain":
+        # In our serial architecture, drain is a no-op: the queue processes
+        # messages in order, so by the time we get here, any previous message
+        # has already finished playing. This establishes the semantic contract
+        # for future parallel processing.
+        log("Control: drain (no-op in serial mode)")
+
+    # --- Speak (if text provided) ---
+    if text.strip():
+        speak_announcement(text, persona)
+
+    # --- Post-action ---
+    if post_action == "restart":
+        log("Control: executing restart via os.execv")
+        # Write version marker so installer knows we support control messages
+        version_file = Path.home() / ".claude-tts" / "daemon.version"
+        version_file.write_text("control-v1")
+        # Clean up before re-exec
+        HEARTBEAT_FILE.unlink(missing_ok=True)
+        release_lock()
+        # Re-exec with new code (already installed by the time we process this)
+        daemon_script = str(Path(__file__).resolve())
+        os.execv(sys.executable, [sys.executable, daemon_script, "--foreground"])
+    elif post_action == "reload_config":
+        log("Control: reloading config")
+        # Config is re-read each iteration via get_persona_config(), so this
+        # is mainly for queue config changes. Caller should re-read.
+    elif post_action == "stop":
+        global _shutdown_requested
+        _shutdown_requested = True
+        log("Control: stop requested")
+
+
+def write_control_message(text: str = "", pre_action: Optional[str] = None,
+                          post_action: Optional[str] = None) -> Path:
+    """Write a control message to the queue directory. Returns the queue file path."""
+    queue_dir = Path.home() / ".claude-tts" / "queue"
+    queue_dir.mkdir(parents=True, exist_ok=True)
+
+    msg = {
+        "id": secrets.token_hex(8),
+        "timestamp": time.time(),
+        "type": "control",
+        "session_id": "system",
+        "text": text,
+    }
+    if pre_action:
+        msg["pre_action"] = pre_action
+    if post_action:
+        msg["post_action"] = post_action
+
+    queue_file = queue_dir / f"{msg['timestamp']}_{msg['id']}.json"
+    tmp_file = queue_file.with_suffix(".tmp")
+    tmp_file.write_text(json.dumps(msg))
+    tmp_file.rename(queue_file)
+    log(f"Control message written: {queue_file.name}")
+    return queue_file
+
+
 def generate_speech(text: str, persona: str, output_file: Path) -> bool:
     """Generate speech audio using Piper. Returns True on success."""
     import shutil
@@ -510,6 +585,10 @@ def daemon_loop(lockpick: bool = False) -> None:
         f"max_age={config['max_age_seconds']}s, "
         f"transition={config['speaker_transition']}")
 
+    # Write version marker so installer knows we support control messages
+    version_file = Path.home() / ".claude-tts" / "daemon.version"
+    version_file.write_text("control-v1")
+
     # Startup announcement
     write_heartbeat()
     speak_announcement("Voice daemon online. Ready when you are.")
@@ -575,6 +654,12 @@ def daemon_loop(lockpick: bool = False) -> None:
             # Process the oldest message
             msg = messages[0]
             msg_file = msg["_file"]
+
+            # --- Control messages: pre_action → speak → post_action ---
+            if msg.get("type") == "control":
+                handle_control_message(msg)
+                msg_file.unlink(missing_ok=True)
+                continue
 
             session_id = msg.get("session_id", "unknown")
             project = msg.get("project", "unknown")
@@ -877,8 +962,23 @@ Examples:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["start", "stop", "status"],
+        choices=["start", "stop", "status", "control"],
         help="Daemon command",
+    )
+    parser.add_argument(
+        "--text", "-t",
+        default="",
+        help="Text to speak (for control messages)",
+    )
+    parser.add_argument(
+        "--pre-action",
+        default=None,
+        help="Action before speech: drain",
+    )
+    parser.add_argument(
+        "--post-action",
+        default=None,
+        help="Action after speech: restart, reload_config, stop",
     )
     parser.add_argument(
         "--foreground", "-f",
@@ -901,6 +1001,13 @@ Examples:
         stop_daemon()
     elif args.command == "status":
         daemon_status()
+    elif args.command == "control":
+        qf = write_control_message(
+            text=args.text,
+            pre_action=args.pre_action,
+            post_action=args.post_action,
+        )
+        print(f"Control message written: {qf.name}")
     else:
         parser.print_help()
 

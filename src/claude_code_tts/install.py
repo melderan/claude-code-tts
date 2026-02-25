@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "5.9.17"
+__version__ = "5.11.0"
 
 
 # --- Platform Detection ---
@@ -765,25 +765,51 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
             if dry_run:
                 dry("Restart TTS daemon to pick up new code")
             else:
-                info("Restarting TTS daemon to pick up new code...")
-                os.kill(pid, signal.SIGTERM)
-                # Wait for the old daemon to actually die (up to 10s)
-                for _ in range(100):
-                    try:
-                        os.kill(pid, 0)
-                        time.sleep(0.1)
-                    except ProcessLookupError:
-                        break
-                # Daemon will auto-restart via launchd/systemd, or we start it
-                daemon_script = TTS_CONFIG_DIR / "tts-daemon.py"
-                if daemon_script.exists():
-                    subprocess.Popen(
-                        ["python3", str(daemon_script), "start"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
-                    )
-                    time.sleep(0.5)
-                success("Daemon restarted")
+                # Check if daemon supports control messages
+                version_file = TTS_CONFIG_DIR / "daemon.version"
+                supports_control = (version_file.exists() and
+                                    "control" in version_file.read_text())
+
+                if supports_control:
+                    # Queue-based restart: drop a control message, daemon
+                    # processes it in order (no overlap with active speech)
+                    import secrets as _secrets
+                    queue_dir = TTS_CONFIG_DIR / "queue"
+                    queue_dir.mkdir(parents=True, exist_ok=True)
+                    msg = {
+                        "id": _secrets.token_hex(8),
+                        "timestamp": time.time(),
+                        "type": "control",
+                        "session_id": "installer",
+                        "text": "Installing updates. Back in a moment.",
+                        "pre_action": "drain",
+                        "post_action": "restart",
+                        "persona": "claude-prime",
+                    }
+                    queue_file = queue_dir / f"{msg['timestamp']}_{msg['id']}.json"
+                    tmp_file = queue_file.with_suffix(".tmp")
+                    tmp_file.write_text(json.dumps(msg))
+                    tmp_file.rename(queue_file)
+                    success("Daemon restart queued (will restart after current speech)")
+                else:
+                    # Legacy fallback: SIGTERM + wait + start
+                    info("Restarting TTS daemon to pick up new code...")
+                    os.kill(pid, signal.SIGTERM)
+                    for _ in range(100):
+                        try:
+                            os.kill(pid, 0)
+                            time.sleep(0.1)
+                        except ProcessLookupError:
+                            break
+                    daemon_script = TTS_CONFIG_DIR / "tts-daemon.py"
+                    if daemon_script.exists():
+                        subprocess.Popen(
+                            ["python3", str(daemon_script), "start"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL
+                        )
+                        time.sleep(0.5)
+                    success("Daemon restarted")
         except (ValueError, ProcessLookupError, PermissionError):
             pass  # Daemon not running, nothing to restart
 
