@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "5.9.15"
+__version__ = "5.9.16"
 
 
 # --- Platform Detection ---
@@ -313,7 +313,7 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
         else:
             preflight(f"{Colors.GREEN}PASS{Colors.NC} Source {cmd_name} found")
 
-    for script_name in ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh", "tts-builder.sh", "tts-builder.py", "tts-discover.sh", "tts-pause.sh", "tts-lib.sh", "tts-filter.py"]:
+    for script_name in ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh", "tts-builder.sh", "tts-builder.py", "tts-discover.sh", "tts-pause.sh", "tts-lib.sh", "tts-filter.py", "tts-sounds.sh"]:
         src_script = REPO_DIR / "scripts" / script_name
         if not src_script.exists():
             issues.append(f"Source script not found: {src_script}")
@@ -623,6 +623,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
         TTS_CONFIG_DIR / "tts-discover.sh",
         TTS_CONFIG_DIR / "tts-pause.sh",
         TTS_CONFIG_DIR / "tts-filter.py",
+        TTS_CONFIG_DIR / "tts-sounds.sh",
     ]
 
     backed_up_count = 0
@@ -743,7 +744,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
 
     TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    for script_name in ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh", "tts-builder.sh", "tts-builder.py", "tts-discover.sh", "tts-pause.sh", "tts-lib.sh", "tts-filter.py"]:
+    for script_name in ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh", "tts-builder.sh", "tts-builder.py", "tts-discover.sh", "tts-pause.sh", "tts-lib.sh", "tts-filter.py", "tts-sounds.sh"]:
         src_script = REPO_DIR / "scripts" / script_name
         dst_script = TTS_CONFIG_DIR / script_name
         if src_script.exists():
@@ -1130,6 +1131,7 @@ def check_for_updates() -> dict:
         (TTS_CONFIG_DIR / "tts-discover.sh", REPO_DIR / "scripts" / "tts-discover.sh"),
         (TTS_CONFIG_DIR / "tts-pause.sh", REPO_DIR / "scripts" / "tts-pause.sh"),
         (TTS_CONFIG_DIR / "tts-filter.py", REPO_DIR / "scripts" / "tts-filter.py"),
+        (TTS_CONFIG_DIR / "tts-sounds.sh", REPO_DIR / "scripts" / "tts-sounds.sh"),
     ]
 
     for installed, repo in files_to_check:
