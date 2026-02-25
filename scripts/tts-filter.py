@@ -46,6 +46,17 @@ def filter_text(text: str) -> str:
     # Remove bare URLs
     text = re.sub(r"https?://\S+", "", text)
 
+    # Remove API error request IDs (e.g., "req_abc123...")
+    text = re.sub(r"\breq_[a-zA-Z0-9_-]+\b", "", text)
+
+    # Strip agent launch boilerplate
+    text = re.sub(r"(?i)^.*(?:let me (?:launch|use|start) (?:a |an |the )?(?:sub)?agent|I'll (?:launch|use|start) (?:a |an |the )?(?:sub)?agent).*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"(?i)^.*(?:I'm going to use the Task tool|Using the .* agent).*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"(?i)^.*(?:Let me explore the codebase|I'll explore the codebase).*$", "", text, flags=re.MULTILINE)
+
+    # Strip tool invocation narration
+    text = re.sub(r"(?i)^.*(?:Let me read|I'll read|Let me check|I'll check) (?:the |that |this )?(?:file|code|output).*$", "", text, flags=re.MULTILINE)
+
     # Normalize whitespace
     text = " ".join(text.split()).strip()
 

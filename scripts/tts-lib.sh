@@ -299,7 +299,29 @@ tts_state_file() {
     echo "${TTS_STATE_DIR}/claude_tts_spoken_${TTS_SESSION}.state"
 }
 
+# Atomic mkdir-based lock (works on macOS and Linux, no flock needed)
+_tts_watermark_lock() {
+    local lockdir="${TTS_STATE_DIR}/claude_tts_wm_${TTS_SESSION}.lock"
+    local attempts=0
+    while ! mkdir "$lockdir" 2>/dev/null; do
+        attempts=$((attempts + 1))
+        if (( attempts > 20 )); then
+            tts_debug "Watermark lock timeout, breaking stale lock"
+            rm -rf "$lockdir"
+            mkdir "$lockdir" 2>/dev/null || true
+            break
+        fi
+        sleep 0.05
+    done
+}
+
+_tts_watermark_unlock() {
+    local lockdir="${TTS_STATE_DIR}/claude_tts_wm_${TTS_SESSION}.lock"
+    rm -rf "$lockdir" 2>/dev/null || true
+}
+
 tts_read_watermark() {
+    _tts_watermark_lock
     local state_file=$(tts_state_file)
     local wm=0
     if [[ -f "$state_file" ]]; then
@@ -319,12 +341,15 @@ tts_read_watermark() {
         fi
     fi
 
+    _tts_watermark_unlock
     echo "$wm"
 }
 
 tts_write_watermark() {
+    _tts_watermark_lock
     local line_count="$1"
     echo "$line_count" > "$(tts_state_file)"
+    _tts_watermark_unlock
 }
 
 tts_clear_watermark() {
