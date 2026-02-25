@@ -14,7 +14,6 @@ tts_debug() {
 # --- Configuration ---
 TTS_CONFIG_FILE="$HOME/.claude-tts/config.json"
 TTS_QUEUE_DIR="$HOME/.claude-tts/queue"
-TTS_MUTE_FILE="/tmp/claude_tts_muted"
 
 # --- Read hook input and extract transcript path ---
 # Sets: INPUT, TRANSCRIPT_PATH
@@ -243,10 +242,6 @@ tts_load_config() {
 tts_should_exit() {
     if [[ "${CLAUDE_TTS_ENABLED:-1}" != "1" ]]; then
         tts_debug "TTS disabled via env var"
-        return 0
-    fi
-    if [[ -f "$TTS_MUTE_FILE" ]]; then
-        tts_debug "TTS muted via mute file (legacy)"
         return 0
     fi
     if [[ -z "$TRANSCRIPT_PATH" || ! -f "$TRANSCRIPT_PATH" ]]; then
