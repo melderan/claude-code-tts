@@ -31,6 +31,13 @@ tts_debug "=== PostToolUse hook triggered ==="
 tts_read_input
 if tts_should_exit; then exit 0; fi
 
+# --- Skip tool types that produce boilerplate narration ---
+TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
+if [[ "$TOOL_NAME" == "Task" || "$TOOL_NAME" == "TodoWrite" ]]; then
+    tts_debug "PostToolUse: skipping tool type $TOOL_NAME"
+    exit 0
+fi
+
 # --- Detect session and load config ---
 tts_detect_session
 tts_load_config
