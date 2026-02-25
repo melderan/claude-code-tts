@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "5.11.0"
+__version__ = "5.11.2"
 
 
 # --- Platform Detection ---
@@ -108,6 +108,35 @@ def _find_repo_dir() -> Path:
     return SCRIPT_DIR.parent
 
 REPO_DIR = _find_repo_dir()
+
+TTS_CONFIG_DIR = HOME / ".claude-tts"
+TTS_CONFIG_FILE = TTS_CONFIG_DIR / "config.json"
+
+# Single source of truth for all installable files.
+# Adding a new file = one edit to this dict.
+MANIFEST: dict[str, list[str]] = {
+    "hooks": ["speak-response.sh", "speak-intermediate.sh", "play-sound.sh"],
+    "commands": ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md", "tts-persona.md", "tts-status.md", "tts-cleanup.md", "tts-random.md", "tts-test.md", "tts-discover.md"],
+    "scripts": ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh", "tts-builder.sh", "tts-builder.py", "tts-discover.sh", "tts-pause.sh", "tts-lib.sh", "tts-filter.py", "tts-sounds.sh"],
+}
+
+
+def _manifest_dirs(category: str) -> tuple[str, Path]:
+    """Return (repo_subdir, install_dir) for a manifest category."""
+    return {
+        "hooks": ("hooks", HOOKS_DIR),
+        "commands": ("commands", COMMANDS_DIR),
+        "scripts": ("scripts", TTS_CONFIG_DIR),
+    }[category]
+
+
+def _manifest_entries():
+    """Yield (name, src_path, dst_path) for all manifest files."""
+    for category, files in MANIFEST.items():
+        repo_subdir, install_dir = _manifest_dirs(category)
+        for name in files:
+            yield name, REPO_DIR / repo_subdir / name, install_dir / name
+
 
 # Hugging Face Piper voices base URL
 HF_VOICES_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
@@ -297,29 +326,12 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
         preflight(f"{Colors.GREEN}PASS{Colors.NC} curl found")
 
     # Check source files exist
-    for hook_name in ["speak-response.sh", "speak-intermediate.sh", "play-sound.sh"]:
-        src_hook = REPO_DIR / "hooks" / hook_name
-        if not src_hook.exists():
-            issues.append(f"Source hook not found: {src_hook}")
-            preflight(f"{Colors.RED}FAIL{Colors.NC} Source {hook_name} missing")
+    for name, src_path, dst_path in _manifest_entries():
+        if not src_path.exists():
+            issues.append(f"Source file not found: {src_path}")
+            preflight(f"{Colors.RED}FAIL{Colors.NC} Source {name} missing")
         else:
-            preflight(f"{Colors.GREEN}PASS{Colors.NC} Source {hook_name} found")
-
-    for cmd_name in ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md", "tts-persona.md", "tts-status.md", "tts-cleanup.md", "tts-random.md", "tts-test.md", "tts-discover.md"]:
-        src_cmd = REPO_DIR / "commands" / cmd_name
-        if not src_cmd.exists():
-            issues.append(f"Source command not found: {src_cmd}")
-            preflight(f"{Colors.RED}FAIL{Colors.NC} Source {cmd_name} missing")
-        else:
-            preflight(f"{Colors.GREEN}PASS{Colors.NC} Source {cmd_name} found")
-
-    for script_name in ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh", "tts-builder.sh", "tts-builder.py", "tts-discover.sh", "tts-pause.sh", "tts-lib.sh", "tts-filter.py", "tts-sounds.sh"]:
-        src_script = REPO_DIR / "scripts" / script_name
-        if not src_script.exists():
-            issues.append(f"Source script not found: {src_script}")
-            preflight(f"{Colors.RED}FAIL{Colors.NC} Source {script_name} missing")
-        else:
-            preflight(f"{Colors.GREEN}PASS{Colors.NC} Source {script_name} found")
+            preflight(f"{Colors.GREEN}PASS{Colors.NC} Source {name} found")
 
     # Check write permissions for target directories
     test_dirs = [HOME / ".claude", HOME / ".local" / "share"]
@@ -404,27 +416,27 @@ def do_uninstall(dry_run: bool = False) -> None:
     if SETTINGS_FILE.exists():
         backup.backup_file(SETTINGS_FILE)
 
-    # Remove hook scripts
-    for hook_name in ["speak-response.sh", "speak-intermediate.sh", "play-sound.sh"]:
-        hook_file = HOOKS_DIR / hook_name
-        if hook_file.exists():
-            if dry_run:
-                dry(f"rm {hook_file}")
-            else:
-                hook_file.unlink()
-            success(f"Removed hook: {hook_file}")
+    # Remove hook scripts and slash commands
+    for category in ("hooks", "commands"):
+        _subdir, install_dir = _manifest_dirs(category)
+        for name in MANIFEST[category]:
+            f = install_dir / name
+            if f.exists():
+                if dry_run:
+                    dry(f"rm {f}")
+                else:
+                    f.unlink()
+                success(f"Removed {category[:-1]}: {f}")
 
-    # Remove slash commands
-    for cmd_name in ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md", "tts-persona.md",
-                      "tts-status.md", "tts-cleanup.md", "tts-random.md", "tts-test.md", "tts-discover.md",
-                      "mute.md", "unmute.md", "speed.md", "sounds.md", "persona.md"]:  # Include old names for cleanup
-        cmd_file = COMMANDS_DIR / cmd_name
+    # Clean up old command names (v1.x -> v2.x, v3.x -> v4.x migration)
+    for old_cmd in ["mute.md", "unmute.md", "speed.md", "sounds.md", "persona.md"]:
+        cmd_file = COMMANDS_DIR / old_cmd
         if cmd_file.exists():
             if dry_run:
                 dry(f"rm {cmd_file}")
             else:
                 cmd_file.unlink()
-            success(f"Removed command: /{cmd_name.replace('.md', '')}")
+            success(f"Removed command: /{old_cmd.replace('.md', '')}")
 
     # Remove mute file
     mute_file = Path("/tmp/claude_tts_muted")
@@ -590,41 +602,9 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
     print()
     info("Creating backups of existing files...")
 
-    files_to_backup = [
-        SETTINGS_FILE,
-        HOOKS_DIR / "speak-response.sh",
-        HOOKS_DIR / "speak-intermediate.sh",
-        HOOKS_DIR / "play-sound.sh",
-        COMMANDS_DIR / "tts-mute.md",
-        COMMANDS_DIR / "tts-unmute.md",
-        COMMANDS_DIR / "tts-speed.md",
-        COMMANDS_DIR / "tts-sounds.md",
-        COMMANDS_DIR / "tts-mode.md",
-        COMMANDS_DIR / "tts-persona.md",
-        COMMANDS_DIR / "tts-status.md",
-        COMMANDS_DIR / "tts-cleanup.md",
-        COMMANDS_DIR / "tts-random.md",
-        COMMANDS_DIR / "tts-test.md",
-        COMMANDS_DIR / "tts-discover.md",
-        TTS_CONFIG_DIR / "tts-daemon.py",
-        TTS_CONFIG_DIR / "tts-mode.sh",
-        TTS_CONFIG_DIR / "tts-mute.sh",
-        TTS_CONFIG_DIR / "tts-unmute.sh",
-        TTS_CONFIG_DIR / "tts-status.sh",
-        TTS_CONFIG_DIR / "tts-speed.sh",
-        TTS_CONFIG_DIR / "tts-persona.sh",
-        TTS_CONFIG_DIR / "tts-cleanup.sh",
-        TTS_CONFIG_DIR / "tts-random.sh",
-        TTS_CONFIG_DIR / "tts-test.sh",
-        TTS_CONFIG_DIR / "tts-speak.sh",
-        TTS_CONFIG_DIR / "tts-audition.sh",
-        TTS_CONFIG_DIR / "tts-builder.sh",
-        TTS_CONFIG_DIR / "tts-builder.py",
-        TTS_CONFIG_DIR / "tts-discover.sh",
-        TTS_CONFIG_DIR / "tts-pause.sh",
-        TTS_CONFIG_DIR / "tts-filter.py",
-        TTS_CONFIG_DIR / "tts-sounds.sh",
-    ]
+    files_to_backup = [SETTINGS_FILE]
+    for _name, _src, dst_path in _manifest_entries():
+        files_to_backup.append(dst_path)
 
     backed_up_count = 0
     for f in files_to_backup:
@@ -711,26 +691,19 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
     # --- Install hook scripts ---
 
     print()
-    for hook_name in ["speak-response.sh", "speak-intermediate.sh", "play-sound.sh"]:
-        src_hook = REPO_DIR / "hooks" / hook_name
-        dst_hook = HOOKS_DIR / hook_name
-        if dry_run:
-            dry(f"cp {src_hook} -> {dst_hook}")
-        else:
-            shutil.copy(src_hook, dst_hook)
-            dst_hook.chmod(0o755)
-    success(f"Hooks: speak-response.sh, speak-intermediate.sh, play-sound.sh")
-
-    # --- Install slash commands ---
-
-    for cmd_name in ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md", "tts-persona.md", "tts-status.md", "tts-cleanup.md", "tts-random.md", "tts-test.md", "tts-discover.md"]:
-        src_cmd = REPO_DIR / "commands" / cmd_name
-        dst_cmd = COMMANDS_DIR / cmd_name
-        if dry_run:
-            dry(f"cp {src_cmd} -> {dst_cmd}")
-        else:
-            shutil.copy(src_cmd, dst_cmd)
-    success("Commands: /tts-mute, /tts-unmute, /tts-speed, /tts-sounds, /tts-mode, /tts-persona, /tts-status, /tts-cleanup, /tts-random, /tts-test, /tts-discover")
+    for category, files in MANIFEST.items():
+        repo_subdir, install_dir = _manifest_dirs(category)
+        install_dir.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            src = REPO_DIR / repo_subdir / name
+            dst = install_dir / name
+            if src.exists():
+                if dry_run:
+                    dry(f"cp {src} -> {dst}")
+                else:
+                    shutil.copy(src, dst)
+                    dst.chmod(0o755)
+        success(f"Installed {category}: {len(files)} files")
 
     # Clean up old command names (v1.x -> v2.x, v3.x -> v4.x migration)
     for old_cmd in ["mute.md", "unmute.md", "speed.md", "sounds.md", "persona.md"]:
@@ -739,22 +712,6 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
             if not dry_run:
                 old_file.unlink()
             info(f"Removed old command: /{old_cmd.replace('.md', '')}")
-
-    # --- Install daemon and mode scripts ---
-
-    TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-    for script_name in ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh", "tts-builder.sh", "tts-builder.py", "tts-discover.sh", "tts-pause.sh", "tts-lib.sh", "tts-filter.py", "tts-sounds.sh"]:
-        src_script = REPO_DIR / "scripts" / script_name
-        dst_script = TTS_CONFIG_DIR / script_name
-        if src_script.exists():
-            if dry_run:
-                dry(f"cp {src_script} -> {dst_script}")
-            else:
-                shutil.copy(src_script, dst_script)
-                dst_script.chmod(0o755)
-
-    success("Scripts installed")
 
     # --- Restart daemon if running (picks up new code) ---
     daemon_pid_file = TTS_CONFIG_DIR / "daemon.pid"
@@ -1003,7 +960,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
             print("  4. Use /unmute to re-enable TTS")
         print()
         print("Configuration:")
-        print(f"  Hook:     {dst_hook}")
+        print(f"  Hook:     {HOOKS_DIR / 'speak-response.sh'}")
         print(f"  Settings: {SETTINGS_FILE}")
         print(f"  Voice:    {VOICE_FILE}")
         print()
@@ -1022,9 +979,6 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
 
 
 # --- Config Management ---
-
-TTS_CONFIG_DIR = HOME / ".claude-tts"
-TTS_CONFIG_FILE = TTS_CONFIG_DIR / "config.json"
 
 DEFAULT_CONFIG = {
     "version": 1,
@@ -1125,43 +1079,7 @@ def check_for_updates() -> dict:
     }
 
     # Files to check
-    files_to_check = [
-        (HOOKS_DIR / "speak-response.sh", REPO_DIR / "hooks" / "speak-response.sh"),
-        (HOOKS_DIR / "speak-intermediate.sh", REPO_DIR / "hooks" / "speak-intermediate.sh"),
-        (HOOKS_DIR / "play-sound.sh", REPO_DIR / "hooks" / "play-sound.sh"),
-        (COMMANDS_DIR / "tts-mute.md", REPO_DIR / "commands" / "tts-mute.md"),
-        (COMMANDS_DIR / "tts-unmute.md", REPO_DIR / "commands" / "tts-unmute.md"),
-        (COMMANDS_DIR / "tts-speed.md", REPO_DIR / "commands" / "tts-speed.md"),
-        (COMMANDS_DIR / "tts-sounds.md", REPO_DIR / "commands" / "tts-sounds.md"),
-        (COMMANDS_DIR / "tts-mode.md", REPO_DIR / "commands" / "tts-mode.md"),
-        (COMMANDS_DIR / "tts-persona.md", REPO_DIR / "commands" / "tts-persona.md"),
-        (COMMANDS_DIR / "tts-status.md", REPO_DIR / "commands" / "tts-status.md"),
-        (COMMANDS_DIR / "tts-cleanup.md", REPO_DIR / "commands" / "tts-cleanup.md"),
-        (COMMANDS_DIR / "tts-random.md", REPO_DIR / "commands" / "tts-random.md"),
-        (COMMANDS_DIR / "tts-test.md", REPO_DIR / "commands" / "tts-test.md"),
-        (COMMANDS_DIR / "tts-discover.md", REPO_DIR / "commands" / "tts-discover.md"),
-        (TTS_CONFIG_DIR / "tts-daemon.py", REPO_DIR / "scripts" / "tts-daemon.py"),
-        (TTS_CONFIG_DIR / "tts-mode.sh", REPO_DIR / "scripts" / "tts-mode.sh"),
-        (TTS_CONFIG_DIR / "tts-mute.sh", REPO_DIR / "scripts" / "tts-mute.sh"),
-        (TTS_CONFIG_DIR / "tts-unmute.sh", REPO_DIR / "scripts" / "tts-unmute.sh"),
-        (TTS_CONFIG_DIR / "tts-status.sh", REPO_DIR / "scripts" / "tts-status.sh"),
-        (TTS_CONFIG_DIR / "tts-speed.sh", REPO_DIR / "scripts" / "tts-speed.sh"),
-        (TTS_CONFIG_DIR / "tts-persona.sh", REPO_DIR / "scripts" / "tts-persona.sh"),
-        (TTS_CONFIG_DIR / "tts-cleanup.sh", REPO_DIR / "scripts" / "tts-cleanup.sh"),
-        (TTS_CONFIG_DIR / "tts-random.sh", REPO_DIR / "scripts" / "tts-random.sh"),
-        (TTS_CONFIG_DIR / "tts-test.sh", REPO_DIR / "scripts" / "tts-test.sh"),
-        (TTS_CONFIG_DIR / "tts-speak.sh", REPO_DIR / "scripts" / "tts-speak.sh"),
-        (TTS_CONFIG_DIR / "tts-audition.sh", REPO_DIR / "scripts" / "tts-audition.sh"),
-        (TTS_CONFIG_DIR / "tts-builder.sh", REPO_DIR / "scripts" / "tts-builder.sh"),
-        (TTS_CONFIG_DIR / "tts-builder.py", REPO_DIR / "scripts" / "tts-builder.py"),
-        (TTS_CONFIG_DIR / "tts-discover.sh", REPO_DIR / "scripts" / "tts-discover.sh"),
-        (TTS_CONFIG_DIR / "tts-pause.sh", REPO_DIR / "scripts" / "tts-pause.sh"),
-        (TTS_CONFIG_DIR / "tts-filter.py", REPO_DIR / "scripts" / "tts-filter.py"),
-        (TTS_CONFIG_DIR / "tts-sounds.sh", REPO_DIR / "scripts" / "tts-sounds.sh"),
-    ]
-
-    for installed, repo in files_to_check:
-        name = installed.name
+    for name, repo, installed in _manifest_entries():
         installed_hash = get_file_hash(installed)
         repo_hash = get_file_hash(repo)
 
