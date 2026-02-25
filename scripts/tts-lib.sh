@@ -345,9 +345,17 @@ tts_speak() {
         fi
 
         if [[ "$daemon_healthy" == "false" ]]; then
-            tts_debug "Daemon not healthy, starting..."
-            "$HOME/.claude-tts/tts-mode.sh" start >/dev/null 2>&1 &
-            sleep 0.5
+            # Use a lock file to prevent multiple hooks from racing to restart
+            local restart_lock="$HOME/.claude-tts/daemon.restarting"
+            if ( set -o noclobber; echo $$ > "$restart_lock" ) 2>/dev/null; then
+                tts_debug "Daemon not healthy, starting..."
+                "$HOME/.claude-tts/tts-mode.sh" start >/dev/null 2>&1 &
+                sleep 0.5
+                rm -f "$restart_lock"
+            else
+                tts_debug "Another hook is already restarting daemon, waiting..."
+                sleep 1
+            fi
         fi
 
         tts_debug "Queue mode: writing to daemon queue"

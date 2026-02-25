@@ -45,6 +45,8 @@ if [[ "$TTS_MUTED" == "true" ]]; then
 fi
 
 # --- Check watermark: only speak text after what PostToolUse already spoke ---
+# Brief yield to let any concurrent PostToolUse finish writing its watermark
+sleep 0.1
 WATERMARK=$(tts_read_watermark)
 CURRENT_LINES=$(wc -l < "$TRANSCRIPT_PATH" | tr -d ' ')
 tts_debug "Stop: watermark=$WATERMARK current=$CURRENT_LINES"
