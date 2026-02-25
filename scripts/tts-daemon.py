@@ -38,6 +38,12 @@ VOICES_DIR = HOME / ".local" / "share" / "piper-voices"
 # Global lock file handle (kept open while daemon runs)
 _lock_fd = None
 
+# Heartbeat file -- daemon touches this every poll cycle so hooks can detect stalls
+HEARTBEAT_FILE = TTS_CONFIG_DIR / "daemon.heartbeat"
+
+# Graceful shutdown flag -- set by SIGTERM handler, checked by main loop
+_shutdown_requested = False
+
 # Default voice model
 DEFAULT_VOICE = "en_US-hfc_male-medium"
 
@@ -128,6 +134,27 @@ def release_lock() -> None:
         except Exception:
             pass
         _lock_fd = None
+
+
+# --- Heartbeat ---
+
+def write_heartbeat() -> None:
+    """Touch the heartbeat file so hooks know we're alive."""
+    try:
+        HEARTBEAT_FILE.write_text(str(time.time()))
+    except Exception:
+        pass
+
+
+def daemon_is_healthy() -> bool:
+    """Check if the daemon has heartbeated recently (for use by hooks)."""
+    if not HEARTBEAT_FILE.exists():
+        return False
+    try:
+        last_beat = float(HEARTBEAT_FILE.read_text().strip())
+        return (time.time() - last_beat) < 10
+    except (ValueError, IOError):
+        return False
 
 
 # --- Config Loading ---
@@ -331,6 +358,19 @@ def play_chime() -> None:
         pass
 
 
+def speak_announcement(text: str, persona: str = "claude-prime") -> None:
+    """Speak a short announcement (used for daemon lifecycle messages)."""
+    audio_file = Path("/tmp/tts_daemon_announce.wav")
+    if generate_speech(text, persona, audio_file):
+        persona_config = get_persona_config(persona)
+        speed = persona_config.get("speed", 2.0)
+        if persona_config.get("speed_method") == "playback":
+            play_audio(audio_file, speed)
+        else:
+            play_audio(audio_file)
+        audio_file.unlink(missing_ok=True)
+
+
 def generate_speech(text: str, persona: str, output_file: Path) -> bool:
     """Generate speech audio using Piper. Returns True on success."""
     import shutil
@@ -432,11 +472,22 @@ def enforce_max_depth(max_depth: int) -> int:
 
 def daemon_loop(lockpick: bool = False) -> None:
     """Main daemon processing loop."""
+    global _shutdown_requested
+
     # Acquire exclusive lock to prevent duplicate daemons
     if not acquire_lock(lockpick=lockpick):
         log("Another daemon is already running. Exiting.", "ERROR")
         print("Another daemon is already running. Use --lockpick to force takeover.")
         sys.exit(1)
+
+    # Graceful shutdown handler -- sets flag, loop finishes current work
+    def handle_shutdown(signum: int, frame: object) -> None:
+        global _shutdown_requested
+        _shutdown_requested = True
+        log(f"Shutdown requested (signal {signum}), finishing current work...")
+
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGINT, handle_shutdown)
 
     log("Daemon starting...")
 
@@ -454,8 +505,16 @@ def daemon_loop(lockpick: bool = False) -> None:
         f"max_age={config['max_age_seconds']}s, "
         f"transition={config['speaker_transition']}")
 
-    while True:
+    # Startup announcement
+    write_heartbeat()
+    speak_announcement("Voice daemon online. Ready when you are.")
+    log("Startup announcement complete")
+
+    while not _shutdown_requested:
         try:
+            # Write heartbeat so hooks know we're alive
+            write_heartbeat()
+
             # Cleanup old messages
             cleanup_old_messages(config["max_age_seconds"])
 
@@ -485,9 +544,9 @@ def daemon_loop(lockpick: bool = False) -> None:
                     write_playback_state(current_message=interrupted)
 
                     if persona_config.get("speed_method") == "playback":
-                        success, was_killed = play_audio(audio_file, speed)
+                        _, was_killed = play_audio(audio_file, speed)
                     else:
-                        success, was_killed = play_audio(audio_file)
+                        _, was_killed = play_audio(audio_file)
 
                     audio_file.unlink(missing_ok=True)
 
@@ -566,9 +625,9 @@ def daemon_loop(lockpick: bool = False) -> None:
 
             # Play the pre-generated audio
             if persona_config.get("speed_method") == "playback":
-                success, was_killed = play_audio(audio_file, speed)
+                _, was_killed = play_audio(audio_file, speed)
             else:
-                success, was_killed = play_audio(audio_file)
+                _, was_killed = play_audio(audio_file)
 
             audio_file.unlink(missing_ok=True)
 
@@ -591,6 +650,10 @@ def daemon_loop(lockpick: bool = False) -> None:
             log(f"Error in daemon loop: {e}", "ERROR")
             time.sleep(1)  # Avoid tight error loop
 
+    # Graceful shutdown -- announce and clean up
+    log("Shutting down gracefully...")
+    speak_announcement("Voice daemon shutting down. Catch you later.")
+    HEARTBEAT_FILE.unlink(missing_ok=True)
     release_lock()
     log("Daemon stopped")
 
@@ -663,8 +726,7 @@ def start_daemon(lockpick: bool = False) -> bool:
     TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     PID_FILE.write_text(str(os.getpid()))
 
-    # Setup signal handlers
-    signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
+    # Ignore SIGHUP (terminal closed) -- SIGTERM/SIGINT handled in daemon_loop
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
     # Cleanup PID file on exit
@@ -680,28 +742,35 @@ def start_daemon(lockpick: bool = False) -> bool:
 
 
 def stop_daemon() -> bool:
-    """Stop the daemon. Returns True on success."""
+    """Stop the daemon gracefully. Returns True on success."""
     running, pid = is_daemon_running()
 
     if not running:
         print("Daemon is not running")
         return False
 
+    assert pid is not None  # guaranteed by is_daemon_running returning True
+
     try:
         os.kill(pid, signal.SIGTERM)
-        # Wait for process to exit
-        for _ in range(50):  # 5 seconds max
+        # Give daemon time to finish current audio + speak goodbye (~15s max)
+        for i in range(150):
             time.sleep(0.1)
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
                 PID_FILE.unlink(missing_ok=True)
-                print("Daemon stopped")
+                print("Daemon stopped gracefully")
                 return True
+            # Progress indicator every 3 seconds
+            if i > 0 and i % 30 == 0:
+                print(f"  Waiting for daemon to finish... ({i // 10}s)")
 
-        # Force kill if still running
+        # Force kill if still running after 15 seconds
+        print("Daemon did not stop gracefully, forcing...")
         os.kill(pid, signal.SIGKILL)
         PID_FILE.unlink(missing_ok=True)
+        HEARTBEAT_FILE.unlink(missing_ok=True)
         print("Daemon killed")
         return True
     except ProcessLookupError:
