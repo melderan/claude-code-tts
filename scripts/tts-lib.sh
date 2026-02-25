@@ -48,6 +48,13 @@ get_session_id() {
         return
     fi
 
+    # If PROJECT_ROOT is set (Claude Code always exports it), derive session
+    # ID directly -- no heuristics needed.
+    if [[ -n "${PROJECT_ROOT:-}" ]]; then
+        echo "$PROJECT_ROOT" | tr '/' '-'
+        return
+    fi
+
     local projects_dir="$HOME/.claude/projects"
     [[ -d "$projects_dir" ]] || { echo "unknown"; return; }
 
