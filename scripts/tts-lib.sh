@@ -432,11 +432,25 @@ tts_state_file() {
 
 tts_read_watermark() {
     local state_file=$(tts_state_file)
+    local wm=0
     if [[ -f "$state_file" ]]; then
-        cat "$state_file" 2>/dev/null || echo "0"
-    else
-        echo "0"
+        wm=$(cat "$state_file" 2>/dev/null || echo "0")
     fi
+
+    # Auto-reset stale watermark: if the transcript is shorter than the
+    # watermark, a new session started in the same project. Reset to 0
+    # so we don't skip every message in the new conversation.
+    if [[ -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
+        local current
+        current=$(wc -l < "$TRANSCRIPT_PATH" | tr -d ' ')
+        if (( wm > current )); then
+            tts_debug "Watermark reset: was $wm but transcript only has $current lines (new session)"
+            wm=0
+            echo "0" > "$state_file"
+        fi
+    fi
+
+    echo "$wm"
 }
 
 tts_write_watermark() {
