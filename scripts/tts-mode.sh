@@ -159,7 +159,7 @@ cmd_start() {
             fi
         elif [[ -f "$DAEMON_SCRIPT" ]]; then
             echo "No launchd service, starting standalone..."
-            python3 "$DAEMON_SCRIPT" start
+            uv run --python 3.12 "$DAEMON_SCRIPT" start
         else
             echo "Daemon not installed"
             exit 1
@@ -172,7 +172,7 @@ cmd_start() {
             systemctl --user status "$SYSTEMD_SERVICE" --no-pager | head -3
         elif [[ -f "$DAEMON_SCRIPT" ]]; then
             echo "No systemd service, starting standalone..."
-            python3 "$DAEMON_SCRIPT" start
+            uv run --python 3.12 "$DAEMON_SCRIPT" start
         else
             echo "Daemon not installed"
             exit 1
@@ -191,14 +191,14 @@ cmd_stop() {
             echo "Stopping via launchd..."
             launchctl stop "$LAUNCHD_LABEL"
         elif [[ -f "$DAEMON_SCRIPT" ]]; then
-            python3 "$DAEMON_SCRIPT" stop
+            uv run --python 3.12 "$DAEMON_SCRIPT" stop
         fi
     else
         if systemctl --user is-active "$SYSTEMD_SERVICE" &>/dev/null; then
             echo "Stopping via systemd..."
             systemctl --user stop "$SYSTEMD_SERVICE"
         elif [[ -f "$DAEMON_SCRIPT" ]]; then
-            python3 "$DAEMON_SCRIPT" stop
+            uv run --python 3.12 "$DAEMON_SCRIPT" stop
         fi
     fi
 
@@ -254,7 +254,7 @@ cmd_status() {
 
     echo ""
     if [[ -f "$DAEMON_SCRIPT" ]]; then
-        python3 "$DAEMON_SCRIPT" status
+        uv run --python 3.12 "$DAEMON_SCRIPT" status
     fi
 }
 

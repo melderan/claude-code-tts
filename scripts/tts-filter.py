@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --python 3.12
 """
 tts-filter.py - Text filter for TTS speech synthesis.
 

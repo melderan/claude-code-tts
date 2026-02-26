@@ -5,7 +5,7 @@ After=network.target sound.target
 
 [Service]
 Type=simple
-ExecStart=%h/.claude-tts/tts-daemon.py --foreground
+ExecStart=/usr/bin/env uv run --python 3.12 %h/.claude-tts/tts-daemon.py --foreground
 Restart=on-failure
 RestartSec=5
 
