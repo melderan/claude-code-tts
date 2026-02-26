@@ -411,6 +411,11 @@ def handle_control_message(msg: dict) -> None:
         # which confuses launchd's process tracking (and the plist may use
         # a different python than sys.executable).
         log("Control: exiting for launchd restart")
+        # Delete the control message BEFORE exiting, otherwise the respawned
+        # daemon will find it in the queue and restart again — infinite loop.
+        msg_file = msg.get("_file")
+        if msg_file:
+            Path(msg_file).unlink(missing_ok=True)
         HEARTBEAT_FILE.unlink(missing_ok=True)
         release_lock()
         sys.exit(3)  # Non-zero triggers KeepAlive.SuccessfulExit respawn
