@@ -105,7 +105,7 @@ run_checks() {
 
     # Check 5: Python syntax
     echo -n "5. Checking Python syntax... "
-    if python3 -m py_compile src/claude_code_tts/install.py 2>/dev/null; then
+    if uv run --python 3.12 -m py_compile src/claude_code_tts/install.py 2>/dev/null; then
         echo -e "${GREEN}OK${NC}"
     else
         echo -e "${RED}FAIL${NC}"
@@ -175,7 +175,7 @@ do_release() {
 
     # Sync local install
     echo "Syncing local installation..."
-    python3 src/claude_code_tts/install.py --upgrade 2>&1 | grep -E "Version|Complete" || true
+    uv run --python 3.12 src/claude_code_tts/install.py --upgrade 2>&1 | grep -E "Version|Complete" || true
     echo ""
     echo -e "${GREEN}Done!${NC}"
 }

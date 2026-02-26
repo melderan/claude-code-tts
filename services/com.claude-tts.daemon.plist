@@ -7,7 +7,10 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>--python</string>
+        <string>3.12</string>
         <string>~/.claude-tts/tts-daemon.py</string>
         <string>--foreground</string>
     </array>

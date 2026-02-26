@@ -166,7 +166,7 @@ tts_should_exit() {
 # --- Filter text for speech ---
 # Takes raw text as $1, prints filtered text to stdout
 tts_filter_text() {
-    echo "$1" | python3 "$HOME/.claude-tts/tts-filter.py"
+    echo "$1" | uv run --python 3.12 "$HOME/.claude-tts/tts-filter.py"
 }
 
 # --- Write to queue for daemon ---
