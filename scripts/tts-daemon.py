@@ -401,16 +401,26 @@ def handle_control_message(msg: dict) -> None:
 
     # --- Post-action ---
     if post_action == "restart":
-        log("Control: executing restart via os.execv")
         # Write version marker so installer knows we support control messages
         version_file = Path.home() / ".claude-tts" / "daemon.version"
         version_file.write_text("control-v1")
-        # Clean up before re-exec
-        HEARTBEAT_FILE.unlink(missing_ok=True)
-        release_lock()
-        # Re-exec with new code (already installed by the time we process this)
-        daemon_script = str(Path(__file__).resolve())
-        os.execv(sys.executable, [sys.executable, daemon_script, "--foreground"])
+        # Always exec the INSTALLED copy, not whatever __file__ resolves to
+        # (which could be the repo source if the daemon was started from there)
+        installed_script = str(TTS_CONFIG_DIR / "tts-daemon.py")
+        if not Path(installed_script).exists():
+            log(f"Control: restart failed -- installed script not found at {installed_script}", "ERROR")
+        else:
+            log(f"Control: executing restart via os.execv ({installed_script})")
+            # Clean up before re-exec
+            HEARTBEAT_FILE.unlink(missing_ok=True)
+            release_lock()
+            try:
+                os.execv(sys.executable, [sys.executable, installed_script, "--foreground"])
+            except OSError as e:
+                # os.execv failed -- log it and let the daemon die cleanly
+                # rather than continuing with stale code
+                log(f"Control: os.execv failed: {e}", "ERROR")
+                sys.exit(1)
     elif post_action == "reload_config":
         log("Control: reloading config")
         # Config is re-read each iteration via get_persona_config(), so this
