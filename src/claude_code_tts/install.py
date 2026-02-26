@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "5.12.2"
+__version__ = "5.12.3"
 
 
 # --- Platform Detection ---
@@ -364,6 +364,14 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
         else:
             preflight(f"{Colors.YELLOW}WARN{Colors.NC} WSLg PulseAudio not found - audio may not work")
             preflight(f"{Colors.YELLOW}     {Colors.NC} Make sure you're on Windows 11 with WSLg enabled")
+
+    # Check required: uv (for consistent Python version management)
+    if not command_exists("uv"):
+        preflight(f"{Colors.RED}FAIL{Colors.NC} uv not found (required for Python version management)")
+        preflight(f"{Colors.RED}     {Colors.NC} Install with: curl -LsSf https://astral.sh/uv/install.sh | sh")
+        issues.append("uv not found")
+    else:
+        preflight(f"{Colors.GREEN}PASS{Colors.NC} uv found")
 
     # Check optional dependencies (warnings only)
     if not command_exists("jq"):
@@ -761,7 +769,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
                     daemon_script = TTS_CONFIG_DIR / "tts-daemon.py"
                     if daemon_script.exists():
                         subprocess.Popen(
-                            ["python3", str(daemon_script), "start"],
+                            ["uv", "run", "--python", "3.12", str(daemon_script), "start"],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL
                         )

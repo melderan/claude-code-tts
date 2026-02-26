@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --python 3.12
 """
 tts-daemon.py - Multi-session TTS message bus daemon
 
