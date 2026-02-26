@@ -59,10 +59,12 @@ daemon_running() {
     if [[ -f "$heartbeat" ]]; then
         local last_beat now age
         last_beat=$(cat "$heartbeat" 2>/dev/null)
-        now=$(date +%s)
-        age=$(( now - ${last_beat%%.*} ))
-        if (( age < 10 )); then
-            return 0
+        if [[ -n "$last_beat" ]]; then
+            now=$(date +%s)
+            age=$(( now - ${last_beat%%.*} ))
+            if (( age < 10 )); then
+                return 0
+            fi
         fi
     fi
 
