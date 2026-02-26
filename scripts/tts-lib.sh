@@ -232,8 +232,8 @@ tts_speak() {
         fi
 
         if [[ "$daemon_healthy" == "false" ]]; then
-            tts_debug "Daemon not healthy, falling back to direct mode"
-            TTS_MODE="direct"
+            tts_debug "Daemon not healthy, skipping speech (no fallback to direct mode)"
+            return 0
         else
             tts_debug "Queue mode: writing to daemon queue"
             tts_write_queue "$text" "$TTS_SESSION" "$PROJECT_NAME" "${ACTIVE_PERSONA:-claude-prime}"
