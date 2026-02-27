@@ -43,7 +43,7 @@ NUM_SPEAKERS=10
 SPEAKER_RANGE=""
 SPEED="1.5"
 METHOD="playback"
-TEXT="We choose correctness over convenience. That means if something's broken, we stop, we figure out why, and we fix the real problem. We don't paper over it and hope nobody notices. The proof is in the pods, and right now the pods are looking good."
+TEXT="We choose correctness over convenience. That means if something's broken, we stop, we figure out why, and we fix the real problem. We don't paper over it and hope nobody notices. The proof is in the pods, and right now the pods are looking good. I've been reading through the codebase and I think there's a clean way to refactor this. Let me walk you through what I found and we can decide together how to move forward."
 QUEUE_DIR="$HOME/.claude-tts/queue"
 
 # --- Colors ---
@@ -159,10 +159,10 @@ speak_kokoro() {
 
     if [[ "$QUEUE_MODE" == "true" ]]; then
         # Queue mode: send all four parts as separate queue messages
-        write_audition_queue "$voice" "Hi, my name is ${display_name}." "1.0"
+        write_audition_queue "$voice" "Hi there, my name is ${display_name}, and I'm auditioning for the role of your AI assistant today. I hope you enjoy listening to my voice." "1.0"
         write_audition_queue "$voice" "$TEXT" "1.0"
         write_audition_queue "$voice" "$TEXT" "2.0"
-        write_audition_queue "$voice" "My name is ${display_name}." "1.0"
+        write_audition_queue "$voice" "That was me, ${display_name}. Thanks for listening, and I hope to work with you soon." "1.0"
         # Wait for all audition messages to drain
         local waited=0
         while [[ $(ls "$QUEUE_DIR"/*audition_*.json 2>/dev/null | wc -l) -gt 0 ]]; do
@@ -175,13 +175,13 @@ speak_kokoro() {
         done
     else
         echo -e "  ${CYAN}1x intro${NC}"
-        _kokoro_play "$voice" "Hi, my name is ${display_name}." "1.0"
+        _kokoro_play "$voice" "Hi there, my name is ${display_name}, and I'm auditioning for the role of your AI assistant today. I hope you enjoy listening to my voice." "1.0"
         echo -e "  ${CYAN}1x text${NC}"
         _kokoro_play "$voice" "$TEXT" "1.0"
         echo -e "  ${CYAN}2x text${NC}"
         _kokoro_play "$voice" "$TEXT" "2.0"
-        echo -e "  ${CYAN}1x name${NC}"
-        _kokoro_play "$voice" "My name is ${display_name}." "1.0"
+        echo -e "  ${CYAN}1x outro${NC}"
+        _kokoro_play "$voice" "That was me, ${display_name}. Thanks for listening, and I hope to work with you soon." "1.0"
     fi
 }
 
