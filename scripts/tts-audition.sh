@@ -10,6 +10,7 @@
 #   tts-audition.sh --kokoro                  # Audition all Kokoro voices
 #   tts-audition.sh --kokoro --filter am_     # Audition Kokoro voices matching prefix
 #   tts-audition.sh --kokoro --queue          # Audition via daemon queue (no stomping)
+#   tts-audition.sh --kokoro --blend am_adam,af_heart  # Blend two voices interactively
 #   tts-audition.sh --voice en_US-libritts_r-medium --speakers 10
 #   tts-audition.sh --voice en_US-libritts_r-medium --range 100-150
 #   tts-audition.sh --text "Custom audition line"
@@ -19,6 +20,7 @@
 #   --voice NAME     Audition speakers within a specific Piper voice model
 #   --kokoro         Audition Kokoro voices (via swift-kokoro)
 #   --filter PREFIX  Filter Kokoro voices by prefix (e.g., am_, bf_)
+#   --blend V1,V2    Blend two Kokoro voices interactively (implies --kokoro)
 #   --queue          Play through daemon queue instead of raw afplay
 #   --speakers N     Number of random speakers to audition (default: 10)
 #   --range N-M      Audition specific speaker ID range
@@ -38,6 +40,7 @@ TEMP_FILE="/tmp/tts_audition_$$.wav"
 VOICE=""
 KOKORO_MODE=false
 KOKORO_FILTER=""
+BLEND_VOICES=""
 QUEUE_MODE=false
 NUM_SPEAKERS=10
 SPEAKER_RANGE=""
@@ -72,6 +75,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --filter)
             KOKORO_FILTER="$2"
+            shift 2
+            ;;
+        --blend)
+            BLEND_VOICES="$2"
+            KOKORO_MODE=true
             shift 2
             ;;
         --queue)
@@ -147,6 +155,30 @@ _kokoro_play() {
     local pid=$!
 
     # Poll for space key to skip this section
+    local key=""
+    while kill -0 "$pid" 2>/dev/null; do
+        key=""
+        read -rsn1 -t 1 key || true
+        if [[ "$key" == " " ]]; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            echo -e "  ${YELLOW}(skipped)${NC}"
+            return
+        fi
+    done
+    wait "$pid" 2>/dev/null || true
+}
+
+# --- Helper: generate and play a blended Kokoro clip (space to skip) ---
+_kokoro_blend_play() {
+    local blend_spec="$1"
+    local text="$2"
+    local speed="${3:-1.0}"
+
+    echo "$text" | swift-kokoro --blend "$blend_spec" --output "$TEMP_FILE" 2>/dev/null
+    afplay -r "$speed" "$TEMP_FILE" 2>/dev/null &
+    local pid=$!
+
     local key=""
     while kill -0 "$pid" 2>/dev/null; do
         key=""
@@ -342,6 +374,38 @@ EOF
     echo -e "${GREEN}Saved persona: $name${NC}"
 }
 
+# --- Helper: save blend as persona ---
+save_blend_persona() {
+    local name="$1"
+    local blend_spec="$2"
+
+    local config_file="$HOME/.claude-tts/config.json"
+
+    if [[ ! -f "$config_file" ]]; then
+        echo -e "${RED}Config file not found${NC}"
+        return
+    fi
+
+    local persona_json
+    persona_json=$(cat <<EOF
+{
+    "description": "Blended voice: ${blend_spec}",
+    "voice_kokoro_blend": "${blend_spec}",
+    "speed": ${SPEED},
+    "speed_method": "playback",
+    "max_chars": 10000,
+    "ai_type": "claude"
+}
+EOF
+)
+
+    jq --arg name "$name" --argjson persona "$persona_json" \
+        '.personas[$name] = $persona' "$config_file" > /tmp/config_tmp.json \
+        && mv /tmp/config_tmp.json "$config_file"
+
+    echo -e "${GREEN}Saved blend persona: $name${NC}"
+}
+
 # --- Main ---
 echo ""
 echo -e "${CYAN}========================================${NC}"
@@ -352,7 +416,117 @@ echo -e "Speed: ${SPEED}x (${METHOD})"
 echo -e "Text: \"${TEXT:0:50}...\""
 echo ""
 
-if [[ "$KOKORO_MODE" == "true" ]]; then
+if [[ -n "$BLEND_VOICES" ]]; then
+    # Interactive voice blending mode
+    if ! command -v swift-kokoro &>/dev/null; then
+        echo -e "${RED}swift-kokoro not found${NC}" >&2
+        exit 1
+    fi
+
+    # Parse blend voices (comma-separated)
+    IFS=',' read -ra blend_voices <<< "$BLEND_VOICES"
+    if [[ ${#blend_voices[@]} -lt 2 ]]; then
+        echo -e "${RED}Blend requires at least 2 voices (e.g., --blend am_adam,af_heart)${NC}" >&2
+        exit 1
+    fi
+
+    v1="${blend_voices[0]}"
+    v2="${blend_voices[1]}"
+
+    # Extract human names
+    raw1="${v1#*_}"; raw1="${raw1//_/ }"
+    name1=$(echo "$raw1" | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2)}1')
+    raw2="${v2#*_}"; raw2="${raw2//_/ }"
+    name2=$(echo "$raw2" | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2)}1')
+
+    echo -e "Backend: ${CYAN}Kokoro Voice Blender${NC}"
+    echo -e "Mixing: ${GREEN}${name1}${NC} (${v1}) + ${GREEN}${name2}${NC} (${v2})"
+    echo ""
+
+    # First, play each voice solo so they can hear the originals
+    echo -e "${BLUE}--- Solo: ${name1} ---${NC}"
+    echo -e "  ${YELLOW}\"${TEXT:0:80}...\"${NC}"
+    echo -e "  ${CYAN}[Enter]${NC} Play  ${YELLOW}[s]${NC} Skip"
+    read -rsn1 prekey
+    if [[ "$prekey" != "s" && "$prekey" != "S" ]]; then
+        _kokoro_play "$v1" "$TEXT" "$SPEED"
+    else
+        echo -e "  ${YELLOW}Skipped${NC}"
+    fi
+
+    echo ""
+    echo -e "${BLUE}--- Solo: ${name2} ---${NC}"
+    echo -e "  ${YELLOW}\"${TEXT:0:80}...\"${NC}"
+    echo -e "  ${CYAN}[Enter]${NC} Play  ${YELLOW}[s]${NC} Skip"
+    read -rsn1 prekey
+    if [[ "$prekey" != "s" && "$prekey" != "S" ]]; then
+        _kokoro_play "$v2" "$TEXT" "$SPEED"
+    else
+        echo -e "  ${YELLOW}Skipped${NC}"
+    fi
+
+    echo ""
+    echo -e "${CYAN}========================================${NC}"
+    echo -e "${CYAN}    Blend Ratios${NC}"
+    echo -e "${CYAN}========================================${NC}"
+    echo ""
+
+    # Sweep through blend ratios: 80/20, 60/40, 50/50, 40/60, 20/80
+    ratios=("80:20" "60:40" "50:50" "40:60" "20:80")
+    for ratio in "${ratios[@]}"; do
+        w1="${ratio%:*}"
+        w2="${ratio#*:}"
+        blend_spec="${v1}:${w1},${v2}:${w2}"
+
+        echo ""
+        echo -e "${BLUE}>>> ${name1} ${w1}% + ${name2} ${w2}% <<<${NC}"
+        echo -e "  ${CYAN}[Enter]${NC} Play  ${YELLOW}[s]${NC} Skip  ${RED}[q]${NC} Quit"
+        read -rsn1 prekey
+        case "$prekey" in
+            s|S) echo -e "  ${YELLOW}Skipped${NC}"; continue ;;
+            q|Q) echo -e "${YELLOW}Blend session complete!${NC}"; exit 0 ;;
+        esac
+
+        echo -e "  ${YELLOW}\"${TEXT:0:80}...\"${NC}"
+        _kokoro_blend_play "$blend_spec" "$TEXT" "$SPEED"
+
+        echo ""
+        echo -e "  ${CYAN}[Enter]${NC} Next ratio  ${GREEN}[k]${NC} Keep this blend  ${YELLOW}[r]${NC} Replay  ${RED}[q]${NC} Quit"
+
+        while true; do
+            read -rsn1 key
+            case "$key" in
+                ""|$'\n')
+                    break
+                    ;;
+                k|K)
+                    echo ""
+                    echo -e "${GREEN}Keeping blend: ${blend_spec}${NC}"
+                    echo -n "Save as persona name (or Enter to skip): "
+                    read persona_name
+                    if [[ -n "$persona_name" ]]; then
+                        save_blend_persona "$persona_name" "$blend_spec"
+                    fi
+                    break
+                    ;;
+                r|R)
+                    echo -e "${BLUE}Replaying...${NC}"
+                    _kokoro_blend_play "$blend_spec" "$TEXT" "$SPEED"
+                    ;;
+                q|Q)
+                    echo ""
+                    echo -e "${YELLOW}Blend session complete!${NC}"
+                    exit 0
+                    ;;
+            esac
+        done
+    done
+
+    echo ""
+    echo -e "${GREEN}Blend auditions complete!${NC}"
+    exit 0
+
+elif [[ "$KOKORO_MODE" == "true" ]]; then
     # Kokoro voice auditions
     if ! command -v swift-kokoro &>/dev/null; then
         echo -e "${RED}swift-kokoro not found${NC}" >&2
