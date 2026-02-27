@@ -460,21 +460,38 @@ def write_control_message(text: str = "", pre_action: Optional[str] = None,
 
 
 def generate_speech(text: str, persona: str, output_file: Path,
-                    voice_kokoro_override: str = "") -> bool:
+                    voice_kokoro_override: str = "",
+                    voice_kokoro_blend_override: str = "") -> bool:
     """Generate speech audio using Kokoro (preferred) or Piper. Returns True on success.
 
     Args:
         voice_kokoro_override: If set, use this Kokoro voice name directly
             (bypasses persona config). Used by audition queue messages.
+        voice_kokoro_blend_override: If set, use this blend spec directly
+            (e.g., "am_adam:60,af_heart:40"). Used by blend audition/personas.
     """
     import shutil
 
     persona_config = get_persona_config(persona)
 
-    # Determine Kokoro voice: explicit override > persona config
+    # Determine Kokoro voice/blend: explicit override > persona config
+    kokoro_blend = voice_kokoro_blend_override or persona_config.get("voice_kokoro_blend", "")
     kokoro_voice = voice_kokoro_override or persona_config.get("voice_kokoro", "")
 
-    # Try Kokoro first if a Kokoro voice is configured
+    # Try Kokoro blend first
+    if kokoro_blend and shutil.which("swift-kokoro"):
+        try:
+            cmd = ["swift-kokoro", "--blend", kokoro_blend, "--output", str(output_file)]
+            subprocess.run(cmd, input=text, text=True, check=True, capture_output=True)
+            if output_file.exists():
+                log(f"Kokoro blend generated: {kokoro_blend}")
+                return True
+        except subprocess.CalledProcessError as e:
+            log(f"Kokoro blend failed (falling back): {e}", "WARN")
+        except Exception as e:
+            log(f"Kokoro blend error (falling back): {e}", "WARN")
+
+    # Try Kokoro single voice
     if kokoro_voice and shutil.which("swift-kokoro"):
         try:
             cmd = ["swift-kokoro", "--voice", kokoro_voice, "--output", str(output_file)]
@@ -668,7 +685,10 @@ def daemon_loop(lockpick: bool = False) -> None:
                 i_speed_method = interrupted.get("speed_method", persona_config.get("speed_method", "playback"))
 
                 i_voice_kokoro = interrupted.get("voice_kokoro", "")
-                if generate_speech(text, persona, audio_file, voice_kokoro_override=i_voice_kokoro):
+                i_voice_blend = interrupted.get("voice_kokoro_blend", "")
+                if generate_speech(text, persona, audio_file,
+                                   voice_kokoro_override=i_voice_kokoro,
+                                   voice_kokoro_blend_override=i_voice_blend):
                     # Save as current message in case interrupted again
                     write_playback_state(current_message=interrupted)
 
@@ -724,7 +744,10 @@ def daemon_loop(lockpick: bool = False) -> None:
             speed_method = msg.get("speed_method", persona_config.get("speed_method", "playback"))
 
             voice_kokoro = msg.get("voice_kokoro", "")
-            if not generate_speech(text, persona, audio_file, voice_kokoro_override=voice_kokoro):
+            voice_kokoro_blend = msg.get("voice_kokoro_blend", "")
+            if not generate_speech(text, persona, audio_file,
+                                   voice_kokoro_override=voice_kokoro,
+                                   voice_kokoro_blend_override=voice_kokoro_blend):
                 log(f"Failed to generate speech for message from {project}", "ERROR")
                 msg_file.unlink(missing_ok=True)
                 continue
@@ -760,6 +783,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 "speed": speed,
                 "speed_method": speed_method,
                 "voice_kokoro": voice_kokoro,
+                "voice_kokoro_blend": voice_kokoro_blend,
             }
             write_playback_state(current_message=current_msg_info)
             log(f"Saved current_message for potential replay")

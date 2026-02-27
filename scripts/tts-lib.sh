@@ -68,6 +68,7 @@ tts_load_config() {
     TTS_SPEED_METHOD=""
     TTS_VOICE="${CLAUDE_TTS_VOICE:-$HOME/.local/share/piper-voices/en_US-hfc_male-medium.onnx}"
     TTS_VOICE_KOKORO=""
+    TTS_VOICE_KOKORO_BLEND=""
     TTS_MAX_CHARS="${CLAUDE_TTS_MAX_CHARS:-10000}"
     TTS_MUTED="false"
     TTS_INTERMEDIATE="true"
@@ -94,6 +95,7 @@ tts_load_config() {
                 (.personas[$persona].voice // "-"),
                 (.personas[$persona].max_chars // "-" | tostring),
                 (.personas[$persona].voice_kokoro // "-"),
+                (.personas[$persona].voice_kokoro_blend // "-"),
                 (if .sessions[$s] | has("intermediate") then (.sessions[$s].intermediate | tostring) else "true" end)
             ] | join("|")
         ' "$TTS_CONFIG_FILE" 2>/dev/null)
@@ -101,7 +103,7 @@ tts_load_config() {
         if [[ -n "$CONFIG_JSON" ]]; then
             IFS='|' read -r TTS_MODE CONFIG_MUTED ACTIVE_PERSONA SESSION_SPEED \
                 PERSONA_SPEED PERSONA_SPEED_METHOD PERSONA_VOICE PERSONA_MAX_CHARS \
-                PERSONA_VOICE_KOKORO SESSION_INTERMEDIATE <<< "$CONFIG_JSON"
+                PERSONA_VOICE_KOKORO PERSONA_VOICE_KOKORO_BLEND SESSION_INTERMEDIATE <<< "$CONFIG_JSON"
             # Normalize sentinels back to empty
             [[ "$SESSION_SPEED" == "-" ]] && SESSION_SPEED=""
             [[ "$PERSONA_SPEED" == "-" ]] && PERSONA_SPEED=""
@@ -109,6 +111,7 @@ tts_load_config() {
             [[ "$PERSONA_VOICE" == "-" ]] && PERSONA_VOICE=""
             [[ "$PERSONA_MAX_CHARS" == "-" ]] && PERSONA_MAX_CHARS=""
             [[ "$PERSONA_VOICE_KOKORO" == "-" ]] && PERSONA_VOICE_KOKORO=""
+            [[ "$PERSONA_VOICE_KOKORO_BLEND" == "-" ]] && PERSONA_VOICE_KOKORO_BLEND=""
 
             tts_debug "TTS mode: $TTS_MODE"
             tts_debug "Session: $TTS_SESSION"
@@ -133,6 +136,7 @@ tts_load_config() {
             fi
 
             [[ -n "$PERSONA_VOICE_KOKORO" ]] && TTS_VOICE_KOKORO="$PERSONA_VOICE_KOKORO"
+            [[ -n "$PERSONA_VOICE_KOKORO_BLEND" ]] && TTS_VOICE_KOKORO_BLEND="$PERSONA_VOICE_KOKORO_BLEND"
 
             if [[ "${SESSION_INTERMEDIATE:-}" == "false" ]]; then
                 TTS_INTERMEDIATE="false"
@@ -193,7 +197,8 @@ tts_write_queue() {
   "persona": "$persona",
   "speed": ${TTS_SPEED:-2.0},
   "speed_method": "${TTS_SPEED_METHOD:-playback}",
-  "voice_kokoro": "${TTS_VOICE_KOKORO:-}"
+  "voice_kokoro": "${TTS_VOICE_KOKORO:-}",
+  "voice_kokoro_blend": "${TTS_VOICE_KOKORO_BLEND:-}"
 }
 EOF
 
@@ -263,7 +268,16 @@ tts_speak() {
     local slot=$(( $(date +%s) % 5 ))
     local temp_file="/tmp/claude_tts_${slot}.wav"
 
-    if command -v swift-kokoro &>/dev/null && [[ -n "$TTS_VOICE_KOKORO" ]]; then
+    if command -v swift-kokoro &>/dev/null && [[ -n "$TTS_VOICE_KOKORO_BLEND" ]]; then
+        # Swift Kokoro blend backend
+        echo "$text" | swift-kokoro --blend "$TTS_VOICE_KOKORO_BLEND" --output "$temp_file" 2>/dev/null
+
+        if [[ -f "$temp_file" ]]; then
+            if command -v afplay &>/dev/null; then
+                afplay -r "$TTS_SPEED" "$temp_file" 2>/dev/null &
+            fi
+        fi
+    elif command -v swift-kokoro &>/dev/null && [[ -n "$TTS_VOICE_KOKORO" ]]; then
         # Swift Kokoro backend (CoreML, Apple Silicon native)
         echo "$text" | swift-kokoro --voice "$TTS_VOICE_KOKORO" --output "$temp_file" 2>/dev/null
 
