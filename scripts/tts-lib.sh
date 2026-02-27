@@ -192,7 +192,8 @@ tts_write_queue() {
   "text": $(echo "$text" | jq -Rs .),
   "persona": "$persona",
   "speed": ${TTS_SPEED:-2.0},
-  "speed_method": "${TTS_SPEED_METHOD:-playback}"
+  "speed_method": "${TTS_SPEED_METHOD:-playback}",
+  "voice_kokoro": "${TTS_VOICE_KOKORO:-}"
 }
 EOF
 
