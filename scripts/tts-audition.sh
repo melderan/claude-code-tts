@@ -174,14 +174,25 @@ speak_kokoro() {
             fi
         done
     else
-        echo -e "  ${CYAN}1x intro${NC}"
-        _kokoro_play "$voice" "Hi there, my name is ${display_name}, and I'm auditioning for the role of your AI assistant today. I hope you enjoy listening to my voice." "1.0"
-        echo -e "  ${CYAN}1x text${NC}"
+        local intro_text="Hi there, my name is ${display_name}, and I'm auditioning for the role of your AI assistant today. I hope you enjoy listening to my voice."
+        local outro_text="That was me, ${display_name}. Thanks for listening, and I hope to work with you soon."
+
+        echo ""
+        echo -e "  ${CYAN}[1x intro]${NC}"
+        echo -e "  ${YELLOW}\"${intro_text}\"${NC}"
+        _kokoro_play "$voice" "$intro_text" "1.0"
+        echo ""
+        echo -e "  ${CYAN}[1x text]${NC}"
+        echo -e "  ${YELLOW}\"${TEXT}\"${NC}"
         _kokoro_play "$voice" "$TEXT" "1.0"
-        echo -e "  ${CYAN}2x text${NC}"
+        echo ""
+        echo -e "  ${CYAN}[2x text]${NC}"
+        echo -e "  ${YELLOW}(same text at 2x speed)${NC}"
         _kokoro_play "$voice" "$TEXT" "2.0"
-        echo -e "  ${CYAN}1x outro${NC}"
-        _kokoro_play "$voice" "That was me, ${display_name}. Thanks for listening, and I hope to work with you soon." "1.0"
+        echo ""
+        echo -e "  ${CYAN}[1x outro]${NC}"
+        echo -e "  ${YELLOW}\"${outro_text}\"${NC}"
+        _kokoro_play "$voice" "$outro_text" "1.0"
     fi
 }
 
