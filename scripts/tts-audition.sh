@@ -383,9 +383,23 @@ if [[ "$KOKORO_MODE" == "true" ]]; then
     echo -e "${YELLOW}Press Enter to begin${NC}"
     read
 
-    for voice in "${voices[@]}"; do
+    for i in "${!voices[@]}"; do
+        voice="${voices[$i]}"
+        remaining=$(( ${#voices[@]} - i ))
+        # Extract human name for preview
+        raw_name="${voice#*_}"
+        raw_name="${raw_name//_/ }"
+        display_name=$(echo "$raw_name" | awk '{for(j=1;j<=NF;j++) $j=toupper(substr($j,1,1)) substr($j,2)}1')
+
         echo ""
-        echo -e "${BLUE}>>> $voice <<<${NC}"
+        echo -e "${BLUE}>>> ${display_name} (${voice}) [${remaining} remaining] <<<${NC}"
+        echo -e "  ${CYAN}[Enter]${NC} Play  ${YELLOW}[s]${NC} Skip  ${RED}[q]${NC} Quit"
+        read -rsn1 prekey
+        case "$prekey" in
+            s|S) echo -e "  ${YELLOW}Skipped${NC}"; continue ;;
+            q|Q) echo -e "${YELLOW}Auditions complete!${NC}"; exit 0 ;;
+        esac
+
         speak_kokoro "$voice"
         prompt_action "$voice" "" "true"
     done
