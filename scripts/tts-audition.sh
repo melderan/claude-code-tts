@@ -329,7 +329,10 @@ if [[ "$KOKORO_MODE" == "true" ]]; then
     fi
 
     # Get voice list from swift-kokoro
-    mapfile -t all_voices < <(swift-kokoro --list-voices 2>/dev/null)
+    all_voices=()
+    while IFS= read -r v; do
+        [[ -n "$v" ]] && all_voices+=("$v")
+    done < <(swift-kokoro --list-voices 2>/dev/null)
 
     if [[ ${#all_voices[@]} -eq 0 ]]; then
         echo -e "${RED}No Kokoro voices found${NC}" >&2
