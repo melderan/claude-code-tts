@@ -147,17 +147,18 @@ _kokoro_play() {
     local pid=$!
 
     # Poll for space key to skip this section
+    local key=""
     while kill -0 "$pid" 2>/dev/null; do
-        if read -rsn1 -t 0.1 key 2>/dev/null; then
-            if [[ "$key" == " " ]]; then
-                kill "$pid" 2>/dev/null
-                wait "$pid" 2>/dev/null
-                echo -e "  ${YELLOW}(skipped)${NC}"
-                return
-            fi
+        key=""
+        read -rsn1 -t 1 key || true
+        if [[ "$key" == " " ]]; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            echo -e "  ${YELLOW}(skipped)${NC}"
+            return
         fi
     done
-    wait "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null || true
 }
 
 # --- Helper: speak with Kokoro voice (full audition sequence) ---
