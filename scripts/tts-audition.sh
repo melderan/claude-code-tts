@@ -136,31 +136,55 @@ speak() {
     esac
 }
 
-# --- Helper: speak with Kokoro voice ---
+# --- Helper: generate and play a Kokoro clip ---
+_kokoro_play() {
+    local voice="$1"
+    local text="$2"
+    local speed="${3:-1.0}"
+
+    echo "$text" | swift-kokoro --voice "$voice" --output "$TEMP_FILE" 2>/dev/null
+    afplay -r "$speed" "$TEMP_FILE" 2>/dev/null
+}
+
+# --- Helper: speak with Kokoro voice (full audition sequence) ---
+# 1. Name at 1x  2. Text at 1x  3. Text at 2x  4. Name at 1x
 speak_kokoro() {
     local voice="$1"
+    local display_name="${voice//_/ }"
 
     if [[ "$QUEUE_MODE" == "true" ]]; then
-        write_audition_queue "$voice"
-        # Wait for daemon to play it (poll for queue file removal)
+        # Queue mode: send all four parts as separate queue messages
+        write_audition_queue "$voice" "Auditioning: ${display_name}." "1.0"
+        write_audition_queue "$voice" "$TEXT" "1.0"
+        write_audition_queue "$voice" "$TEXT" "2.0"
+        write_audition_queue "$voice" "${display_name}." "1.0"
+        # Wait for all audition messages to drain
         local waited=0
-        while [[ $(ls "$QUEUE_DIR"/audition_*.json 2>/dev/null | wc -l) -gt 0 ]]; do
+        while [[ $(ls "$QUEUE_DIR"/*audition_*.json 2>/dev/null | wc -l) -gt 0 ]]; do
             sleep 0.2
             waited=$((waited + 1))
-            if (( waited > 100 )); then
+            if (( waited > 150 )); then
                 echo -e "${RED}Timed out waiting for daemon${NC}" >&2
                 break
             fi
         done
     else
-        echo "$TEXT" | swift-kokoro --voice "$voice" --output "$TEMP_FILE" 2>/dev/null
-        afplay -r "$SPEED" "$TEMP_FILE" 2>/dev/null
+        echo -e "  ${CYAN}1x name${NC}"
+        _kokoro_play "$voice" "Auditioning: ${display_name}." "1.0"
+        echo -e "  ${CYAN}1x text${NC}"
+        _kokoro_play "$voice" "$TEXT" "1.0"
+        echo -e "  ${CYAN}2x text${NC}"
+        _kokoro_play "$voice" "$TEXT" "2.0"
+        echo -e "  ${CYAN}1x name${NC}"
+        _kokoro_play "$voice" "${display_name}." "1.0"
     fi
 }
 
 # --- Helper: write audition message to daemon queue ---
 write_audition_queue() {
     local kokoro_voice="$1"
+    local text="${2:-$TEXT}"
+    local speed="${3:-$SPEED}"
     mkdir -p "$QUEUE_DIR"
 
     local timestamp=$(date +%s.%N)
@@ -173,9 +197,9 @@ write_audition_queue() {
   "timestamp": $timestamp,
   "session_id": "audition",
   "project": "audition",
-  "text": $(echo "$TEXT" | jq -Rs .),
+  "text": $(echo "$text" | jq -Rs .),
   "persona": "claude-prime",
-  "speed": ${SPEED},
+  "speed": ${speed},
   "speed_method": "playback",
   "voice_kokoro": "${kokoro_voice}"
 }
