@@ -455,15 +455,39 @@ def write_control_message(text: str = "", pre_action: Optional[str] = None,
     return queue_file
 
 
-def generate_speech(text: str, persona: str, output_file: Path) -> bool:
-    """Generate speech audio using Piper. Returns True on success."""
+def generate_speech(text: str, persona: str, output_file: Path,
+                    voice_kokoro_override: str = "") -> bool:
+    """Generate speech audio using Kokoro (preferred) or Piper. Returns True on success.
+
+    Args:
+        voice_kokoro_override: If set, use this Kokoro voice name directly
+            (bypasses persona config). Used by audition queue messages.
+    """
     import shutil
 
+    persona_config = get_persona_config(persona)
+
+    # Determine Kokoro voice: explicit override > persona config
+    kokoro_voice = voice_kokoro_override or persona_config.get("voice_kokoro", "")
+
+    # Try Kokoro first if a Kokoro voice is configured
+    if kokoro_voice and shutil.which("swift-kokoro"):
+        try:
+            cmd = ["swift-kokoro", "--voice", kokoro_voice, "--output", str(output_file)]
+            subprocess.run(cmd, input=text, text=True, check=True, capture_output=True)
+            if output_file.exists():
+                log(f"Kokoro generated: voice={kokoro_voice}")
+                return True
+        except subprocess.CalledProcessError as e:
+            log(f"Kokoro failed (falling back to Piper): {e}", "WARN")
+        except Exception as e:
+            log(f"Kokoro error (falling back to Piper): {e}", "WARN")
+
+    # Piper fallback
     if not shutil.which("piper"):
-        log("Piper not found", "ERROR")
+        log("Piper not found (and Kokoro unavailable)", "ERROR")
         return False
 
-    persona_config = get_persona_config(persona)
     voice_name = persona_config.get("voice", DEFAULT_VOICE)
     voice_file = VOICES_DIR / f"{voice_name}.onnx"
 
@@ -632,7 +656,8 @@ def daemon_loop(lockpick: bool = False) -> None:
                 speed = interrupted.get("speed", persona_config.get("speed", 2.0))
                 i_speed_method = interrupted.get("speed_method", persona_config.get("speed_method", "playback"))
 
-                if generate_speech(text, persona, audio_file):
+                i_voice_kokoro = interrupted.get("voice_kokoro", "")
+                if generate_speech(text, persona, audio_file, voice_kokoro_override=i_voice_kokoro):
                     # Save as current message in case interrupted again
                     write_playback_state(current_message=interrupted)
 
@@ -687,7 +712,8 @@ def daemon_loop(lockpick: bool = False) -> None:
             speed = msg.get("speed", persona_config.get("speed", 2.0))
             speed_method = msg.get("speed_method", persona_config.get("speed_method", "playback"))
 
-            if not generate_speech(text, persona, audio_file):
+            voice_kokoro = msg.get("voice_kokoro", "")
+            if not generate_speech(text, persona, audio_file, voice_kokoro_override=voice_kokoro):
                 log(f"Failed to generate speech for message from {project}", "ERROR")
                 msg_file.unlink(missing_ok=True)
                 continue
@@ -722,6 +748,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 "persona": persona,
                 "speed": speed,
                 "speed_method": speed_method,
+                "voice_kokoro": voice_kokoro,
             }
             write_playback_state(current_message=current_msg_info)
             log(f"Saved current_message for potential replay")
