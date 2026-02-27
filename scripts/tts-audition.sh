@@ -43,7 +43,7 @@ NUM_SPEAKERS=10
 SPEAKER_RANGE=""
 SPEED="1.5"
 METHOD="playback"
-TEXT="We choose correctness over convenience. That means if something's broken, we stop, we figure out why, and we fix the real problem. We don't paper over it and hope nobody notices. The proof is in the pods, and right now the pods are looking good. I've been reading through the codebase and I think there's a clean way to refactor this. Let me walk you through what I found and we can decide together how to move forward."
+TEXT="Three hidden keys open three secret gates, wherein the errant will be tested for worthy traits. And those with the skill to survive these straits will reach the end where the prize awaits. I've been searching for the copper key for five years now, and I'm starting to think that maybe Halliday hid it somewhere nobody would ever think to look. But that's the thing about Easter eggs. They're never where you expect them to be."
 QUEUE_DIR="$HOME/.claude-tts/queue"
 
 # --- Colors ---
