@@ -336,13 +336,21 @@ if [[ "$KOKORO_MODE" == "true" ]]; then
         exit 1
     fi
 
-    # Apply filter if specified
+    # Apply filter if specified (comma-separated prefixes, e.g., am_,bm_)
     voices=()
-    for v in "${all_voices[@]}"; do
-        if [[ -z "$KOKORO_FILTER" || "$v" == "$KOKORO_FILTER"* ]]; then
-            voices+=("$v")
-        fi
-    done
+    if [[ -z "$KOKORO_FILTER" ]]; then
+        voices=("${all_voices[@]}")
+    else
+        IFS=',' read -ra filters <<< "$KOKORO_FILTER"
+        for v in "${all_voices[@]}"; do
+            for f in "${filters[@]}"; do
+                if [[ "$v" == "$f"* ]]; then
+                    voices+=("$v")
+                    break
+                fi
+            done
+        done
+    fi
 
     if [[ ${#voices[@]} -eq 0 ]]; then
         echo -e "${RED}No voices matching filter: $KOKORO_FILTER${NC}" >&2
