@@ -136,14 +136,28 @@ speak() {
     esac
 }
 
-# --- Helper: generate and play a Kokoro clip ---
+# --- Helper: generate and play a Kokoro clip (space to skip) ---
 _kokoro_play() {
     local voice="$1"
     local text="$2"
     local speed="${3:-1.0}"
 
     echo "$text" | swift-kokoro --voice "$voice" --output "$TEMP_FILE" 2>/dev/null
-    afplay -r "$speed" "$TEMP_FILE" 2>/dev/null
+    afplay -r "$speed" "$TEMP_FILE" 2>/dev/null &
+    local pid=$!
+
+    # Poll for space key to skip this section
+    while kill -0 "$pid" 2>/dev/null; do
+        if read -rsn1 -t 0.1 key 2>/dev/null; then
+            if [[ "$key" == " " ]]; then
+                kill "$pid" 2>/dev/null
+                wait "$pid" 2>/dev/null
+                echo -e "  ${YELLOW}(skipped)${NC}"
+                return
+            fi
+        fi
+    done
+    wait "$pid" 2>/dev/null
 }
 
 # --- Helper: speak with Kokoro voice (full audition sequence) ---
