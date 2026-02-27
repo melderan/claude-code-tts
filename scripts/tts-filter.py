@@ -26,8 +26,8 @@ def filter_text(text: str) -> str:
     # Remove indented code blocks (lines starting with 4+ spaces)
     text = re.sub(r"^    .*$", "", text, flags=re.MULTILINE)
 
-    # Remove inline code
-    text = re.sub(r"`[^`]*`", "", text)
+    # Strip inline code backticks but keep the word (it's often part of speech)
+    text = re.sub(r"`([^`]*)`", r"\1", text)
 
     # Remove markdown headers
     text = re.sub(r"^##* *", "", text, flags=re.MULTILINE)
