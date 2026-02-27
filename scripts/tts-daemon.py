@@ -416,6 +416,10 @@ def handle_control_message(msg: dict) -> None:
         msg_file = msg.get("_file")
         if msg_file:
             Path(msg_file).unlink(missing_ok=True)
+        # Leave a marker so the respawned daemon skips its startup announcement
+        # (the control message already spoke "Installing updates...").
+        respawn_marker = TTS_CONFIG_DIR / "daemon.respawn"
+        respawn_marker.write_text(str(time.time()))
         HEARTBEAT_FILE.unlink(missing_ok=True)
         release_lock()
         sys.exit(3)  # Non-zero triggers KeepAlive.SuccessfulExit respawn
@@ -621,10 +625,17 @@ def daemon_loop(lockpick: bool = False) -> None:
     version_file = Path.home() / ".claude-tts" / "daemon.version"
     version_file.write_text("control-v1")
 
-    # Startup announcement
+    # Startup announcement -- skip if this is a quick respawn from a control
+    # restart (the control message already spoke its own announcement).
+    # The restart path writes a marker file before exiting; we consume it here.
+    respawn_marker = TTS_CONFIG_DIR / "daemon.respawn"
     write_heartbeat()
-    speak_announcement("Voice daemon online. Ready when you are.")
-    log("Startup announcement complete")
+    if respawn_marker.exists():
+        respawn_marker.unlink(missing_ok=True)
+        log("Quick respawn detected, skipping startup announcement")
+    else:
+        speak_announcement("Voice daemon online. Ready when you are.")
+        log("Startup announcement complete")
 
     while not _shutdown_requested:
         try:
