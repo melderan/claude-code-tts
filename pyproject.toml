@@ -1,6 +1,6 @@
 [project]
 name = "claude-code-tts"
-version = "6.0.6"
+version = "6.0.7"
 description = "Text-to-speech for Claude Code using Piper TTS"
 readme = "README.md"
 license = { text = "MIT" }
@@ -73,7 +73,7 @@ ignore = [
 known-first-party = ["claude_code_tts"]
 
 [tool.bumpversion]
-current_version = "6.0.6"
+current_version = "6.0.7"
 commit = true
 tag = true
 tag_name = "v{new_version}"
