@@ -43,7 +43,7 @@ NUM_SPEAKERS=10
 SPEAKER_RANGE=""
 SPEED="1.5"
 METHOD="playback"
-TEXT="Hello! I'm auditioning for the role of your AI assistant. I hope you find my voice pleasant and easy to understand."
+TEXT="We choose correctness over convenience. That means if something's broken, we stop, we figure out why, and we fix the real problem. We don't paper over it and hope nobody notices. The proof is in the pods, and right now the pods are looking good."
 QUEUE_DIR="$HOME/.claude-tts/queue"
 
 # --- Colors ---
@@ -150,14 +150,19 @@ _kokoro_play() {
 # 1. Name at 1x  2. Text at 1x  3. Text at 2x  4. Name at 1x
 speak_kokoro() {
     local voice="$1"
-    local display_name="${voice//_/ }"
+    # Extract human name: am_adam -> Adam, bf_emma -> Emma
+    local raw_name="${voice#*_}"  # strip prefix (am_, bf_, etc.)
+    raw_name="${raw_name//_/ }"   # remaining underscores to spaces
+    # Capitalize first letter of each word
+    local display_name
+    display_name=$(echo "$raw_name" | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2)}1')
 
     if [[ "$QUEUE_MODE" == "true" ]]; then
         # Queue mode: send all four parts as separate queue messages
-        write_audition_queue "$voice" "Auditioning: ${display_name}." "1.0"
+        write_audition_queue "$voice" "Hi, my name is ${display_name}." "1.0"
         write_audition_queue "$voice" "$TEXT" "1.0"
         write_audition_queue "$voice" "$TEXT" "2.0"
-        write_audition_queue "$voice" "${display_name}." "1.0"
+        write_audition_queue "$voice" "My name is ${display_name}." "1.0"
         # Wait for all audition messages to drain
         local waited=0
         while [[ $(ls "$QUEUE_DIR"/*audition_*.json 2>/dev/null | wc -l) -gt 0 ]]; do
@@ -169,14 +174,14 @@ speak_kokoro() {
             fi
         done
     else
-        echo -e "  ${CYAN}1x name${NC}"
-        _kokoro_play "$voice" "Auditioning: ${display_name}." "1.0"
+        echo -e "  ${CYAN}1x intro${NC}"
+        _kokoro_play "$voice" "Hi, my name is ${display_name}." "1.0"
         echo -e "  ${CYAN}1x text${NC}"
         _kokoro_play "$voice" "$TEXT" "1.0"
         echo -e "  ${CYAN}2x text${NC}"
         _kokoro_play "$voice" "$TEXT" "2.0"
         echo -e "  ${CYAN}1x name${NC}"
-        _kokoro_play "$voice" "${display_name}." "1.0"
+        _kokoro_play "$voice" "My name is ${display_name}." "1.0"
     fi
 }
 
