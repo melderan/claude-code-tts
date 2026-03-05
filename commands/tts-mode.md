@@ -1,7 +1,7 @@
 Manage TTS mode and daemon. Run the tts-mode script with any provided arguments:
 
 ```bash
-"$HOME/.claude-tts/tts-mode.sh" $ARGUMENTS
+claude-tts mode $ARGUMENTS
 ```
 
 Summarize the output to the user.

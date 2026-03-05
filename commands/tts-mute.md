@@ -5,7 +5,7 @@ If the user passes `--all` as an argument, pass it through to mute every session
 Run this command:
 
 ```bash
-"$HOME/.claude-tts/tts-mute.sh" $ARGUMENTS
+claude-tts mute $ARGUMENTS
 ```
 
 Summarize the output to the user.

@@ -7,12 +7,9 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/bin/uv</string>
-        <string>run</string>
-        <string>--python</string>
-        <string>3.12</string>
-        <string>~/.claude-tts/tts-daemon.py</string>
-        <string>--foreground</string>
+        <string>~/.local/bin/claude-tts</string>
+        <string>daemon</string>
+        <string>foreground</string>
     </array>
 
     <key>RunAtLoad</key>
