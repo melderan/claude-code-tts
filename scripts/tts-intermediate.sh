@@ -28,30 +28,25 @@ SESSION=$(get_session_id)
 
 case "${1:-}" in
     on)
-        jq --arg s "$SESSION" '
-            .sessions //= {} |
-            .sessions[$s] //= {} |
-            .sessions[$s].intermediate = true
-        ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
-
+        tts_session_set "$SESSION" "intermediate" "true" "bool"
         echo "Intermediate speech enabled for: ${SESSION}"
         echo ""
         echo "You will hear narration between tool calls."
         ;;
     off)
-        jq --arg s "$SESSION" '
-            .sessions //= {} |
-            .sessions[$s] //= {} |
-            .sessions[$s].intermediate = false
-        ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
-
+        tts_session_set "$SESSION" "intermediate" "false" "bool"
         echo "Intermediate speech disabled for: ${SESSION}"
         echo ""
         echo "Only final responses will be spoken."
         echo "Use /tts-intermediate on to restore."
         ;;
     *)
-        INTERMEDIATE=$(jq -r --arg s "$SESSION" '.sessions[$s].intermediate // true' "$CONFIG_FILE")
+        local_session_file="$TTS_SESSIONS_DIR/${SESSION}.json"
+        INTERMEDIATE="true"
+        if [[ -f "$local_session_file" ]]; then
+            val=$(jq -r '.intermediate // "true" | tostring' "$local_session_file" 2>/dev/null)
+            [[ "$val" == "false" ]] && INTERMEDIATE="false"
+        fi
         if [[ "$INTERMEDIATE" == "true" ]]; then
             echo "Intermediate speech: ENABLED (hearing all narration)"
         else

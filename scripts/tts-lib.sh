@@ -14,6 +14,7 @@ tts_debug() {
 # --- Configuration ---
 TTS_CONFIG_FILE="$HOME/.claude-tts/config.json"
 TTS_QUEUE_DIR="$HOME/.claude-tts/queue"
+TTS_SESSIONS_DIR="$HOME/.claude-tts/sessions.d"
 
 # --- Read hook input and extract transcript path ---
 # Sets: INPUT, TRANSCRIPT_PATH
@@ -75,7 +76,100 @@ get_session_id() {
     echo "$PWD" | tr '/' '-'
 }
 
-# --- Load config from config.json ---
+# --- Session file helpers (sessions.d/) ---
+
+# Get the session file path for a given session ID
+tts_session_file() {
+    echo "$TTS_SESSIONS_DIR/${1}.json"
+}
+
+# Set a key=value in a session file (creates file and dir if needed)
+# Usage: tts_session_set <session_id> <key> <value> [type]
+# type: "string" (default), "bool", "number"
+tts_session_set() {
+    local session="$1" key="$2" value="$3" type="${4:-string}"
+    local file="$TTS_SESSIONS_DIR/${session}.json"
+    mkdir -p "$TTS_SESSIONS_DIR"
+
+    local existing='{}'
+    [[ -f "$file" ]] && existing=$(cat "$file")
+
+    if [[ "$type" == "bool" || "$type" == "number" ]]; then
+        echo "$existing" | jq --arg k "$key" --argjson v "$value" '.[$k] = $v' > "$file.tmp"
+    else
+        echo "$existing" | jq --arg k "$key" --arg v "$value" '.[$k] = $v' > "$file.tmp"
+    fi
+    mv "$file.tmp" "$file"
+}
+
+# Delete a key from a session file
+tts_session_del() {
+    local session="$1" key="$2"
+    local file="$TTS_SESSIONS_DIR/${session}.json"
+    [[ -f "$file" ]] || return 0
+    jq --arg k "$key" 'del(.[$k])' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+}
+
+# Migrate a single session from legacy config.json .sessions to sessions.d/
+# Returns 0 if migration happened, 1 if no legacy data
+_tts_migrate_session() {
+    local session="$1"
+    local file="$TTS_SESSIONS_DIR/${session}.json"
+
+    # Skip if already migrated
+    [[ -f "$file" ]] && return 1
+
+    # Check for legacy data in config.json
+    local legacy
+    legacy=$(jq -r --arg s "$session" '
+        if .sessions[$s] then .sessions[$s] | tojson else "null" end
+    ' "$TTS_CONFIG_FILE" 2>/dev/null)
+
+    if [[ "$legacy" != "null" && -n "$legacy" ]]; then
+        mkdir -p "$TTS_SESSIONS_DIR"
+        echo "$legacy" > "$file"
+        # Remove from config.json
+        jq --arg s "$session" 'del(.sessions[$s])' "$TTS_CONFIG_FILE" > "$TTS_CONFIG_FILE.tmp" \
+            && mv "$TTS_CONFIG_FILE.tmp" "$TTS_CONFIG_FILE"
+        tts_debug "Migrated session $session from config.json to sessions.d/"
+        return 0
+    fi
+    return 1
+}
+
+# Auto-cleanup stale session files (throttled to once per hour)
+# Logs removed sessions with full JSON for restoration
+_tts_maybe_cleanup() {
+    local marker="$TTS_SESSIONS_DIR/.last_cleanup"
+    local now
+    now=$(date +%s)
+
+    if [[ -f "$marker" ]]; then
+        local last
+        last=$(cat "$marker" 2>/dev/null || echo 0)
+        (( now - last < 3600 )) && return
+    fi
+
+    mkdir -p "$TTS_SESSIONS_DIR"
+    echo "$now" > "$marker"
+
+    local projects_dir="$HOME/.claude/projects"
+    [[ -d "$projects_dir" ]] || return
+
+    for session_file in "$TTS_SESSIONS_DIR"/*.json; do
+        [[ -f "$session_file" ]] || continue
+        local session_id
+        session_id=$(basename "$session_file" .json)
+        if [[ ! -d "$projects_dir/$session_id" ]]; then
+            local content
+            content=$(cat "$session_file")
+            tts_debug "Auto-cleanup: removing $session_id | restore: echo '$content' > $session_file"
+            rm -f "$session_file"
+        fi
+    done
+}
+
+# --- Load config from config.json + sessions.d/ ---
 # Sets: TTS_MODE, TTS_MUTED, TTS_INTERMEDIATE, TTS_SPEED, TTS_SPEED_METHOD,
 #       TTS_VOICE, TTS_MAX_CHARS, ACTIVE_PERSONA, PROJECT_NAME
 tts_load_config() {
@@ -92,36 +186,61 @@ tts_load_config() {
     PROJECT_NAME="session-${TTS_SESSION:0:8}"
     ACTIVE_PERSONA="claude-prime"
 
+    # --- Step 1: Read session-specific config from sessions.d/ ---
+    local SESSION_MUTED="" SESSION_PERSONA="" SESSION_SPEED="" SESSION_INTERMEDIATE=""
+    local session_file="$TTS_SESSIONS_DIR/${TTS_SESSION}.json"
+
+    if [[ ! -f "$session_file" ]]; then
+        # Try migrating from legacy config.json .sessions
+        _tts_migrate_session "$TTS_SESSION" 2>/dev/null || true
+    fi
+
+    if [[ -f "$session_file" ]]; then
+        local session_json
+        session_json=$(jq -r '[
+            (.muted // "-" | tostring),
+            (.persona // "-"),
+            (.speed // "-" | tostring),
+            (.intermediate // "-" | tostring)
+        ] | join("|")' "$session_file" 2>/dev/null)
+
+        if [[ -n "$session_json" ]]; then
+            IFS='|' read -r SESSION_MUTED SESSION_PERSONA SESSION_SPEED SESSION_INTERMEDIATE <<< "$session_json"
+            [[ "$SESSION_MUTED" == "-" ]] && SESSION_MUTED=""
+            [[ "$SESSION_PERSONA" == "-" ]] && SESSION_PERSONA=""
+            [[ "$SESSION_SPEED" == "-" ]] && SESSION_SPEED=""
+            [[ "$SESSION_INTERMEDIATE" == "-" ]] && SESSION_INTERMEDIATE=""
+        fi
+    fi
+
+    # --- Step 2: Read global config from config.json ---
     if [[ -f "$TTS_CONFIG_FILE" ]]; then
         tts_debug "Loading config from $TTS_CONFIG_FILE"
 
-        CONFIG_JSON=$(jq -r --arg s "$TTS_SESSION" '
-            (.sessions[$s].persona // .project_personas[$s] // .active_persona // "default") as $persona |
-            (if .sessions[$s] | has("muted") then .sessions[$s].muted
-             elif .muted == true then true
-             elif (.sessions[$s] == null) and (.default_muted == true) then true
-             else false end) as $muted |
+        # Determine the effective persona: session > project > global
+        local persona_arg="${SESSION_PERSONA:-}"
+        CONFIG_JSON=$(jq -r --arg s "$TTS_SESSION" --arg sp "$persona_arg" '
+            (if $sp != "" then $sp else (.project_personas[$s] // .active_persona // "default") end) as $persona |
             [
                 (.mode // "direct"),
-                ($muted | tostring),
+                (.muted // false | tostring),
+                (.default_muted // false | tostring),
                 $persona,
-                (.sessions[$s].speed // "-" | tostring),
                 (.personas[$persona].speed // "-" | tostring),
                 (.personas[$persona].speed_method // "-"),
                 (.personas[$persona].voice // "-"),
                 (.personas[$persona].max_chars // "-" | tostring),
                 (.personas[$persona].voice_kokoro // "-"),
-                (.personas[$persona].voice_kokoro_blend // "-"),
-                (if .sessions[$s] | has("intermediate") then (.sessions[$s].intermediate | tostring) else "true" end)
+                (.personas[$persona].voice_kokoro_blend // "-")
             ] | join("|")
         ' "$TTS_CONFIG_FILE" 2>/dev/null)
 
         if [[ -n "$CONFIG_JSON" ]]; then
-            IFS='|' read -r TTS_MODE CONFIG_MUTED ACTIVE_PERSONA SESSION_SPEED \
+            local GLOBAL_MUTED DEFAULT_MUTED
+            IFS='|' read -r TTS_MODE GLOBAL_MUTED DEFAULT_MUTED ACTIVE_PERSONA \
                 PERSONA_SPEED PERSONA_SPEED_METHOD PERSONA_VOICE PERSONA_MAX_CHARS \
-                PERSONA_VOICE_KOKORO PERSONA_VOICE_KOKORO_BLEND SESSION_INTERMEDIATE <<< "$CONFIG_JSON"
+                PERSONA_VOICE_KOKORO PERSONA_VOICE_KOKORO_BLEND <<< "$CONFIG_JSON"
             # Normalize sentinels back to empty
-            [[ "$SESSION_SPEED" == "-" ]] && SESSION_SPEED=""
             [[ "$PERSONA_SPEED" == "-" ]] && PERSONA_SPEED=""
             [[ "$PERSONA_SPEED_METHOD" == "-" ]] && PERSONA_SPEED_METHOD=""
             [[ "$PERSONA_VOICE" == "-" ]] && PERSONA_VOICE=""
@@ -133,11 +252,21 @@ tts_load_config() {
             tts_debug "Session: $TTS_SESSION"
             tts_debug "Active persona: $ACTIVE_PERSONA"
 
-            if [[ "$CONFIG_MUTED" == "true" ]]; then
+            # --- Step 3: Determine mute state ---
+            # Priority: session-level mute > global mute > default_muted for new sessions
+            if [[ -n "$SESSION_MUTED" ]]; then
+                [[ "$SESSION_MUTED" == "true" ]] && TTS_MUTED="true"
+            elif [[ "$GLOBAL_MUTED" == "true" ]]; then
                 TTS_MUTED="true"
+            elif [[ "$DEFAULT_MUTED" == "true" && ! -f "$session_file" ]]; then
+                TTS_MUTED="true"
+            fi
+
+            if [[ "$TTS_MUTED" == "true" ]]; then
                 tts_debug "Session muted"
             fi
 
+            # --- Step 4: Merge persona and session overrides ---
             [[ -n "$PERSONA_SPEED" ]] && TTS_SPEED="$PERSONA_SPEED"
             [[ -n "$PERSONA_SPEED_METHOD" ]] && TTS_SPEED_METHOD="$PERSONA_SPEED_METHOD"
             [[ -n "$PERSONA_MAX_CHARS" ]] && TTS_MAX_CHARS="$PERSONA_MAX_CHARS"
@@ -154,7 +283,7 @@ tts_load_config() {
             [[ -n "$PERSONA_VOICE_KOKORO" ]] && TTS_VOICE_KOKORO="$PERSONA_VOICE_KOKORO"
             [[ -n "$PERSONA_VOICE_KOKORO_BLEND" ]] && TTS_VOICE_KOKORO_BLEND="$PERSONA_VOICE_KOKORO_BLEND"
 
-            if [[ "${SESSION_INTERMEDIATE:-}" == "false" ]]; then
+            if [[ "$SESSION_INTERMEDIATE" == "false" ]]; then
                 TTS_INTERMEDIATE="false"
             fi
 
@@ -167,6 +296,9 @@ tts_load_config() {
     [[ -n "${CLAUDE_TTS_SPEED_METHOD:-}" ]] && TTS_SPEED_METHOD="$CLAUDE_TTS_SPEED_METHOD"
     [[ -n "${CLAUDE_TTS_VOICE:-}" ]] && TTS_VOICE="$CLAUDE_TTS_VOICE"
     [[ -n "${CLAUDE_TTS_MAX_CHARS:-}" ]] && TTS_MAX_CHARS="$CLAUDE_TTS_MAX_CHARS"
+
+    # Opportunistic cleanup (background, throttled)
+    _tts_maybe_cleanup &>/dev/null &
 }
 
 # --- Check early exit conditions ---

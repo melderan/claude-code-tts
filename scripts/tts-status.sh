@@ -20,21 +20,36 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     exit 1
 fi
 
-# Read all config in one jq call - output as tab-separated for reliable parsing
-read -r mode default_muted global_muted active_persona session_muted_set session_muted session_persona project_persona < <(
+# Read global config
+read -r mode default_muted global_muted active_persona project_persona < <(
     jq -r --arg s "$SESSION" '
     [
         (.mode // "direct"),
         (.default_muted // false),
         (.muted // false),
         (.active_persona // "default"),
-        (if .sessions[$s] | has("muted") then "yes" else "no" end),
-        (if .sessions[$s] | has("muted") then .sessions[$s].muted else "unset" end),
-        (.sessions[$s].persona // "unset"),
         (.project_personas[$s] // "unset")
     ] | @tsv
     ' "$CONFIG_FILE"
 )
+
+# Read session config from sessions.d/
+session_muted_set="no"
+session_muted="unset"
+session_persona="unset"
+local_session_file="$TTS_SESSIONS_DIR/${SESSION}.json"
+if [[ -f "$local_session_file" ]]; then
+    read -r sf_muted sf_persona < <(
+        jq -r '[(.muted // "unset" | tostring), (.persona // "unset")] | @tsv' "$local_session_file" 2>/dev/null
+    )
+    if [[ "$sf_muted" != "unset" ]]; then
+        session_muted_set="yes"
+        session_muted="$sf_muted"
+    fi
+    if [[ "$sf_persona" != "unset" && -n "$sf_persona" ]]; then
+        session_persona="$sf_persona"
+    fi
+fi
 
 # Determine effective mute state
 if [[ "$session_muted_set" == "yes" ]]; then

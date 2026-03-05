@@ -52,11 +52,19 @@ if [[ -n "$TEST_PERSONA" ]]; then
         exit 1
     fi
 else
-    # Use current session persona (session > project > global)
+    # Use current session persona (session file > project > global)
     SESSION=$(get_session_id)
-    PERSONA=$(jq -r --arg s "$SESSION" '
-        .sessions[$s].persona // .project_personas[$s] // .active_persona // "claude-prime"
-    ' "$CONFIG_FILE")
+    PERSONA=""
+    local_session_file="$TTS_SESSIONS_DIR/${SESSION}.json"
+    if [[ -f "$local_session_file" ]]; then
+        PERSONA=$(jq -r '.persona // ""' "$local_session_file" 2>/dev/null)
+        [[ "$PERSONA" == "null" ]] && PERSONA=""
+    fi
+    if [[ -z "$PERSONA" ]]; then
+        PERSONA=$(jq -r --arg s "$SESSION" '
+            .project_personas[$s] // .active_persona // "claude-prime"
+        ' "$CONFIG_FILE")
+    fi
 fi
 
 # Get persona settings

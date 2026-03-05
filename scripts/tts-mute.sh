@@ -25,15 +25,21 @@ fi
 
 # --- --all flag: mute every session and set global default ---
 if [[ "${1:-}" == "--all" ]]; then
-    jq '
-        .default_muted = true |
-        .muted = true |
-        (.sessions // {}) as $s |
-        .sessions = ($s | to_entries | map(.value.muted = true) | from_entries)
-    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+    # Set global mute flags
+    jq '.default_muted = true | .muted = true' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" \
+        && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
 
-    COUNT=$(jq '.sessions | length' "$CONFIG_FILE")
-    echo "All sessions muted ($COUNT sessions + global default)."
+    # Mute all existing session files
+    COUNT=0
+    if [[ -d "$TTS_SESSIONS_DIR" ]]; then
+        for sf in "$TTS_SESSIONS_DIR"/*.json; do
+            [[ -f "$sf" ]] || continue
+            jq '.muted = true' "$sf" > "$sf.tmp" && mv "$sf.tmp" "$sf"
+            COUNT=$((COUNT + 1))
+        done
+    fi
+
+    echo "All sessions muted ($COUNT session files + global default)."
     echo ""
     echo "Every Claude session is now silent."
     echo ""
@@ -43,13 +49,7 @@ fi
 
 SESSION=$(get_session_id)
 
-# Ensure sessions object exists, then set this session's muted state
-# Using jq to handle nested object creation properly
-jq --arg s "$SESSION" '
-    .sessions //= {} |
-    .sessions[$s] //= {} |
-    .sessions[$s].muted = true
-' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+tts_session_set "$SESSION" "muted" "true" "bool"
 
 echo "Session muted: ${SESSION}"
 echo ""
