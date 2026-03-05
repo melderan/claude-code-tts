@@ -1,0 +1,39 @@
+# Base image: Ubuntu with uv, piper, and audio tooling.
+# Build once, reuse across test runs.
+#
+# Build:
+#   docker build -t claude-tts-test-base -f tests/docker/Dockerfile.base .
+#
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV HOME=/home/tester
+ENV PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:/home/linuxbrew/.linuxbrew/bin:${PATH}"
+
+# System deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    jq \
+    ca-certificates \
+    procps \
+    sudo \
+    pipx \
+    python3 \
+    python3-pip \
+    python3-venv \
+    pulseaudio-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create test user (non-root, with sudo)
+RUN useradd -m -s /bin/bash -d ${HOME} tester && \
+    echo "tester ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+USER tester
+WORKDIR ${HOME}
+
+# Install uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Verify toolchain
+RUN uv --version && git --version && jq --version

@@ -1,0 +1,102 @@
+# End-to-end upgrade test: v6.x -> v7.x migration.
+# Single Dockerfile with multi-stage build.
+#
+# Build & run:
+#   nerdctl build -t claude-tts-upgrade-test -f tests/docker/Dockerfile.upgrade-test .
+#   nerdctl run --rm claude-tts-upgrade-test
+#
+# --- Stage 1: Base toolchain ---
+
+FROM ubuntu:22.04 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV HOME=/home/tester
+ENV PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    jq \
+    ca-certificates \
+    procps \
+    sudo \
+    pipx \
+    python3 \
+    python3-pip \
+    python3-venv \
+    pulseaudio-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -s /bin/bash -d ${HOME} tester && \
+    echo "tester ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+USER tester
+WORKDIR ${HOME}
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# --- Stage 2: Simulate v6.x state + test ---
+
+FROM base AS test
+
+# Create v6.x directory structure
+RUN mkdir -p ${HOME}/.claude/hooks \
+             ${HOME}/.claude/commands \
+             ${HOME}/.claude-tts/sessions.d \
+             ${HOME}/.claude-tts/queue \
+             ${HOME}/.claude-tts/services
+
+# Create v6.x legacy scripts (18 scripts)
+RUN for script in \
+    tts-daemon.py tts-mode.sh tts-mute.sh tts-unmute.sh \
+    tts-status.sh tts-speed.sh tts-persona.sh tts-cleanup.sh \
+    tts-random.sh tts-test.sh tts-speak.sh tts-audition.sh \
+    tts-discover.sh tts-pause.sh tts-lib.sh tts-filter.py \
+    tts-sounds.sh tts-intermediate.sh; do \
+    echo "#!/bin/bash" > ${HOME}/.claude-tts/$script; \
+    echo "# v6 legacy: $script" >> ${HOME}/.claude-tts/$script; \
+    chmod +x ${HOME}/.claude-tts/$script; \
+    done
+
+# Builder scripts (should survive upgrade)
+RUN echo '#!/bin/bash' > ${HOME}/.claude-tts/tts-builder.sh && \
+    echo '# tts-builder standalone tool' >> ${HOME}/.claude-tts/tts-builder.sh && \
+    echo '#!/usr/bin/env python3' > ${HOME}/.claude-tts/tts-builder.py && \
+    echo '# tts-builder TUI' >> ${HOME}/.claude-tts/tts-builder.py && \
+    chmod +x ${HOME}/.claude-tts/tts-builder.sh ${HOME}/.claude-tts/tts-builder.py
+
+# v6.x config with custom persona
+RUN printf '%s\n' '{ "version": 1, "mode": "queue", "active_persona": "claude-prime", "muted": false, "default_muted": true, "installed_version": "6.2.0", "personas": { "claude-prime": { "voice": "en_US-hfc_male-medium", "speed": 2.0, "speed_method": "playback" }, "custom-voice": { "voice": "en_US-joe-medium", "speed": 1.5, "speed_method": "length_scale" } } }' \
+    > ${HOME}/.claude-tts/config.json
+
+# v6.x session files
+RUN echo '{"muted": false, "persona": "custom-voice"}' \
+    > ${HOME}/.claude-tts/sessions.d/project-alpha.json && \
+    echo '{"muted": true}' \
+    > ${HOME}/.claude-tts/sessions.d/project-beta.json
+
+# v6.x hooks (full bash, not shims)
+RUN printf '#!/bin/bash\n# v6 full hook\nsource ~/.claude-tts/tts-lib.sh\nCONFIG=$(jq -r "." ~/.claude-tts/config.json)\n' \
+    > ${HOME}/.claude/hooks/speak-response.sh && \
+    printf '#!/bin/bash\nexec ~/.claude-tts/tts-intermediate.sh\n' \
+    > ${HOME}/.claude/hooks/speak-intermediate.sh && \
+    chmod +x ${HOME}/.claude/hooks/speak-response.sh ${HOME}/.claude/hooks/speak-intermediate.sh
+
+# v6.x commands (calling old scripts)
+RUN for cmd in mute unmute speed sounds mode persona status cleanup random test discover intermediate; do \
+    printf "Run this command:\n\`\`\`bash\n\$HOME/.claude-tts/tts-%s.sh \$ARGUMENTS\n\`\`\`\n" "$cmd" \
+    > ${HOME}/.claude/commands/tts-${cmd}.md; \
+    done
+
+# v6.x settings.json
+RUN printf '{ "hooks": { "Stop": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "%s/.claude/hooks/speak-response.sh", "timeout": 180 }] }] } }' "$HOME" \
+    > ${HOME}/.claude/settings.json
+
+# Copy repo
+COPY --chown=tester:tester . ${HOME}/claude-code-tts
+
+# Copy test script
+COPY --chown=tester:tester tests/docker/test_upgrade_e2e.sh ${HOME}/test_upgrade_e2e.sh
+RUN chmod +x ${HOME}/test_upgrade_e2e.sh
+
+CMD bash -e $HOME/test_upgrade_e2e.sh
