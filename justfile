@@ -6,11 +6,11 @@ default:
 
 # Deploy changes to local machine via installer
 upgrade:
-    python3 src/claude_code_tts/install.py --upgrade
+    uv tool install . --force && claude-tts-install --upgrade
 
 # Check what would change without deploying
 check:
-    python3 src/claude_code_tts/install.py --check
+    claude-tts-install --check
 
 # Commit a feature (bumps minor version)
 feat message:
@@ -31,23 +31,23 @@ push:
 
 # Interactive release workflow
 release *args:
-    ./scripts/release.sh {{args}}
+    claude-tts release {{args}}
 
 # Run pre-push checks without pushing
 checks:
-    ./scripts/release.sh --check
+    claude-tts release --check
 
 # Show TTS status for current session
 status:
-    ~/.claude-tts/tts-status.sh
+    claude-tts status
 
 # Test TTS with a sample phrase
 speak *text:
-    ~/.claude-tts/tts-speak.sh {{text}}
+    claude-tts speak {{text}}
 
 # Audition voices interactively
 audition *args:
-    ~/.claude-tts/tts-audition.sh {{args}}
+    claude-tts audition {{args}}
 
 # Tail the TTS debug log
 log:
@@ -59,11 +59,11 @@ daemon-log:
 
 # Restart the TTS daemon
 daemon-restart:
-    ~/.claude-tts/tts-mode.sh stop && ~/.claude-tts/tts-mode.sh start
+    claude-tts daemon restart
 
 # Clean up stale TTS sessions
 cleanup:
-    ~/.claude-tts/tts-cleanup.sh
+    claude-tts cleanup
 
 # Show version across all files
 version:

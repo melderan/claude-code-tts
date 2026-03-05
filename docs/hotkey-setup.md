@@ -1,12 +1,12 @@
 # Hotkey Setup for Pause/Resume
 
-The pause/resume toggle script is designed to be called from a system-level hotkey, so you can pause Claude's speech while it's talking without needing to type a command.
+The pause/resume toggle is designed to be called from a system-level hotkey, so you can pause Claude's speech while it's talking without needing to type a command.
 
-## The Toggle Script
+## The Command
 
-After installation, the script is located at:
+After installation, pause/resume is available as:
 ```
-$HOME/.claude-tts/tts-pause.sh
+claude-tts pause
 ```
 
 Running it toggles between paused and playing states:
@@ -14,10 +14,6 @@ Running it toggles between paused and playing states:
 - If audio is paused: resumes it (SIGCONT)
 
 It also shows a macOS notification to confirm the action.
-
-**Important:** Some apps (like macOS Shortcuts) don't expand `~`. Use the full path or `$HOME`:
-- Full path: `/Users/yourusername/.claude-tts/tts-pause.sh`
-- With $HOME: `$HOME/.claude-tts/tts-pause.sh`
 
 ## Setup Options
 
@@ -29,8 +25,7 @@ Built-in, no additional software needed.
 2. Click **+** to create a new shortcut
 3. Name it "Toggle TTS"
 4. Search for "Run Shell Script" and add it
-5. Set the script to: `$HOME/.claude-tts/tts-pause.sh`
-   - Or use full path: `/Users/yourusername/.claude-tts/tts-pause.sh`
+5. Set the script to: `claude-tts pause`
 6. Right-click the shortcut in the sidebar > **Add Keyboard Shortcut**
 7. Press your desired key combination (e.g., `Cmd+Shift+T`)
 
@@ -40,9 +35,8 @@ If you use Raycast:
 
 1. Open Raycast preferences
 2. Go to **Extensions** > **Script Commands**
-3. Click **Add Directories** and add `~/.claude-tts/`
-4. Find `tts-pause.sh` in the list
-5. Assign a hotkey in the command settings
+3. Create a script command that runs `claude-tts pause`
+4. Assign a hotkey in the command settings
 
 ### Alfred
 
@@ -53,7 +47,7 @@ If you have Alfred Powerpack:
 3. Create a new workflow
 4. Add a **Hotkey** trigger
 5. Connect it to a **Run Script** action
-6. Set the script to: `/bin/bash ~/.claude-tts/tts-pause.sh`
+6. Set the script to: `claude-tts pause`
 
 ### Hammerspoon
 
@@ -61,7 +55,7 @@ If you use Hammerspoon, add to your `init.lua`:
 
 ```lua
 hs.hotkey.bind({"cmd", "shift"}, "t", function()
-  hs.execute("~/.claude-tts/tts-pause.sh")
+  hs.execute("claude-tts pause")
 end)
 ```
 
@@ -71,7 +65,7 @@ end)
 2. Go to **Keyboard** section
 3. Add a new keyboard shortcut
 4. Set action to **Execute Terminal Command**
-5. Enter: `~/.claude-tts/tts-pause.sh`
+5. Enter: `claude-tts pause`
 
 ## Checking Status
 
