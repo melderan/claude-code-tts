@@ -5,7 +5,7 @@ description: Auto-suggest a voice persona based on repo context
 Analyze this repository and suggest an appropriate TTS voice persona.
 
 ```bash
-~/.claude-tts/tts-discover.sh
+claude-tts discover
 ```
 
 Based on the repo context above, analyze the project's "vibe" and recommend a voice persona:
@@ -26,5 +26,5 @@ Based on the repo context above, analyze the project's "vibe" and recommend a vo
 After your analysis, ask the user if they want to set the recommended persona as the **project persona** (sticky default for this repo). If yes, run:
 
 ```bash
-~/.claude-tts/tts-persona.sh --project <persona-name>
+claude-tts persona --project <persona-name>
 ```

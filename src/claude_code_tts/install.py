@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "6.2.0"
+__version__ = "7.0.0"
 
 
 # --- Platform Detection ---
@@ -115,11 +115,22 @@ TTS_SESSIONS_DIR = TTS_CONFIG_DIR / "sessions.d"
 
 # Single source of truth for all installable files.
 # Adding a new file = one edit to this dict.
+# NOTE: As of v7.0.0, scripts are no longer deployed to ~/.claude-tts/.
+# All functionality is in the `claude-tts` CLI binary (via uv tool install).
 MANIFEST: dict[str, list[str]] = {
     "hooks": ["speak-response.sh", "speak-intermediate.sh", "play-sound.sh"],
     "commands": ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md", "tts-persona.md", "tts-status.md", "tts-cleanup.md", "tts-random.md", "tts-test.md", "tts-discover.md", "tts-intermediate.md"],
-    "scripts": ["tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh", "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh", "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh", "tts-builder.sh", "tts-builder.py", "tts-discover.sh", "tts-pause.sh", "tts-lib.sh", "tts-filter.py", "tts-sounds.sh", "tts-intermediate.sh"],
 }
+
+# Legacy bash scripts that were replaced by the Python CLI in v7.0.0.
+# Cleaned up from ~/.claude-tts/ during --upgrade.
+LEGACY_SCRIPTS = [
+    "tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh",
+    "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh",
+    "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh",
+    "tts-discover.sh", "tts-pause.sh", "tts-lib.sh", "tts-filter.py",
+    "tts-sounds.sh", "tts-intermediate.sh",
+]
 
 
 def _manifest_dirs(category: str) -> tuple[str, Path]:
@@ -127,7 +138,6 @@ def _manifest_dirs(category: str) -> tuple[str, Path]:
     return {
         "hooks": ("hooks", HOOKS_DIR),
         "commands": ("commands", COMMANDS_DIR),
-        "scripts": ("scripts", TTS_CONFIG_DIR),
     }[category]
 
 
@@ -374,9 +384,15 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
     else:
         preflight(f"{Colors.GREEN}PASS{Colors.NC} uv found")
 
+    # Check claude-tts CLI binary (required since v7.0.0)
+    if command_exists("claude-tts"):
+        preflight(f"{Colors.GREEN}PASS{Colors.NC} claude-tts CLI found")
+    else:
+        preflight(f"{Colors.YELLOW}INFO{Colors.NC} claude-tts CLI not found (will be installed via uv tool)")
+
     # Check optional dependencies (warnings only)
     if not command_exists("jq"):
-        preflight(f"{Colors.YELLOW}INFO{Colors.NC} jq not found (will be installed)")
+        preflight(f"{Colors.YELLOW}INFO{Colors.NC} jq not found (optional, used by legacy scripts)")
     if not command_exists("pipx"):
         preflight(f"{Colors.YELLOW}INFO{Colors.NC} pipx not found (will be installed)")
     if not command_exists("piper"):
@@ -485,6 +501,19 @@ def do_uninstall(dry_run: bool = False) -> None:
         else:
             info("No TTS hook found in settings.json")
 
+    # Clean up legacy scripts from ~/.claude-tts/
+    legacy_removed = 0
+    for script_name in LEGACY_SCRIPTS:
+        f = TTS_CONFIG_DIR / script_name
+        if f.exists():
+            if dry_run:
+                dry(f"rm {f}")
+            else:
+                f.unlink()
+            legacy_removed += 1
+    if legacy_removed > 0:
+        success(f"Removed {legacy_removed} legacy bash script(s)")
+
     # Inform about voice model and Piper
     print()
     if VOICE_FILE.exists():
@@ -496,6 +525,11 @@ def do_uninstall(dry_run: bool = False) -> None:
         print()
         warn("Piper TTS is still installed.")
         warn("To remove it, run: pipx uninstall piper-tts")
+
+    if command_exists("claude-tts"):
+        print()
+        warn("claude-tts CLI is still installed.")
+        warn("To remove it, run: uv tool uninstall claude-code-tts")
 
     if not dry_run:
         backup.print_restore_instructions()
@@ -635,7 +669,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
     print()
     info("Checking dependencies...")
 
-    # Install jq
+    # Install jq (optional, used by legacy scripts only)
     if not command_exists("jq"):
         install_package("jq", dry_run=dry_run)
     success(
@@ -674,6 +708,38 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
     success(
         f"Piper TTS {'will be installed' if dry_run and not command_exists('piper') else 'ready'}"
     )
+
+    # --- Install claude-tts CLI ---
+
+    print()
+    if not command_exists("claude-tts"):
+        if dry_run:
+            dry("uv tool install claude-code-tts (from repo or PyPI)")
+        else:
+            info("Installing claude-tts CLI...")
+            # Install from local repo if available, otherwise from git
+            if (REPO_DIR / "pyproject.toml").exists():
+                r = subprocess.run(
+                    ["uv", "tool", "install", str(REPO_DIR), "--force"],
+                    capture_output=True, text=True,
+                )
+            else:
+                r = subprocess.run(
+                    ["uv", "tool", "install", "claude-code-tts", "--force"],
+                    capture_output=True, text=True,
+                )
+            if r.returncode != 0:
+                warn(f"Failed to install claude-tts CLI: {r.stderr.strip()}")
+                warn("Install manually: uv tool install claude-code-tts")
+            elif not command_exists("claude-tts"):
+                # May need PATH update
+                local_bin = HOME / ".local" / "bin"
+                os.environ["PATH"] = f"{local_bin}:{os.environ['PATH']}"
+    if command_exists("claude-tts"):
+        success("claude-tts CLI ready")
+    else:
+        warn("claude-tts CLI not on PATH - hooks may not work")
+        warn(f"Ensure {HOME / '.local' / 'bin'} is in your PATH")
 
     # --- Download voice model ---
 
@@ -726,6 +792,21 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
                 old_file.unlink()
             info(f"Removed old command: /{old_cmd.replace('.md', '')}")
 
+    # --- Clean up legacy bash scripts (v7.0.0 migration) ---
+
+    legacy_removed = 0
+    for script_name in LEGACY_SCRIPTS:
+        old_script = TTS_CONFIG_DIR / script_name
+        if old_script.exists():
+            if dry_run:
+                dry(f"rm {old_script}")
+            else:
+                backup.backup_file(old_script)
+                old_script.unlink()
+            legacy_removed += 1
+    if legacy_removed > 0:
+        success(f"Removed {legacy_removed} legacy bash script(s) from {TTS_CONFIG_DIR}")
+
     # --- Restart daemon if running (picks up new code) ---
     daemon_pid_file = TTS_CONFIG_DIR / "daemon.pid"
     if daemon_pid_file.exists():
@@ -735,35 +816,17 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
             if dry_run:
                 dry("Restart TTS daemon to pick up new code")
             else:
-                # Check if daemon supports control messages
-                version_file = TTS_CONFIG_DIR / "daemon.version"
-                supports_control = (version_file.exists() and
-                                    "control" in version_file.read_text())
-
-                if supports_control:
-                    # Queue-based restart: drop a control message, daemon
-                    # processes it in order (no overlap with active speech)
-                    import secrets as _secrets
-                    queue_dir = TTS_CONFIG_DIR / "queue"
-                    queue_dir.mkdir(parents=True, exist_ok=True)
-                    msg = {
-                        "id": _secrets.token_hex(8),
-                        "timestamp": time.time(),
-                        "type": "control",
-                        "session_id": "installer",
-                        "text": "Installing updates. Back in a moment.",
-                        "pre_action": "drain",
-                        "post_action": "restart",
-                        "persona": "claude-prime",
-                    }
-                    queue_file = queue_dir / f"{msg['timestamp']}_{msg['id']}.json"
-                    tmp_file = queue_file.with_suffix(".tmp")
-                    tmp_file.write_text(json.dumps(msg))
-                    tmp_file.rename(queue_file)
-                    success("Daemon restart queued (will restart after current speech)")
+                if command_exists("claude-tts"):
+                    # Use the Python CLI to restart
+                    info("Restarting TTS daemon via claude-tts...")
+                    subprocess.run(
+                        ["claude-tts", "daemon", "restart"],
+                        capture_output=True, timeout=30,
+                    )
+                    success("Daemon restarted via claude-tts CLI")
                 else:
-                    # Legacy fallback: SIGTERM + wait + start
-                    info("Restarting TTS daemon to pick up new code...")
+                    # Fallback: SIGTERM only (can't start new daemon without CLI)
+                    info("Stopping old daemon (claude-tts not on PATH)...")
                     os.kill(pid, signal.SIGTERM)
                     for _ in range(100):
                         try:
@@ -771,15 +834,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
                             time.sleep(0.1)
                         except ProcessLookupError:
                             break
-                    daemon_script = TTS_CONFIG_DIR / "tts-daemon.py"
-                    if daemon_script.exists():
-                        subprocess.Popen(
-                            ["uv", "run", "--python", "3.12", str(daemon_script), "start"],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL
-                        )
-                        time.sleep(0.5)
-                    success("Daemon restarted")
+                    warn("Daemon stopped. Start manually: claude-tts daemon start")
         except (ValueError, ProcessLookupError, PermissionError):
             pass  # Daemon not running, nothing to restart
 
@@ -963,24 +1018,28 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
         print("========================================")
         print()
         if upgrade:
-            print("Hook and commands have been updated to the latest version.")
+            print("Hooks and commands have been updated to the latest version.")
             print("Your settings.json configuration was preserved.")
+            if command_exists("claude-tts"):
+                print()
+                print("Quick check: claude-tts status")
         else:
             print("Next steps:")
             print("  1. Start a new Claude Code session")
             print("  2. Claude's responses will now be spoken aloud")
-            print("  3. Use /mute to temporarily silence TTS")
-            print("  4. Use /unmute to re-enable TTS")
+            print("  3. Use /tts-mute to temporarily silence TTS")
+            print("  4. Use /tts-unmute to re-enable TTS")
         print()
         print("Configuration:")
+        print(f"  CLI:      claude-tts (via uv tool)")
         print(f"  Hook:     {HOOKS_DIR / 'speak-response.sh'}")
         print(f"  Settings: {SETTINGS_FILE}")
         print(f"  Voice:    {VOICE_FILE}")
         print()
-        print("Environment variables (optional):")
-        print("  CLAUDE_TTS_SPEED=2.0        Playback speed (default: 2.0)")
-        print("  CLAUDE_TTS_MAX_CHARS=10000  Max characters to speak")
-        print("  CLAUDE_TTS_ENABLED=0        Disable TTS entirely")
+        print("Useful commands:")
+        print("  claude-tts status           Show session status")
+        print("  claude-tts daemon start     Start the TTS daemon")
+        print("  claude-tts speak 'hello'    Test TTS directly")
         print()
         print("Debug log: /tmp/claude_tts_debug.log")
         print()
