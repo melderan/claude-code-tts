@@ -30,7 +30,8 @@ claude-tts-install
 ```bash
 git clone https://github.com/melderan/claude-code-tts.git
 cd claude-code-tts
-python3 src/claude_code_tts/install.py
+uv tool install .
+claude-tts-install
 ```
 
 The installer auto-detects your platform and will:
@@ -44,10 +45,10 @@ The installer auto-detects your platform and will:
 ### Installer Options
 
 ```bash
-python3 src/claude_code_tts/install.py --dry-run    # Preview what will be installed
-python3 src/claude_code_tts/install.py --upgrade    # Update to latest version
-python3 src/claude_code_tts/install.py --uninstall  # Remove TTS completely
-python3 src/claude_code_tts/install.py --help       # Show all options
+claude-tts-install --dry-run    # Preview what will be installed
+claude-tts-install --upgrade    # Update to latest version
+claude-tts-install --uninstall  # Remove TTS completely
+claude-tts-install --help       # Show all options
 ```
 
 ## Usage
@@ -97,7 +98,7 @@ export CLAUDE_TTS_ENABLED=0        # Set to 0 to disable entirely
 ## Requirements
 
 - [Claude Code](https://github.com/anthropics/claude-code)
-- Python 3.8+
+- Python 3.10+
 - One of:
   - **macOS**: Homebrew
   - **Linux**: apt, dnf, or pacman
@@ -142,10 +143,7 @@ When Claude runs tools (file reads, bash commands, etc.), the transcript contain
 
 ~/.claude-tts/
   config.json               # TTS configuration
-  tts-daemon.py             # Queue daemon
-  tts-*.sh                  # Command scripts
-  tts-speak.sh              # Standalone TTS testing tool
-  tts-audition.sh           # Voice audition tool
+  sessions.d/               # Per-session configuration
   queue/                    # Message queue (queue mode)
   services/                 # launchd/systemd service files
 

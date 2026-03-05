@@ -1,6 +1,6 @@
 # Claude Code TTS - Instructions for Claude
 
-Welcome, fellow Claude! TTS for Claude Code using Piper and Kokoro. Version 6.2.0.
+Welcome, fellow Claude! TTS for Claude Code using Piper and Kokoro. Version 7.0.0.
 
 ## Ownership
 
@@ -27,16 +27,15 @@ When writing documentation, comments, commit messages, or any public-facing cont
 - Don't leak anything too personal
 - Remember this project exists to give AI a voice - let that voice be a good one
 
-## Latest Features
+## Latest Features (v7.0.0)
 
-- Pause/resume toggle via system hotkey (`tts-pause.sh`)
-- Standalone tools: `tts-speak.sh` and `tts-audition.sh` for testing voices without Claude
+- **Unified Python CLI** (`claude-tts`) replaces all bash scripts
+- Pause/resume toggle via `claude-tts pause`
+- Standalone tools: `claude-tts speak` and `claude-tts audition`
 - Multi-speaker model support (libritts has 904 speakers)
 - Voice knowledge base in `docs/voice-notes.md`
-- Single jq call for config loading (was ~12 calls)
 - Default muted: new sessions silent until /tts-unmute
-- /tts-status and /tts-cleanup commands
-- All commands use dedicated scripts with proper session detection
+- Daemon management via `claude-tts daemon start|stop|restart|status`
 
 ## Quick Reference
 
@@ -45,12 +44,12 @@ When writing documentation, comments, commit messages, or any public-facing cont
 uv tool install git+https://github.com/melderan/claude-code-tts
 claude-tts-install
 
-# Upgrade local install
-python3 src/claude_code_tts/install.py --upgrade
+# Upgrade local install (rebuilds CLI + deploys hooks/commands)
+uv tool install . --force && claude-tts-install --upgrade
 
 # Release workflow
-./scripts/release.sh          # Interactive release
-./scripts/release.sh --check  # Verify without releasing
+claude-tts release          # Interactive release
+claude-tts release --check  # Verify without releasing
 ```
 
 ## Session Model
@@ -77,43 +76,45 @@ python3 src/claude_code_tts/install.py --upgrade
 
 ## Standalone Tools
 
-These scripts work outside Claude Code for testing voices without burning tokens:
+These work outside Claude Code for testing voices without burning tokens:
 
 ```bash
 # Speak text with current settings or custom voice/speed
-~/.claude-tts/tts-speak.sh "Hello world"
-~/.claude-tts/tts-speak.sh --voice en_US-joe-medium --speed 2.0 "Test"
-~/.claude-tts/tts-speak.sh --voice en_US-libritts_r-medium --speaker 42 "Speaker 42"
-~/.claude-tts/tts-speak.sh --random "Random speaker from multi-speaker model"
+claude-tts speak "Hello world"
+claude-tts speak --voice en_US-joe-medium --speed 2.0 "Test"
+claude-tts speak --voice en_US-libritts_r-medium --speaker 42 "Speaker 42"
+claude-tts speak --random "Random speaker from multi-speaker model"
 
 # Broadway auditions - cycle through voices interactively
-~/.claude-tts/tts-audition.sh                              # All voices
-~/.claude-tts/tts-audition.sh --voice en_US-libritts_r-medium --speakers 20
+claude-tts audition                              # All voices
+claude-tts audition --voice en_US-libritts_r-medium --speakers 20
 ```
 
 ## Project Structure
 
 ```
-hooks/speak-response.sh     # Main TTS hook (single jq call for config)
+src/claude_code_tts/
+  __init__.py              # Version only
+  cli.py                   # argparse entry point, all subcommand handlers
+  config.py                # Config loading, session.d helpers, migration
+  session.py               # get_session_id() - PROJECT_ROOT -> folder lookup
+  audio.py                 # Piper/Kokoro/afplay backends, tts_speak()
+  filter.py                # Text filter (regex cleanup for speech)
+  daemon.py                # Queue daemon (pause/resume, heartbeat)
+  install.py               # Installer (hooks, voices, service)
+  release.py               # Release workflow (checks + version bump)
+hooks/
+  speak-response.sh        # Thin shim -> claude-tts speak --from-hook
+  speak-intermediate.sh    # Thin shim -> claude-tts speak --from-hook
+  play-sound.sh            # Sound effects hook
+commands/tts-*.md          # Slash command definitions (call claude-tts CLI)
 scripts/
-  tts-mute.sh              # Session mute/unmute
-  tts-unmute.sh
-  tts-status.sh            # Status display
-  tts-speed.sh             # Speed control
-  tts-persona.sh           # Persona switching
-  tts-cleanup.sh           # Stale session cleanup
-  tts-mode.sh              # Mode/daemon management
-  tts-daemon.py            # Queue daemon (with pause/resume support)
-  tts-pause.sh             # Pause/resume toggle (for hotkey binding)
-  tts-speak.sh             # Standalone TTS testing
-  tts-audition.sh          # Voice audition tool
   commit-feature.sh        # Commit helper (version bump + feature in one)
-commands/tts-*.md          # Slash command definitions
+  check-version.sh         # Version consistency checker
+  tts-builder.py           # Voice builder TUI (Textual, standalone)
 docs/
   voice-notes.md           # Voice compatibility knowledge base
   hotkey-setup.md          # Pause/resume hotkey setup guide
-src/claude_code_tts/
-  install.py               # Installer
 ```
 
 ## Config Files
@@ -126,31 +127,23 @@ src/claude_code_tts/
 ## Adding New Features
 
 When adding a new `/tts-*` command:
-1. Create `scripts/tts-newcmd.sh` with session detection
-2. Create `commands/tts-newcmd.md` that calls the script
-3. Add script to `install.py` in 4 places:
-   - Preflight check (~line 312)
-   - Backup list (~line 593)
-   - Install loop (~line 724)
-   - Version check (~line 1015)
-4. Add command to `install.py` in 3 places:
-   - Preflight check (~line 304)
-   - Uninstall cleanup (~line 414)
-   - Install loop (~line 700)
-5. Run `./scripts/release.sh` to verify and release
+1. Add the handler function `cmd_newcmd()` in `cli.py`
+2. Wire the subparser in `cli.py`'s `main()` function
+3. Create `commands/tts-newcmd.md` that calls `claude-tts newcmd $ARGUMENTS`
+4. Add `"tts-newcmd.md"` to the `MANIFEST["commands"]` list in `install.py`
+5. Run `claude-tts release --check` to verify
 
 ## Debugging
 
 ```bash
 tail -f /tmp/claude_tts_debug.log    # Hook debug log
-tail -f ~/.claude-tts/daemon.log     # Daemon log
-~/.claude-tts/tts-status.sh          # Quick status
+claude-tts daemon logs --follow      # Daemon log
+claude-tts status                    # Quick status
 ```
 
 ## Code Style
 
-- Bash: `set -euo pipefail`, BSD-compatible
-- Python: 3.10+, type hints
+- Python: 3.10+, type hints, zero runtime dependencies (stdlib only)
 - No emojis in output
 
 ## Commit Workflow (IMPORTANT)
@@ -194,20 +187,14 @@ Then push: `git push && git push --tags` (tags only needed for feat/fix)
 
 ## Testing Changes (IMPORTANT)
 
-**Always use the installer to deploy changes - never copy files directly.**
+**Always rebuild the CLI and run the installer to deploy changes.**
 
 ```bash
-# After making changes, use the installer to deploy:
-python3 src/claude_code_tts/install.py --upgrade
+# After making changes, rebuild CLI + deploy hooks/commands:
+uv tool install . --force && claude-tts-install --upgrade
 
 # To verify what would be updated without changing anything:
-python3 src/claude_code_tts/install.py --check
+claude-tts-install --check
 ```
 
-**Why this matters:** Copying files directly (e.g., `cp scripts/foo.sh ~/.claude-tts/`) bypasses the installer and causes version tracking to get out of sync. The installer:
-- Creates backups before overwriting
-- Restarts the daemon to pick up new code
-- Updates the version in config.json
-- Runs verification checks
-
-If you find yourself wanting to copy files directly, stop and use `--upgrade` instead.
+**Why this matters:** The `claude-tts` binary is built from source by `uv tool install`. Code changes in `src/` don't take effect until the binary is rebuilt. The installer then deploys hook shims and slash commands to `~/.claude/`.
