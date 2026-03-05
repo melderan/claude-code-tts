@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "7.0.0"
+__version__ = "7.0.1"
 
 
 # --- Platform Detection ---
@@ -819,11 +819,16 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
                 if command_exists("claude-tts"):
                     # Use the Python CLI to restart
                     info("Restarting TTS daemon via claude-tts...")
-                    subprocess.run(
-                        ["claude-tts", "daemon", "restart"],
-                        capture_output=True, timeout=30,
-                    )
-                    success("Daemon restarted via claude-tts CLI")
+                    try:
+                        subprocess.run(
+                            ["claude-tts", "daemon", "restart"],
+                            capture_output=True, timeout=60,
+                        )
+                        success("Daemon restarted via claude-tts CLI")
+                    except subprocess.TimeoutExpired:
+                        # Restart likely succeeded — the startup announcement
+                        # can take longer than the timeout.
+                        success("Daemon restart initiated (still starting up)")
                 else:
                     # Fallback: SIGTERM only (can't start new daemon without CLI)
                     info("Stopping old daemon (claude-tts not on PATH)...")
