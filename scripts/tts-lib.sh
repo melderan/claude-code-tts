@@ -37,8 +37,9 @@ tts_detect_session() {
 }
 
 # --- Detect session from PWD (used by command scripts) ---
-# Finds the most recently active Claude session whose project folder
-# matches the current working directory. Falls back to PWD transformation.
+# Looks up the actual Claude Code project folder name from ~/.claude/projects/
+# rather than re-deriving it, because Claude Code's path encoding isn't a
+# simple tr '/' '-' (it also strips underscores and possibly other chars).
 # Prints the session ID to stdout.
 get_session_id() {
     # Explicit override
@@ -47,15 +48,30 @@ get_session_id() {
         return
     fi
 
-    # If PROJECT_ROOT is set (Claude Code always exports it), derive session
-    # ID directly -- no heuristics needed.
     if [[ -n "${PROJECT_ROOT:-}" ]]; then
+        local projects_dir="$HOME/.claude/projects"
+        if [[ -d "$projects_dir" ]]; then
+            # Compare alphanumeric content to match regardless of encoding quirks
+            local target
+            target=$(echo "$PROJECT_ROOT" | tr -dc 'a-zA-Z0-9')
+            for dir in "$projects_dir"/*/; do
+                [[ -d "$dir" ]] || continue
+                local folder
+                folder=$(basename "$dir")
+                local candidate
+                candidate=$(echo "$folder" | tr -dc 'a-zA-Z0-9')
+                if [[ "$candidate" == "$target" ]]; then
+                    echo "$folder"
+                    return
+                fi
+            done
+        fi
+        # Fallback if ~/.claude/projects/ lookup fails
         echo "$PROJECT_ROOT" | tr '/' '-'
         return
     fi
 
     # Fallback for non-Claude-Code contexts (standalone terminal usage).
-    # Transform PWD to session format, same as Claude Code does internally.
     echo "$PWD" | tr '/' '-'
 }
 
