@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "6.1.2"
+__version__ = "6.2.0"
 
 
 # --- Platform Detection ---
@@ -111,6 +111,7 @@ REPO_DIR = _find_repo_dir()
 
 TTS_CONFIG_DIR = HOME / ".claude-tts"
 TTS_CONFIG_FILE = TTS_CONFIG_DIR / "config.json"
+TTS_SESSIONS_DIR = TTS_CONFIG_DIR / "sessions.d"
 
 # Single source of truth for all installable files.
 # Adding a new file = one edit to this dict.
@@ -613,6 +614,10 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
     files_to_backup = [SETTINGS_FILE]
     for _name, _src, dst_path in _manifest_entries():
         files_to_backup.append(dst_path)
+    # Backup individual session files from sessions.d/
+    if TTS_SESSIONS_DIR.exists():
+        for sf in TTS_SESSIONS_DIR.glob("*.json"):
+            files_to_backup.append(sf)
 
     backed_up_count = 0
     for f in files_to_backup:
@@ -980,6 +985,9 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
         print("Debug log: /tmp/claude_tts_debug.log")
         print()
 
+        # Migrate legacy .sessions from config.json to sessions.d/
+        _migrate_sessions_to_confd()
+
         # Record installed version
         set_installed_version(__version__)
         info(f"Version {__version__} recorded in config")
@@ -987,6 +995,46 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
 
 
 # --- Config Management ---
+
+
+def _migrate_sessions_to_confd() -> None:
+    """Migrate legacy .sessions from config.json to sessions.d/ files.
+
+    Idempotent: skips sessions that already have a file in sessions.d/.
+    Removes the .sessions key from config.json when done.
+    """
+    if not TTS_CONFIG_FILE.exists():
+        return
+
+    with open(TTS_CONFIG_FILE) as f:
+        config = json.load(f)
+
+    sessions = config.get("sessions", {})
+    if not sessions:
+        return
+
+    TTS_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    migrated = 0
+
+    for session_id, session_data in sessions.items():
+        session_file = TTS_SESSIONS_DIR / f"{session_id}.json"
+        if session_file.exists():
+            continue  # Already migrated
+        with open(session_file, "w") as f:
+            json.dump(session_data, f, indent=2)
+        migrated += 1
+
+    # Remove .sessions from config.json
+    if "sessions" in config:
+        del config["sessions"]
+        with open(TTS_CONFIG_FILE, "w") as f:
+            json.dump(config, f, indent=2)
+
+    if migrated > 0:
+        success(f"Migrated {migrated} session(s) from config.json to sessions.d/")
+    else:
+        info("Sessions already migrated to sessions.d/")
+
 
 DEFAULT_CONFIG = {
     "version": 1,
@@ -1052,6 +1100,7 @@ def load_config() -> dict:
 def save_config(config: dict) -> None:
     """Save config to file."""
     TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    TTS_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     with open(TTS_CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
 
@@ -1691,6 +1740,7 @@ def do_bootstrap_from_config(config_path: Path) -> None:
     # Copy config to TTS config location
     info("Installing config...")
     TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    TTS_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copy(config_path, TTS_CONFIG_FILE)
     success(f"Config installed to {TTS_CONFIG_FILE}")
 
