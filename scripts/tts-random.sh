@@ -68,11 +68,10 @@ if [[ "$ARG" == "--preview" ]]; then
     exit 0
 fi
 
-# Create the random persona and set it for this session
+# Create the random persona definition in config.json (global)
 jq --arg name "$PERSONA_NAME" \
    --arg voice "$RANDOM_VOICE" \
-   --argjson speed "$RANDOM_SPEED" \
-   --arg session "$SESSION" '
+   --argjson speed "$RANDOM_SPEED" '
     .personas[$name] = {
         "description": "Randomly generated persona",
         "voice": $voice,
@@ -80,10 +79,11 @@ jq --arg name "$PERSONA_NAME" \
         "speed_method": "playback",
         "max_chars": 10000,
         "ai_type": "claude"
-    } |
-    .sessions[$session] //= {} |
-    .sessions[$session].persona = $name
+    }
 ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+
+# Set persona for this session in sessions.d/
+tts_session_set "$SESSION" "persona" "$PERSONA_NAME"
 
 echo "Random persona applied:"
 echo "  Voice: $RANDOM_VOICE"

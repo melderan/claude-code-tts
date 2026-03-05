@@ -56,10 +56,22 @@ echo "=== CURRENT STATE ==="
 echo ""
 
 if [[ -f "$CONFIG_FILE" ]]; then
-    # Get current persona for this session
-    current=$(jq -r --arg s "$SESSION" '
-        (.sessions[$s].persona // .project_personas[$s] // .active_persona // "default")
-    ' "$CONFIG_FILE")
+    # Get session persona from sessions.d/
+    session_persona=""
+    local_session_file="$TTS_SESSIONS_DIR/${SESSION}.json"
+    if [[ -f "$local_session_file" ]]; then
+        session_persona=$(jq -r '.persona // ""' "$local_session_file" 2>/dev/null)
+        [[ "$session_persona" == "null" ]] && session_persona=""
+    fi
+
+    # Get project/global persona from config.json
+    if [[ -n "$session_persona" ]]; then
+        current="$session_persona"
+    else
+        current=$(jq -r --arg s "$SESSION" '
+            (.project_personas[$s] // .active_persona // "default")
+        ' "$CONFIG_FILE")
+    fi
     echo "Current persona: $current"
 
     # Check if project persona is set

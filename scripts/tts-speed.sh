@@ -25,17 +25,26 @@ fi
 ARG="${1:-}"
 
 if [[ -z "$ARG" ]]; then
-    # Show current speed - use single jq call (session > project > global)
-    CONFIG_DATA=$(jq -r --arg s "$SESSION" '
-        (.sessions[$s].persona // .project_personas[$s] // .active_persona // "default") as $persona |
-        [
-            $persona,
-            (.personas[$persona].speed // 2.0),
-            (.sessions[$s].speed // "")
-        ] | @tsv
-    ' "$CONFIG_FILE")
+    # Show current speed - read session file + global config
+    local_session_file="$TTS_SESSIONS_DIR/${SESSION}.json"
+    session_speed=""
+    session_persona=""
+    if [[ -f "$local_session_file" ]]; then
+        session_speed=$(jq -r '.speed // "" | tostring' "$local_session_file" 2>/dev/null)
+        session_persona=$(jq -r '.persona // ""' "$local_session_file" 2>/dev/null)
+        [[ "$session_speed" == "null" ]] && session_speed=""
+        [[ "$session_persona" == "null" ]] && session_persona=""
+    fi
 
-    IFS=$'\t' read -r effective_persona persona_speed session_speed <<< "$CONFIG_DATA"
+    # Get persona speed from global config
+    if [[ -z "$session_persona" ]]; then
+        effective_persona=$(jq -r --arg s "$SESSION" '
+            .project_personas[$s] // .active_persona // "default"
+        ' "$CONFIG_FILE")
+    else
+        effective_persona="$session_persona"
+    fi
+    persona_speed=$(jq -r --arg p "$effective_persona" '.personas[$p].speed // 2.0' "$CONFIG_FILE")
 
     if [[ -n "$session_speed" ]]; then
         echo "Speed:   ${session_speed}x (session override)"
@@ -48,13 +57,19 @@ if [[ -z "$ARG" ]]; then
 
 elif [[ "$ARG" == "reset" ]]; then
     # Reset to persona default
-    jq --arg s "$SESSION" '
-        if .sessions[$s] then .sessions[$s] |= del(.speed) else . end
-    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+    tts_session_del "$SESSION" "speed"
 
-    persona_speed=$(jq -r --arg s "$SESSION" '
-        .personas[.sessions[$s].persona // .project_personas[$s] // .active_persona // "default"].speed // 2.0
-    ' "$CONFIG_FILE")
+    # Determine effective persona to show default speed
+    local_session_file="$TTS_SESSIONS_DIR/${SESSION}.json"
+    session_persona=""
+    [[ -f "$local_session_file" ]] && session_persona=$(jq -r '.persona // ""' "$local_session_file" 2>/dev/null)
+    [[ "$session_persona" == "null" ]] && session_persona=""
+    if [[ -z "$session_persona" ]]; then
+        effective_persona=$(jq -r --arg s "$SESSION" '.project_personas[$s] // .active_persona // "default"' "$CONFIG_FILE")
+    else
+        effective_persona="$session_persona"
+    fi
+    persona_speed=$(jq -r --arg p "$effective_persona" '.personas[$p].speed // 2.0' "$CONFIG_FILE")
     echo "Speed reset to persona default: ${persona_speed}x"
 
 else
@@ -70,8 +85,6 @@ else
         exit 1
     fi
 
-    jq --arg s "$SESSION" --argjson speed "$ARG" '
-        .sessions[$s] //= {} | .sessions[$s].speed = $speed
-    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+    tts_session_set "$SESSION" "speed" "$ARG" "number"
     echo "Speed set to ${ARG}x"
 fi

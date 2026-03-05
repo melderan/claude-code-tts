@@ -24,12 +24,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     exit 1
 fi
 
-# Ensure sessions object exists, then set this session's muted state to false
-jq --arg s "$SESSION" '
-    .sessions //= {} |
-    .sessions[$s] //= {} |
-    .sessions[$s].muted = false
-' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+tts_session_set "$SESSION" "muted" "false" "bool"
 
 echo "Session unmuted: ${SESSION}"
 echo ""

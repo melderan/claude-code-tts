@@ -70,9 +70,9 @@ if [[ "$FLAG_PROJECT" == true ]]; then
         if [[ "$FLAG_SESSION" == true ]]; then
             # Set BOTH project and session
             jq --arg s "$SESSION" --arg p "$PERSONA_NAME" '
-                .project_personas[$s] = $p |
-                .sessions[$s] //= {} | .sessions[$s].persona = $p
+                .project_personas[$s] = $p
             ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+            tts_session_set "$SESSION" "persona" "$PERSONA_NAME"
             echo "Project and session persona set to: $PERSONA_NAME"
         else
             # Set project only
@@ -95,13 +95,21 @@ if [[ -z "$ARG" || "$ARG" == "list" ]]; then
     jq -r '.personas | to_entries[] | "  \(.key): \(.value.description // "No description")"' "$CONFIG_FILE"
     echo ""
 
-    read -r global_persona project_persona session_persona < <(
+    # Read global + project persona from config.json
+    read -r global_persona project_persona < <(
         jq -r --arg s "$SESSION" '[
             (.active_persona // "default"),
-            (.project_personas[$s] // ""),
-            (.sessions[$s].persona // "")
+            (.project_personas[$s] // "")
         ] | @tsv' "$CONFIG_FILE"
     )
+
+    # Read session persona from session file
+    session_persona=""
+    local_session_file="$TTS_SESSIONS_DIR/${SESSION}.json"
+    if [[ -f "$local_session_file" ]]; then
+        session_persona=$(jq -r '.persona // ""' "$local_session_file" 2>/dev/null)
+        [[ "$session_persona" == "null" ]] && session_persona=""
+    fi
 
     echo "Global:  $global_persona"
     if [[ -n "$project_persona" ]]; then
@@ -124,9 +132,7 @@ if [[ -z "$ARG" || "$ARG" == "list" ]]; then
 
 elif [[ "$ARG" == "reset" ]]; then
     # Reset session persona (will fall back to project or global)
-    jq --arg s "$SESSION" '
-        if .sessions[$s] then .sessions[$s] |= del(.persona) else . end
-    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+    tts_session_del "$SESSION" "persona"
 
     # Show effective persona after reset (project > global)
     read -r project_persona global_persona < <(
@@ -154,8 +160,6 @@ else
         exit 1
     fi
 
-    jq --arg s "$SESSION" --arg p "$ARG" '
-        .sessions[$s] //= {} | .sessions[$s].persona = $p
-    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+    tts_session_set "$SESSION" "persona" "$ARG"
     echo "Persona set to: $ARG"
 fi
