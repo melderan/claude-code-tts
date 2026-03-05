@@ -112,9 +112,9 @@ Adjust TTS volume independent of system volume.
 
 Tools to test and explore voices without burning Claude tokens.
 
-**tts-speak.sh** - Low-level speech tool:
-- `~/.claude-tts/tts-speak.sh "Hello world"` - speak with current settings
-- `~/.claude-tts/tts-speak.sh --voice en_US-joe-medium --speed 2.0 "Hello"` - specify voice/speed
+**claude-tts speak** - Low-level speech tool:
+- `claude-tts speak "Hello world"` - speak with current settings
+- `claude-tts speak --voice en_US-joe-medium --speed 2.0 "Hello"` - specify voice/speed
 - Works completely independently of Claude Code
 
 **tts-bench.sh** - Voice comparison tool:
