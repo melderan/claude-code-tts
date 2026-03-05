@@ -1,7 +1,7 @@
 Toggle or configure notification sounds.
 
 ```bash
-"$HOME/.claude-tts/tts-sounds.sh" $ARGUMENTS
+claude-tts sounds $ARGUMENTS
 ```
 
 Summarize the output to the user.

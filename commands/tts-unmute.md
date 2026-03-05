@@ -3,7 +3,7 @@ Unmute the text-to-speech voice output for this session.
 Run this command:
 
 ```bash
-"$HOME/.claude-tts/tts-unmute.sh"
+claude-tts unmute
 ```
 
 Summarize the output to the user.

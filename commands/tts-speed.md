@@ -1,7 +1,7 @@
 Adjust TTS speech speed for this session.
 
 ```bash
-"$HOME/.claude-tts/tts-speed.sh" $ARGUMENTS
+claude-tts speed $ARGUMENTS
 ```
 
 Report the output to the user.
