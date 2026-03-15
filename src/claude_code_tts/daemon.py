@@ -16,6 +16,7 @@ import signal
 import subprocess
 import sys
 import time
+import wave
 from datetime import datetime
 from io import TextIOWrapper
 from pathlib import Path
@@ -154,7 +155,7 @@ _UNSET = object()
 
 
 def write_playback_state(
-    audio_pid: int | None = None,
+    audio_pid: int | None | object = _UNSET,
     paused: bool | None = None,
     paused_by: str | None | object = _UNSET,
     current_message: dict | None | object = _UNSET,
@@ -165,7 +166,7 @@ def write_playback_state(
     This prevents mic-unpause from overriding a manual pause.
     """
     state = read_playback_state()
-    if audio_pid is not None:
+    if audio_pid is not _UNSET:
         state["audio_pid"] = audio_pid
     if paused is not None:
         state["paused"] = paused
@@ -195,6 +196,75 @@ def get_interrupted_message() -> dict | None:
     if msg:
         write_playback_state(current_message=None)
     return msg
+
+
+# --- WAV position helpers ---
+
+# If less than this many seconds of audio remain, skip replay entirely
+NEAR_END_THRESHOLD = 2.0
+
+# On resume, rewind this many REAL seconds (what you hear) from where
+# we were interrupted. Converted to WAV-time using playback speed,
+# so it feels like the same amount of re-listening regardless of speed.
+REWIND_REAL_SECONDS = 3.0
+
+
+def get_wav_duration(wav_file: Path) -> float:
+    """Get duration of a WAV file in seconds."""
+    try:
+        with wave.open(str(wav_file), "rb") as w:
+            return w.getnframes() / w.getframerate()
+    except Exception:
+        return 0.0
+
+
+def trim_wav(src: Path, dst: Path, start_seconds: float) -> bool:
+    """Trim a WAV file, writing from start_seconds onward to dst.
+
+    Returns True if the trimmed file has audio, False if nothing left.
+    """
+    try:
+        with wave.open(str(src), "rb") as r:
+            params = r.getparams()
+            start_frame = int(start_seconds * params.framerate)
+            if start_frame >= params.nframes:
+                return False
+            r.setpos(start_frame)
+            remaining_frames = params.nframes - start_frame
+            data = r.readframes(remaining_frames)
+
+        with wave.open(str(dst), "wb") as w:
+            w.setparams(params._replace(nframes=0))
+            w.writeframes(data)
+        return True
+    except Exception as e:
+        log(f"Failed to trim WAV: {e}", "ERROR")
+        return False
+
+
+def calculate_audio_position(elapsed_real: float, speed: float, speed_method: str) -> float:
+    """Calculate how far into the original WAV we've played.
+
+    With playback speed (afplay -r), real time and audio time differ:
+    at 2x speed, 5 real seconds = 10 seconds of audio heard.
+    With length_scale, speed is baked into the WAV, so real time = audio time.
+    """
+    if speed_method == "playback" and speed > 0:
+        return elapsed_real * speed
+    return elapsed_real
+
+
+def rewind_amount(speed: float, speed_method: str) -> float:
+    """Calculate WAV-time rewind amount for the current playback speed.
+
+    We want REWIND_REAL_SECONDS of re-listening regardless of speed.
+    At 2x playback, 3 real seconds = 6 WAV seconds to rewind.
+    At 1x, it's just 3. At 0.5x, it's 1.5.
+    With length_scale, speed is baked in, so real = WAV time.
+    """
+    if speed_method == "playback" and speed > 0:
+        return REWIND_REAL_SECONDS * speed
+    return REWIND_REAL_SECONDS
 
 
 # --- Persona/Config helpers ---
@@ -265,16 +335,17 @@ def daemon_generate_speech(
     return result is not None
 
 
-def daemon_play_audio(wav_file: Path, speed: float = 1.0) -> tuple[bool, bool]:
+def daemon_play_audio(wav_file: Path, speed: float = 1.0) -> tuple[bool, bool, float]:
     """Play a WAV file with pause-aware polling.
 
-    Returns (success, was_killed).
-    was_killed=True means audio was interrupted by pause (should replay on resume).
+    Returns (success, was_killed, elapsed_seconds).
+    was_killed=True means audio was interrupted by pause.
+    elapsed_seconds is real wall-clock time the audio played.
     """
     player = detect_player()
     if not player:
         log("No audio player available", "ERROR")
-        return (False, False)
+        return (False, False, 0.0)
 
     try:
         cmd = list(player)
@@ -284,6 +355,7 @@ def daemon_play_audio(wav_file: Path, speed: float = 1.0) -> tuple[bool, bool]:
 
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         write_playback_state(audio_pid=proc.pid)
+        start_time = time.monotonic()
         log(f"Audio started (PID {proc.pid}), polling for pause...")
 
         poll_count = 0
@@ -294,7 +366,8 @@ def daemon_play_audio(wav_file: Path, speed: float = 1.0) -> tuple[bool, bool]:
                 log(f"Poll #{poll_count}: paused={state.get('paused')}, pid={proc.pid}")
                 write_heartbeat()
             if state.get("paused"):
-                log(f"Audio killed for pause (PID {proc.pid})")
+                elapsed = time.monotonic() - start_time
+                log(f"Audio killed for pause (PID {proc.pid}) after {elapsed:.1f}s real time")
                 try:
                     proc.terminate()
                     proc.wait(timeout=1)
@@ -304,15 +377,16 @@ def daemon_play_audio(wav_file: Path, speed: float = 1.0) -> tuple[bool, bool]:
                     except Exception:
                         pass
                 write_playback_state(audio_pid=None)
-                return (False, True)
+                return (False, True, elapsed)
             time.sleep(0.05)
 
+        elapsed = time.monotonic() - start_time
         write_playback_state(audio_pid=None)
-        return (proc.returncode == 0, False)
+        return (proc.returncode == 0, False, elapsed)
     except Exception as e:
         log(f"Audio playback failed: {e}", "ERROR")
         write_playback_state(audio_pid=None)
-        return (False, False)
+        return (False, False, 0.0)
 
 
 def play_chime() -> None:
@@ -549,7 +623,6 @@ def daemon_loop(lockpick: bool = False) -> None:
             # Check for interrupted message to replay first
             interrupted = get_interrupted_message()
             if interrupted:
-                log(f"Replaying interrupted message: {interrupted.get('text', '')[:50]}...")
                 session_id = interrupted.get("session_id", "unknown")
                 persona = interrupted.get("persona", "claude-prime")
                 persona_config = get_persona_config(persona)
@@ -559,7 +632,9 @@ def daemon_loop(lockpick: bool = False) -> None:
                 )
                 i_voice_kokoro = interrupted.get("voice_kokoro", "")
                 i_voice_blend = interrupted.get("voice_kokoro_blend", "")
+                prev_audio_pos = interrupted.get("audio_position", 0.0)
 
+                # Regenerate the full WAV
                 audio_file = Path(f"/tmp/tts_queue_{session_id}.wav")
                 if daemon_generate_speech(
                     interrupted.get("text", ""),
@@ -568,14 +643,59 @@ def daemon_loop(lockpick: bool = False) -> None:
                     voice_kokoro_override=i_voice_kokoro,
                     voice_kokoro_blend_override=i_voice_blend,
                 ):
+                    wav_duration = get_wav_duration(audio_file)
+                    remaining = wav_duration - prev_audio_pos
+
+                    # Near the end? Skip replay entirely (ghost interruption)
+                    if prev_audio_pos > 0 and remaining <= NEAR_END_THRESHOLD:
+                        log(
+                            f"Skipping replay: {remaining:.1f}s remaining "
+                            f"(threshold {NEAR_END_THRESHOLD}s), "
+                            f"position {prev_audio_pos:.1f}s / {wav_duration:.1f}s"
+                        )
+                        clear_current_message()
+                        audio_file.unlink(missing_ok=True)
+                        continue
+
+                    # Resume with rewind (scaled to playback speed)
+                    play_file = audio_file
+                    rw = rewind_amount(i_speed, i_speed_method)
+                    resume_from = max(0.0, prev_audio_pos - rw)
+                    if resume_from > 0:
+                        trimmed = audio_file.with_name(f"tts_queue_{session_id}_trim.wav")
+                        if trim_wav(audio_file, trimmed, resume_from):
+                            log(
+                                f"Resuming from {resume_from:.1f}s "
+                                f"(was at {prev_audio_pos:.1f}s, "
+                                f"rewound {rw:.1f}s wav-time = "
+                                f"{REWIND_REAL_SECONDS}s real)"
+                            )
+                            play_file = trimmed
+                        else:
+                            log("Trim failed, replaying from start")
+                            resume_from = 0.0
+                    else:
+                        log(f"Replaying interrupted message from start: "
+                            f"{interrupted.get('text', '')[:50]}...")
+
                     write_playback_state(current_message=interrupted)
                     if i_speed_method == "playback":
-                        _, was_killed = daemon_play_audio(audio_file, i_speed)
+                        _, was_killed, elapsed = daemon_play_audio(play_file, i_speed)
                     else:
-                        _, was_killed = daemon_play_audio(audio_file)
+                        _, was_killed, elapsed = daemon_play_audio(play_file)
+
                     audio_file.unlink(missing_ok=True)
+                    if play_file != audio_file:
+                        play_file.unlink(missing_ok=True)
+
                     if was_killed:
-                        log("Interrupted message paused again")
+                        # Accumulate position: where we resumed + how far we got
+                        new_pos = resume_from + calculate_audio_position(
+                            elapsed, i_speed, i_speed_method
+                        )
+                        interrupted["audio_position"] = new_pos
+                        write_playback_state(current_message=interrupted)
+                        log(f"Interrupted again at audio position {new_pos:.1f}s")
                         continue
                     else:
                         clear_current_message()
@@ -658,15 +778,30 @@ def daemon_loop(lockpick: bool = False) -> None:
             }
             write_playback_state(current_message=current_msg_info)
 
+            wav_duration = get_wav_duration(audio_file)
+
             if speed_method == "playback":
-                _, was_killed = daemon_play_audio(audio_file, speed)
+                _, was_killed, elapsed = daemon_play_audio(audio_file, speed)
             else:
-                _, was_killed = daemon_play_audio(audio_file)
+                _, was_killed, elapsed = daemon_play_audio(audio_file)
 
             audio_file.unlink(missing_ok=True)
 
             if was_killed:
-                log("Message interrupted, will replay on resume")
+                audio_pos = calculate_audio_position(elapsed, speed, speed_method)
+                remaining = wav_duration - audio_pos
+                if remaining <= NEAR_END_THRESHOLD:
+                    log(
+                        f"Interrupted near end ({remaining:.1f}s remaining), "
+                        f"skipping replay"
+                    )
+                    clear_current_message()
+                    msg_file.unlink(missing_ok=True)
+                    continue
+                current_msg_info["audio_position"] = audio_pos
+                write_playback_state(current_message=current_msg_info)
+                log(f"Message interrupted at {audio_pos:.1f}s / {wav_duration:.1f}s, "
+                    f"will resume on unpause")
                 msg_file.unlink(missing_ok=True)
                 continue
             else:
