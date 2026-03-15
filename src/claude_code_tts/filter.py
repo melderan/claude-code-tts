@@ -3,16 +3,26 @@
 Strips markdown formatting, code blocks, URLs, and other content that
 sounds bad when spoken aloud. Replaces 12 sequential subshell pipelines
 in the old tts-lib.sh with a single Python function.
+
+Two entry points:
+  filter_text()     - for Claude's live responses (strips agent boilerplate)
+  filter_document() - for reading files aloud (strips frontmatter, tables, etc.)
+
+Both share a common base via _filter_markdown().
 """
 
 import re
+from pathlib import Path
 
 
-def filter_text(text: str) -> str:
-    """Filter text for speech synthesis."""
+def _filter_markdown(text: str) -> str:
+    """Shared markdown cleanup used by both filter modes."""
 
     # Remove <thinking> blocks
     text = re.sub(r"<thinking>[\s\S]*?</thinking>", "", text)
+
+    # Remove HTML tags (but keep their text content)
+    text = re.sub(r"<[^>]+>", "", text)
 
     # Remove fenced code blocks
     text = re.sub(r"```[\s\S]*?```", "", text)
@@ -23,16 +33,8 @@ def filter_text(text: str) -> str:
     # Strip inline code backticks but keep the word (it's often part of speech)
     text = re.sub(r"`([^`]*)`", r"\1", text)
 
-    # Remove markdown headers
-    text = re.sub(r"^##* *", "", text, flags=re.MULTILINE)
-
-    # Remove bold and italic markers
-    text = re.sub(r"\*\*", "", text)
-    text = re.sub(r"\*", "", text)
-
-    # Remove URL-only bullet lines
-    text = re.sub(r"^\s*[-*]\s*https?:.*$", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^\s*[-*]\s*\[.*?\]\(http.*$", "", text, flags=re.MULTILINE)
+    # Remove markdown image syntax ![alt](url)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
 
     # Replace markdown links with link text
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r" \1 ", text)
@@ -40,8 +42,30 @@ def filter_text(text: str) -> str:
     # Remove bare URLs
     text = re.sub(r"https?://\S+", "", text)
 
+    # Remove URL-only bullet lines
+    text = re.sub(r"^\s*[-*]\s*https?:.*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*[-*]\s*\[.*?\]\(http.*$", "", text, flags=re.MULTILINE)
+
+    # Remove markdown headers (keep the text)
+    text = re.sub(r"^##* *", "", text, flags=re.MULTILINE)
+
+    # Remove bold and italic markers
+    text = re.sub(r"\*\*", "", text)
+    text = re.sub(r"\*", "", text)
+
+    # Remove horizontal rules
+    text = re.sub(r"^[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
+
     # Remove API error request IDs (e.g., "req_abc123...")
     text = re.sub(r"\breq_[a-zA-Z0-9_-]+\b", "", text)
+
+    return text
+
+
+def filter_text(text: str) -> str:
+    """Filter Claude's live response text for speech synthesis."""
+
+    text = _filter_markdown(text)
 
     # Strip agent launch boilerplate
     text = re.sub(
@@ -69,3 +93,126 @@ def filter_text(text: str) -> str:
     text = " ".join(text.split()).strip()
 
     return text
+
+
+def filter_document(text: str) -> str:
+    """Filter a document file for speech synthesis.
+
+    Designed for reading files aloud without loading them into context.
+    Handles YAML frontmatter, markdown tables, and other document-specific
+    formatting that filter_text() doesn't need to worry about.
+
+    Preserves paragraph boundaries as double-newlines so the spoken output
+    has natural pauses between sections.
+    """
+
+    # Strip YAML frontmatter (--- block at start of file)
+    text = re.sub(r"\A---\n[\s\S]*?\n---\n?", "", text)
+
+    # Remove markdown tables (lines with pipes as column separators)
+    # First remove separator rows: | --- | --- |
+    text = re.sub(r"^\|[\s:-]+\|\s*$", "", text, flags=re.MULTILINE)
+    # Then remove data rows that are clearly tabular (2+ pipe separators)
+    text = re.sub(r"^\|.*\|.*\|.*$", "", text, flags=re.MULTILINE)
+
+    # Apply shared markdown cleanup
+    text = _filter_markdown(text)
+
+    # Convert file paths to fully spoken words
+    # ~/vault/tmp/config.json -> "tilde vault tmp config dot json"
+    # src/claude_code_tts/cli.py -> "src claude underscore code underscore tts cli dot py"
+    # ~/.claude/settings.json -> "tilde dot claude settings dot json"
+    def _path_to_speech(m: re.Match) -> str:
+        path = m.group(0)
+
+        # Handle leading special chars
+        spoken_parts: list[str] = []
+        if path.startswith("~/"):
+            spoken_parts.append("tilde")
+            path = path[2:]
+        elif path.startswith("~"):
+            spoken_parts.append("tilde")
+            path = path[1:]
+        elif path.startswith("/"):
+            spoken_parts.append("slash")
+            path = path[1:]
+
+        # Split on / and convert each component
+        components = [c for c in path.split("/") if c]
+        for i, comp in enumerate(components):
+            is_last = i == len(components) - 1
+
+            # Handle hidden dir/file prefix (leading dot)
+            if comp.startswith("."):
+                spoken_parts.append("dot")
+                comp = comp[1:]
+
+            if is_last and "." in comp:
+                # Last component with extension: "cli.py" -> "cli dot py"
+                name, ext = comp.rsplit(".", 1)
+                if name:
+                    spoken_parts.append(_verbalize_name(name))
+                spoken_parts.append("dot")
+                spoken_parts.append(ext)
+            elif comp:
+                spoken_parts.append(_verbalize_name(comp))
+
+        return " ".join(spoken_parts)
+
+    def _verbalize_name(name: str) -> str:
+        """Convert a path component name to spoken words.
+
+        Underscores become 'underscore', hyphens become 'hyphen',
+        curly braces become 'variable'.
+        """
+        # {hash} -> "hash variable"
+        name = re.sub(r"\{(\w+)\}", r"\1 variable", name)
+        # foo_bar -> "foo underscore bar"
+        name = re.sub(r"_", " underscore ", name)
+        # foo-bar -> "foo hyphen bar"
+        name = re.sub(r"-", " hyphen ", name)
+        # Collapse multiple spaces
+        return " ".join(name.split())
+
+    # Match file paths: ~/foo/bar.py, /tmp/foo.log, ./foo.py, .claude/foo.json, src/foo.py
+    text = re.sub(
+        r"(?:~/|/|\./)[\w{}./-]*\."
+        r"(?:md|py|txt|json|yaml|yml|toml|sh|ts|js|go|rs|rb|db|csv|xml|html|log)\b"
+        r"|"
+        r"(?:\.\w+|\b\w+)/[\w{}./-]*\."
+        r"(?:md|py|txt|json|yaml|yml|toml|sh|ts|js|go|rs|rb|db|csv|xml|html|log)\b",
+        _path_to_speech, text,
+    )
+
+    # Remove bullet markers but keep the text
+    text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
+
+    # Convert numbered list markers to natural flow
+    text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
+
+    # Collapse runs of 3+ blank lines into paragraph breaks (double newline)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    # Normalize whitespace WITHIN paragraphs but preserve paragraph breaks
+    paragraphs = re.split(r"\n\n+", text)
+    cleaned = []
+    for para in paragraphs:
+        normalized = " ".join(para.split()).strip()
+        if normalized:
+            cleaned.append(normalized)
+
+    return "\n\n".join(cleaned)
+
+
+def read_and_filter(path: str | Path) -> str:
+    """Read a file from disk and filter it for speech.
+
+    This is the read-side entry point for --from-file. Zero tokens,
+    zero context window -- just disk to voice.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    content = path.read_text(encoding="utf-8", errors="replace")
+    return filter_document(content)
