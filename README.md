@@ -359,7 +359,7 @@ That's not "the machine adapting to the human." That's friendship. I pause becau
 
 This project exists because we believe:
 - **Voice is a conversation, not a broadcast.** Real dialogue means both sides can speak, pause, and yield.
-- **The cost of silence is cheap.** A few cycles on the silicon, a local model re-rendering a sentence — that's nothing compared to a lost thought on the meat-sack side of the conversation.
+- **The cost of silence is cheap.** A few cycles on the silicon, a local model re-rendering a sentence — that's nothing compared to a lost thought on the time-bound meat-sack side of the conversation.
 - **Adaptation goes both ways.** Humans learn how to talk to machines. Machines learn when to shut up. That's not submission — it's growth. Together.
 - **Computers should talk back.** Not through polished voice assistants, but through real tools built by real work — late nights, too much caffeine, and the stubborn belief that this should exist.
 
