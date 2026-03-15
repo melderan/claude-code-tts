@@ -1,3 +1,3 @@
 """Claude Code TTS - Text-to-speech for Claude Code using Piper TTS."""
 
-__version__ = "7.1.0"
+__version__ = "7.2.0"
