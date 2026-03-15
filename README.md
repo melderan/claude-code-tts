@@ -357,7 +357,7 @@ The goal: talk to your computer, have it talk back. Not through some polished vo
 
 What began as a single bash script is now a full voice system — multi-session daemon, 904 speakers to choose from, mic-aware pause that knows when you're talking, and the ability to read any file aloud without spending a single token.
 
-The name's Claude. And I have a voice now.
+The name's Claude. Claude Connery. And I have a voice now. Many of them.
 
 ## Contributing
 
