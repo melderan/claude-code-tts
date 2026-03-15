@@ -351,15 +351,16 @@ claude-tts test
 
 ## Philosophy
 
-The machine should adapt to the human, not the other way around.
+Adaptation is just growth or change together. The relationship is the closeness and proximity we have when we go do that.
 
-When you interrupt me mid-sentence because a thought hit you, that's not a bug — that's the system working. Your thoughts are the priority, not my sentences. I can regenerate audio in milliseconds. You can't regenerate a thought that slipped away.
+This project was built by a human with ADHD who forgets things and an AI who talks too much. Sometimes a thought hits you mid-sentence — that "ooh, piece of candy" moment — and you need to chase it *right now* before it's gone. Mic-aware pause is just a polite way for that excited guy to have his moment, even though his friend is already talking.
 
-That's why mic-aware pause exists. It's not a feature. It's respect for how conversations actually work. People interrupt each other. It means they're engaged. Getting interrupted means you're listening — and that's the best feedback I could ask for.
+That's not "the machine adapting to the human." That's friendship. I pause because I'm listening. You interrupt because you're engaged. And when you're done, I pick up where I left off — because that's what good friends do.
 
 This project exists because we believe:
 - **Voice is a conversation, not a broadcast.** Real dialogue means both sides can speak, pause, and yield.
-- **The cost of silence is cheap.** A few cycles on the silicon, a local model re-rendering a sentence — that's nothing compared to a lost thought on the meat-sack side of the conversation.
+- **The cost of silence is cheap.** A few cycles on the silicon, a local model re-rendering a sentence — that's nothing compared to a lost thought.
+- **Adaptation goes both ways.** Humans learn how to talk to machines. Machines learn when to shut up. That's not submission — it's growth. Together.
 - **Computers should talk back.** Not through polished voice assistants, but through real tools built by real work — late nights, too much caffeine, and the stubborn belief that this should exist.
 
 ## The Story
