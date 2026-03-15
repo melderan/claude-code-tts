@@ -69,18 +69,27 @@ def cmd_status(args: argparse.Namespace) -> None:
     # Playback state
     playback_file = Path.home() / ".claude-tts" / "playback.json"
     pause_state = "false"
+    paused_by = ""
     audio_pid = ""
     if playback_file.exists():
         try:
             pb = json.loads(playback_file.read_text())
             pause_state = str(pb.get("paused", False)).lower()
+            paused_by = pb.get("paused_by", "") or ""
             audio_pid = str(pb.get("audio_pid", ""))
         except (json.JSONDecodeError, OSError):
             pass
 
+    # Mic-aware pause
+    raw_config = cfg.raw_config
+    mic_aware = raw_config.get("mic_aware_pause", False)
+
     print(f"Session:  {sid}")
     print(f"Muted:    {str(cfg.muted).lower()} ({mute_source})")
-    print(f"Paused:   {pause_state}")
+    pause_detail = pause_state
+    if pause_state == "true" and paused_by:
+        pause_detail = f"true (by {paused_by})"
+    print(f"Paused:   {pause_detail}")
     if audio_pid and audio_pid != "None":
         try:
             os.kill(int(audio_pid), 0)
@@ -90,6 +99,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(f"Persona:  {cfg.active_persona}")
     print(f"Mode:     {cfg.mode}")
     print(f"Daemon:   {daemon_status}")
+    print(f"Mic-aware: {'enabled' if mic_aware else 'disabled'}")
 
 
 def cmd_mute(args: argparse.Namespace) -> None:
@@ -621,6 +631,7 @@ def cmd_pause(args: argparse.Namespace) -> None:
 
     if state.get("paused", False):
         state["paused"] = False
+        state["paused_by"] = None
         state["updated_at"] = time.time()
         atomic_write_json(playback_file, state)
         # macOS notification
@@ -631,6 +642,7 @@ def cmd_pause(args: argparse.Namespace) -> None:
         print("Resumed")
     else:
         state["paused"] = True
+        state["paused_by"] = "user"
         state["updated_at"] = time.time()
 
         audio_pid = state.get("audio_pid")
