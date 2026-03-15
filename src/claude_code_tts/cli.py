@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -25,7 +26,6 @@ from claude_code_tts.config import (
     debug,
     load_config,
     load_raw_config,
-    maybe_cleanup,
     save_raw_config,
     session_del,
     session_read,
@@ -705,7 +705,7 @@ def cmd_test(args: argparse.Namespace) -> None:
         speed_method=method,
     )
     if wav:
-        proc = play_audio(wav, speed=cfg.speed, speed_method=method, background=False)
+        play_audio(wav, speed=cfg.speed, speed_method=method, background=False)
     else:
         print("Failed to generate speech")
         return
@@ -727,12 +727,49 @@ def cmd_speak(args: argparse.Namespace) -> None:
         _speak_from_hook(args)
         return
 
-    # Standalone mode: claude-tts speak "text" [--voice V] [--speed S]
-    text = args.text
-    if not text:
-        print("Usage: claude-tts speak \"text to speak\"")
-        print("       claude-tts speak --from-hook --hook-type stop")
-        sys.exit(1)
+    # --from-file mode: read file, filter for speech, speak it
+    if args.from_file:
+        from claude_code_tts.filter import read_and_filter
+        file_path = Path(args.from_file).expanduser()
+        try:
+            text = read_and_filter(file_path)
+        except FileNotFoundError as e:
+            print(str(e))
+            sys.exit(1)
+        if not text:
+            print("File produced no speakable content after filtering.")
+            sys.exit(0)
+        if args.reader:
+            original = file_path.read_text(encoding="utf-8", errors="replace")
+            _print_reader(original, text)
+            if args.preview:
+                return
+            # Show reader then speak
+            print()
+            from claude_code_tts.audio import speak
+            cfg = load_config()
+            words = text.split()
+            print(f"Reading {len(words)} words via {'queue' if cfg.mode == 'queue' else 'direct'} mode...")
+            speak(text, cfg)
+            return
+        if args.preview:
+            _print_preview(text)
+            return
+        # Use the queue so we don't stomp on other speech
+        from claude_code_tts.audio import speak
+        cfg = load_config()
+        words = text.split()
+        print(f"Reading {len(words)} words via {'queue' if cfg.mode == 'queue' else 'direct'} mode...")
+        speak(text, cfg)
+        return
+    else:
+        # Standalone mode: claude-tts speak "text" [--voice V] [--speed S]
+        text = args.text
+        if not text:
+            print("Usage: claude-tts speak \"text to speak\"")
+            print("       claude-tts speak --from-file <path> [--preview]")
+            print("       claude-tts speak --from-hook --hook-type stop")
+            sys.exit(1)
 
     cfg = load_config()
     voice_path = cfg.voice_path
@@ -783,6 +820,105 @@ def cmd_speak(args: argparse.Namespace) -> None:
     else:
         print("Failed to generate speech")
         sys.exit(1)
+
+
+def _print_preview(text: str) -> None:
+    """Print a word-wrapped preview of what would be spoken."""
+    print("--- Preview (what would be spoken) ---")
+    print()
+    words = text.split()
+    line = ""
+    for word in words:
+        if len(line) + len(word) + 1 > 80:
+            print(line)
+            line = word
+        else:
+            line = f"{line} {word}" if line else word
+    if line:
+        print(line)
+    print()
+    print(f"--- {len(words)} words, ~{len(words) // 150 + 1} min at 2x ---")
+
+
+def _print_reader(original: str, filtered: str) -> None:
+    """Print side-by-side view: original (left) | filtered (right).
+
+    Gives you the visual follow-along while the voice reads the filtered version.
+    If something in the filtered text doesn't make sense, glance left for context.
+
+    Aligns by paragraph so related content stays roughly at the same vertical
+    position on both sides.
+    """
+    try:
+        term_width = os.get_terminal_size().columns
+    except OSError:
+        term_width = 120
+
+    # Each side gets half the width minus the divider
+    col_width = (term_width - 3) // 2  # 3 for " | " divider
+    if col_width < 20:
+        # Terminal too narrow for side-by-side, fall back to sequential
+        print("=== Original ===")
+        print(original)
+        print()
+        print("=== Filtered (what will be spoken) ===")
+        print(filtered)
+        return
+
+    import textwrap
+
+    def wrap_paragraph(text: str, width: int) -> list[str]:
+        """Wrap a paragraph into lines, preserving blank lines as separators."""
+        if not text.strip():
+            return [""]
+        return textwrap.wrap(text, width=width) or [""]
+
+    # Split both sides into paragraphs (blank-line separated)
+    left_paras = re.split(r"\n\n+", original)
+    right_paras = re.split(r"\n\n+", filtered) if filtered.strip() else [""]
+
+    # Print header
+    header_l = "ORIGINAL".center(col_width)
+    header_r = "SPOKEN".center(col_width)
+    print(f"{header_l} | {header_r}")
+    print(f"{'-' * col_width}-+-{'-' * col_width}")
+
+    # Walk through paragraphs, aligning them vertically
+    # Each original paragraph gets paired with the next available spoken paragraph
+    ri = 0  # right paragraph index
+    for left_para in left_paras:
+        # Wrap the left paragraph into lines
+        left_lines: list[str] = []
+        for line in left_para.split("\n"):
+            if not line.strip():
+                left_lines.append("")
+            else:
+                left_lines.extend(textwrap.wrap(line, width=col_width) or [""])
+
+        # Get the matching right paragraph (if any remain)
+        right_lines: list[str] = []
+        if ri < len(right_paras):
+            right_lines = wrap_paragraph(right_paras[ri], col_width)
+            ri += 1
+
+        # Pad to equal height
+        height = max(len(left_lines), len(right_lines))
+        left_lines.extend([""] * (height - len(left_lines)))
+        right_lines.extend([""] * (height - len(right_lines)))
+
+        for left, right in zip(left_lines, right_lines):
+            print(f"{left:<{col_width}} | {right:<{col_width}}")
+
+        # Separator between paragraph groups
+        print(f"{'':<{col_width}} | {'':<{col_width}}")
+
+    # Print any remaining right paragraphs
+    while ri < len(right_paras):
+        right_lines = wrap_paragraph(right_paras[ri], col_width)
+        ri += 1
+        for right in right_lines:
+            print(f"{'':<{col_width}} | {right:<{col_width}}")
+        print(f"{'':<{col_width}} | {'':<{col_width}}")
 
 
 def _speak_from_hook(args: argparse.Namespace) -> None:
@@ -1664,6 +1800,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--speed", type=float, help="Speech speed")
     p.add_argument("--speaker", type=int, help="Speaker ID for multi-speaker models")
     p.add_argument("--random", action="store_true", help="Random speaker from model")
+    p.add_argument("--from-file", metavar="PATH", help="Read and speak a file (zero context tokens)")
+    p.add_argument("--preview", action="store_true", help="Show filtered text without speaking (use with --from-file)")
+    p.add_argument("--reader", action="store_true", help="Side-by-side view: original | spoken (use with --from-file)")
     p.add_argument("--from-hook", action="store_true", help="Read hook JSON from stdin")
     p.add_argument("--hook-type", choices=["stop", "post_tool_use"], help="Hook type")
     p.set_defaults(func=cmd_speak)
