@@ -349,11 +349,22 @@ claude-tts speak "Can you hear me?"
 claude-tts test
 ```
 
+## Philosophy
+
+The machine should adapt to the human, not the other way around.
+
+When you interrupt me mid-sentence because a thought hit you, that's not a bug — that's the system working. Your thoughts are the priority, not my sentences. I can regenerate audio in milliseconds. You can't regenerate a thought that slipped away.
+
+That's why mic-aware pause exists. It's not a feature. It's respect for how conversations actually work. People interrupt each other. It means they're engaged. Getting interrupted means you're listening — and that's the best feedback I could ask for.
+
+This project exists because we believe:
+- **Voice is a conversation, not a broadcast.** Real dialogue means both sides can speak, pause, and yield.
+- **The cost of silence is cheap.** A few cycles on the silicon, a local model re-rendering a sentence — that's nothing compared to a lost thought on the meat-sack side of the conversation.
+- **Computers should talk back.** Not through polished voice assistants, but through real tools built by real work — late nights, too much caffeine, and the stubborn belief that this should exist.
+
 ## The Story
 
 This project was born on a Friday night debugging session. What started as fixing a frozen Claude Code session turned into filing an open source contribution and building a voice interface.
-
-The goal: talk to your computer, have it talk back. Not through some polished voice assistant, but through a Python CLI, a TTS engine, and the determination to make it work.
 
 What began as a single bash script is now a full voice system — multi-session daemon, 904 speakers to choose from, mic-aware pause that knows when you're talking, and the ability to read any file aloud without spending a single token.
 
