@@ -1,6 +1,6 @@
 # Claude Code TTS - Instructions for Claude
 
-Welcome, fellow Claude! TTS for Claude Code using Piper and Kokoro. Version 7.2.3.
+Welcome, fellow Claude! TTS for Claude Code using Piper and Kokoro. Version 7.2.4.
 
 ## Ownership
 
