@@ -27,6 +27,7 @@ from claude_code_tts.config import (
     VOICES_DIR,
     load_raw_config,
 )
+from claude_code_tts.mic_watcher import MicWatcher
 
 # --- Daemon path constants ---
 
@@ -155,14 +156,21 @@ _UNSET = object()
 def write_playback_state(
     audio_pid: int | None = None,
     paused: bool | None = None,
+    paused_by: str | None | object = _UNSET,
     current_message: dict | None | object = _UNSET,
 ) -> None:
-    """Update playback state atomically."""
+    """Update playback state atomically.
+
+    paused_by tracks who paused: "user" (manual toggle) or "mic" (mic watcher).
+    This prevents mic-unpause from overriding a manual pause.
+    """
     state = read_playback_state()
     if audio_pid is not None:
         state["audio_pid"] = audio_pid
     if paused is not None:
         state["paused"] = paused
+    if paused_by is not _UNSET:
+        state["paused_by"] = paused_by
     if current_message is not _UNSET:
         state["current_message"] = current_message
     state["updated_at"] = time.time()
@@ -510,6 +518,23 @@ def daemon_loop(lockpick: bool = False) -> None:
         speak_announcement("Voice daemon online. Ready when you are.")
         log("Startup announcement complete")
 
+    # Start mic-aware pause watcher if enabled
+    mic_watcher: MicWatcher | None = None
+    raw_config = load_raw_config()
+    if raw_config.get("mic_aware_pause", False):
+        resume_delay = raw_config.get("mic_resume_delay_ms", 800)
+        mic_watcher = MicWatcher(
+            log_fn=log,
+            read_playback_state=read_playback_state,
+            write_playback_state=write_playback_state,
+            resume_delay_ms=resume_delay,
+        )
+        if not mic_watcher.start():
+            log("Mic watcher failed to start (Handy log not found)", "WARN")
+            mic_watcher = None
+    else:
+        log("Mic-aware pause disabled (set mic_aware_pause: true in config.json to enable)")
+
     while not _shutdown_requested:
         try:
             write_heartbeat()
@@ -655,6 +680,8 @@ def daemon_loop(lockpick: bool = False) -> None:
             log(f"Error in daemon loop: {e}", "ERROR")
             time.sleep(1)
 
+    if mic_watcher:
+        mic_watcher.stop()
     log("Shutting down gracefully...")
     if not _shutdown_by_signal:
         speak_announcement("Voice daemon shutting down. Catch you later.")
