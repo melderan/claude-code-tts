@@ -1,6 +1,6 @@
 # Claude Code TTS - Instructions for Claude
 
-Welcome, fellow Claude! TTS for Claude Code using Piper and Kokoro. Version 7.0.2.
+Welcome, fellow Claude! TTS for Claude Code using Piper and Kokoro. Version 7.1.0.
 
 ## Ownership
 
@@ -86,6 +86,10 @@ claude-tts speak --voice en_US-joe-medium --speed 2.0 "Test"
 claude-tts speak --voice en_US-libritts_r-medium --speaker 42 "Speaker 42"
 claude-tts speak --random "Random speaker from multi-speaker model"
 
+# Read a file aloud (zero context tokens -- disk straight to voice)
+claude-tts speak --from-file ~/vault/tmp/report.md
+claude-tts speak --from-file ~/vault/tmp/report.md --preview  # See what would be spoken
+
 # Broadway auditions - cycle through voices interactively
 claude-tts audition                              # All voices
 claude-tts audition --voice en_US-libritts_r-medium --speakers 20
@@ -100,7 +104,7 @@ src/claude_code_tts/
   config.py                # Config loading, session.d helpers, migration
   session.py               # get_session_id() - PROJECT_ROOT -> folder lookup
   audio.py                 # Piper/Kokoro/afplay backends, tts_speak()
-  filter.py                # Text filter (regex cleanup for speech)
+  filter.py                # Text filter (filter_text for responses, filter_document for files)
   daemon.py                # Queue daemon (pause/resume, heartbeat)
   install.py               # Installer (hooks, voices, service)
   release.py               # Release workflow (checks + version bump)
