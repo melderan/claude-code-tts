@@ -25,7 +25,11 @@ _RE_RECORDING_STOP = re.compile(r"Recording stopped and samples retrieved")
 
 # How long to wait after recording stops before resuming TTS (ms).
 # Gives Handy time to transcribe + paste before TTS resumes.
-RESUME_DELAY_MS = 800
+RESUME_DELAY_MS = 1500
+
+# How often to check for log rotation (seconds).
+# Prevents false positives from inode races during active writes.
+ROTATION_CHECK_INTERVAL = 2.0
 
 
 class MicWatcher:
@@ -105,8 +109,26 @@ class MicWatcher:
         self._write_state(paused=False, paused_by=None)
         self._log("Mic watcher: resumed after recording")
 
+    def _check_rotation(self, f: object) -> bool:
+        """Check if the log file was rotated. Debounced to avoid false positives."""
+        now = time.monotonic()
+        if now - self._last_rotation_check < ROTATION_CHECK_INTERVAL:
+            return False
+        self._last_rotation_check = now
+        try:
+            current_inode = os.stat(HANDY_LOG).st_ino
+            fd_inode = os.fstat(f.fileno()).st_ino  # type: ignore[union-attr]
+            if current_inode != fd_inode:
+                self._log("Mic watcher: log rotated, reopening")
+                return True
+        except OSError:
+            pass
+        return False
+
     def _watch_loop(self) -> None:
         """Tail the Handy log file, watching for recording events."""
+        self._last_rotation_check = time.monotonic()
+
         try:
             # Open and seek to end — we only care about new events
             with open(HANDY_LOG, "r") as f:
@@ -116,15 +138,8 @@ class MicWatcher:
                 while not self._stop_event.is_set():
                     line = f.readline()
                     if not line:
-                        # No new data — check if file was rotated
-                        try:
-                            current_inode = os.stat(HANDY_LOG).st_ino
-                            fd_inode = os.fstat(f.fileno()).st_ino
-                            if current_inode != fd_inode:
-                                self._log("Mic watcher: log rotated, reopening")
-                                break  # Will restart in outer loop
-                        except OSError:
-                            pass
+                        if self._check_rotation(f):
+                            break  # Will restart in outer loop
                         self._stop_event.wait(0.05)
                         continue
 
