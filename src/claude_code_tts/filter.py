@@ -15,8 +15,85 @@ import re
 from pathlib import Path
 
 
+def _is_high_entropy(s: str) -> bool:
+    """Check if a string looks like a secret/credential (high entropy random chars).
+
+    Catches: API keys, passwords, tokens, base64 blobs, hex strings, JWTs.
+    """
+    # Too short to be a secret
+    if len(s) < 16:
+        return False
+
+    # Count character classes
+    has_upper = bool(re.search(r"[A-Z]", s))
+    has_lower = bool(re.search(r"[a-z]", s))
+    has_digit = bool(re.search(r"[0-9]", s))
+
+    # Pure hex (32+ chars) — likely a hash or key
+    if re.fullmatch(r"[0-9a-fA-F]{32,}", s):
+        return True
+
+    # Base64-like (24+ chars, alphanumeric + /+=)
+    if len(s) >= 24 and re.fullmatch(r"[A-Za-z0-9+/=_-]{24,}", s):
+        # Must have mixed case + digits to avoid matching normal words
+        if has_upper and has_lower and has_digit:
+            return True
+
+    # Long alphanumeric with no spaces or real word patterns (20+ chars)
+    if len(s) >= 20 and re.fullmatch(r"[A-Za-z0-9_-]{20,}", s):
+        if has_upper and has_lower and has_digit:
+            # Check it's not a camelCase identifier — those have word boundaries
+            # Secrets don't have recognizable word patterns
+            words = re.findall(r"[A-Z]?[a-z]+", s)
+            if not words or max(len(w) for w in words) <= 3:
+                return True
+
+    return False
+
+
+def _redact_secrets(text: str) -> str:
+    """Replace high-entropy strings (secrets, tokens, keys) with a spoken marker."""
+
+    # JWT tokens (three base64 segments separated by dots)
+    text = re.sub(
+        r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b",
+        "redacted token",
+        text,
+    )
+
+    # Labeled secrets: key=VALUE, key: VALUE, key "VALUE" patterns
+    def _redact_labeled(m: re.Match) -> str:
+        label = m.group(1)
+        sep = m.group(2)
+        value = m.group(3)
+        if _is_high_entropy(value):
+            return f"{label}{sep}redacted"
+        return m.group(0)
+
+    text = re.sub(
+        r"(\b\w*(?:key|token|secret|password|passwd|credential|auth)[_\w]*)"
+        r"(\s*[=:]\s*[\"']?)"
+        r"([A-Za-z0-9+/=_-]{16,})",
+        _redact_labeled, text, flags=re.IGNORECASE,
+    )
+
+    # Standalone high-entropy strings (not part of a path or URL)
+    def _redact_standalone(m: re.Match) -> str:
+        s = m.group(0)
+        if _is_high_entropy(s):
+            return "redacted credential"
+        return s
+
+    text = re.sub(r"(?<![/\\.])(?<!\w)[A-Za-z0-9+/=_-]{24,}(?!\w)(?![/\\.])", _redact_standalone, text)
+
+    return text
+
+
 def _filter_markdown(text: str) -> str:
     """Shared markdown cleanup used by both filter modes."""
+
+    # Redact secrets before any other processing
+    text = _redact_secrets(text)
 
     # Remove <thinking> blocks
     text = re.sub(r"<thinking>[\s\S]*?</thinking>", "", text)
