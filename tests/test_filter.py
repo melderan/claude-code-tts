@@ -1,6 +1,12 @@
 """Tests for filter.py — text filtering for TTS."""
 
-from claude_code_tts.filter import filter_document, filter_text, read_and_filter
+from claude_code_tts.filter import (
+    _is_high_entropy,
+    _redact_secrets,
+    filter_document,
+    filter_text,
+    read_and_filter,
+)
 
 
 class TestThinkingBlocks:
@@ -319,3 +325,108 @@ class TestReadAndFilter:
         f.write_text("Simple content.")
         result = read_and_filter(str(f))
         assert "Simple content" in result
+
+
+class TestHighEntropy:
+    """Test detection of secrets, tokens, and high-entropy strings."""
+
+    def test_random_password(self):
+        assert _is_high_entropy("NIij4wghBD4s7LuhQpu5y2hCrYUU5oLvZJYOWyfGoet7V8LrVGzhfj1TYsXjF9PZ")
+
+    def test_hex_hash(self):
+        assert _is_high_entropy("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6")
+
+    def test_base64_token(self):
+        assert _is_high_entropy("dGhpcyBpcyBhIHRlc3QgdG9rZW4=")
+
+    def test_short_string_not_entropy(self):
+        assert not _is_high_entropy("hello")
+        assert not _is_high_entropy("short123")
+
+    def test_normal_words_not_entropy(self):
+        assert not _is_high_entropy("authentication")
+        assert not _is_high_entropy("configurationManager")
+
+    def test_camel_case_not_entropy(self):
+        # camelCase identifiers have recognizable word patterns
+        assert not _is_high_entropy("getUserByIdFromDatabase")
+
+    def test_snake_case_not_entropy(self):
+        # snake_case with underscores — these are identifiers, not secrets
+        assert not _is_high_entropy("get_user_by_id_from_db")
+
+    def test_uuid_like(self):
+        assert _is_high_entropy("550e8400e29b41d4a716446655440000")
+
+
+class TestRedactSecrets:
+    """Test secret redaction in speech output."""
+
+    def test_standalone_credential(self):
+        text = "The value is NIij4wghBD4s7LuhQpu5y2hCrYUU5oLvZJYOWyfGoet7V8LrVGzhfj1TYsXjF9PZ right there"
+        result = _redact_secrets(text)
+        assert "NIij4w" not in result
+        assert "redacted" in result
+
+    def test_jwt_token(self):
+        text = "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+        result = _redact_secrets(text)
+        assert "eyJ" not in result
+        assert "redacted token" in result
+
+    def test_labeled_api_key(self):
+        text = "api_key=xK9mP2nQ7rS4tU6vW8yZ0aB3cD5eF7gH"
+        result = _redact_secrets(text)
+        assert "xK9mP2" not in result
+        assert "redacted" in result
+
+    def test_labeled_password(self):
+        text = "password: Xk9mP2nQ7rS4tU6vW8yZ0aB3cD5eF7gH"
+        result = _redact_secrets(text)
+        assert "Xk9mP2" not in result
+        assert "redacted" in result
+
+    def test_normal_text_preserved(self):
+        text = "The authentication module handles user sessions correctly."
+        result = _redact_secrets(text)
+        assert result == text
+
+    def test_hex_hash_redacted(self):
+        text = "commit a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+        result = _redact_secrets(text)
+        assert "a1b2c3" not in result
+
+    def test_short_hex_preserved(self):
+        text = "commit abc123f"
+        result = _redact_secrets(text)
+        assert "abc123f" in result
+
+    def test_file_paths_not_redacted(self):
+        text = "Check /usr/local/bin/some_long_path_name"
+        result = _redact_secrets(text)
+        # Paths have slashes — the lookbehind should protect them
+        assert "some_long_path_name" in result
+
+
+class TestRedactSecretsInFilters:
+    """Test that redaction works through the main filter entry points."""
+
+    def test_filter_text_redacts(self):
+        text = "Set the token to NIij4wghBD4s7LuhQpu5y2hCrYUU5oLvZJYOWyfGoet7V8LrVGzhfj1TYsXjF9PZ and restart"
+        result = filter_text(text)
+        assert "NIij4w" not in result
+        assert "redacted" in result
+        assert "restart" in result
+
+    def test_filter_document_redacts(self):
+        text = "API_KEY=xK9mP2nQ7rS4tU6vW8yZ0aB3cD5eF7gH\n\nNext section."
+        result = filter_document(text)
+        assert "xK9mP2" not in result
+        assert "Next section" in result
+
+    def test_code_block_secrets_removed(self):
+        # Secrets in code blocks get removed with the whole block
+        text = "Config:\n```\npassword=SuperSecret123abc456def\n```\nDone."
+        result = filter_text(text)
+        assert "SuperSecret" not in result
+        assert "Done." in result
