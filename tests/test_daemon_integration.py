@@ -74,16 +74,26 @@ def daemon_env(tmp_path):
     heartbeat_file = state_dir / "daemon.heartbeat"
     log_file = state_dir / "daemon.log"
 
+    pid_file = state_dir / "daemon.pid"
+    lock_file = state_dir / "daemon.lock"
+    version_file = state_dir / "daemon.version"
+    respawn_marker = state_dir / "daemon.respawn"
+
     with patch.object(daemon_mod, "PLAYBACK_STATE_FILE", playback_file), \
          patch.object(daemon_mod, "HEARTBEAT_FILE", heartbeat_file), \
          patch.object(daemon_mod, "LOG_FILE", log_file), \
-         patch.object(daemon_mod, "TTS_QUEUE_DIR", queue_dir):
+         patch.object(daemon_mod, "TTS_QUEUE_DIR", queue_dir), \
+         patch.object(daemon_mod, "PID_FILE", pid_file), \
+         patch.object(daemon_mod, "LOCK_FILE", lock_file), \
+         patch.object(daemon_mod, "VERSION_FILE", version_file), \
+         patch.object(daemon_mod, "RESPAWN_MARKER", respawn_marker):
         yield {
             "state_dir": state_dir,
             "queue_dir": queue_dir,
             "playback_file": playback_file,
             "heartbeat_file": heartbeat_file,
             "log_file": log_file,
+            "respawn_marker": respawn_marker,
             "tmp_path": tmp_path,
         }
 
@@ -609,6 +619,8 @@ class TestDaemonLoopMessageFlow:
             paused_by=None,
             current_message=interrupted_msg,
         )
+        # Mark as controlled restart so daemon preserves current_message
+        daemon_env["respawn_marker"].write_text(str(time.time()))
 
         with patch.object(daemon_mod, "detect_player", return_value=[str(fake)]), \
              patch.object(daemon_mod, "daemon_generate_speech", side_effect=fake_generate), \
@@ -682,6 +694,8 @@ class TestDaemonLoopMessageFlow:
             paused_by=None,
             current_message=interrupted_msg,
         )
+        # Mark as controlled restart so daemon preserves current_message
+        daemon_env["respawn_marker"].write_text(str(time.time()))
 
         with patch.object(daemon_mod, "detect_player", return_value=[str(fake)]), \
              patch.object(daemon_mod, "daemon_generate_speech", side_effect=fake_generate), \
