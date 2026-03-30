@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "7.4.0"
+__version__ = "7.4.1"
 
 
 # --- Platform Detection ---
@@ -881,22 +881,33 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
                 launch_agents_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copy(dst_plist, deployed_plist)
                 uid = os.getuid()
-                # Unload old version (ignore errors if not loaded)
+                # Unload old version — try both APIs (legacy load/unload
+                # and modern bootout/bootstrap) since we don't know which
+                # was used to load the previous version.
                 subprocess.run(
                     ["launchctl", "bootout", f"gui/{uid}", f"gui/{uid}/{plist_label}"],
                     capture_output=True,
                 )
-                # Load new version
+                subprocess.run(
+                    ["launchctl", "remove", plist_label],
+                    capture_output=True,
+                )
+                # Load new version — try modern API first, fall back to legacy
                 result = subprocess.run(
                     ["launchctl", "bootstrap", f"gui/{uid}", str(deployed_plist)],
                     capture_output=True, text=True,
                 )
+                if result.returncode != 0:
+                    result = subprocess.run(
+                        ["launchctl", "load", str(deployed_plist)],
+                        capture_output=True, text=True,
+                    )
                 if result.returncode == 0:
-                    success(f"Launchd service installed and loaded (starts on login)")
+                    success("Launchd service installed and loaded (starts on login)")
                 else:
-                    warn(f"Launchd bootstrap failed: {result.stderr.strip()}")
+                    warn(f"Launchd load failed: {result.stderr.strip()}")
                     warn(f"Plist deployed to {deployed_plist} -- load manually with:")
-                    warn(f"  launchctl bootstrap gui/{uid} {deployed_plist}")
+                    warn(f"  launchctl load {deployed_plist}")
 
     # Linux systemd service
     src_systemd = REPO_DIR / "services" / "claude-tts.service"
