@@ -7,13 +7,13 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>~/.local/bin/claude-tts</string>
+        <string>CLAUDE_TTS_BIN</string>
         <string>daemon</string>
         <string>foreground</string>
     </array>
 
     <key>RunAtLoad</key>
-    <false/>
+    <true/>
 
     <key>KeepAlive</key>
     <dict>
@@ -22,18 +22,18 @@
     </dict>
 
     <key>WorkingDirectory</key>
-    <string>~</string>
+    <string>CLAUDE_TTS_HOME</string>
 
     <key>StandardOutPath</key>
-    <string>~/.claude-tts/daemon.stdout.log</string>
+    <string>CLAUDE_TTS_CONFIG/daemon.stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>~/.claude-tts/daemon.stderr.log</string>
+    <string>CLAUDE_TTS_CONFIG/daemon.stderr.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:~/.local/bin</string>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:CLAUDE_TTS_BIN_DIR</string>
     </dict>
 </dict>
 </plist>

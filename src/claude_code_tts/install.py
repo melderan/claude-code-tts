@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "7.3.1"
+__version__ = "7.4.0"
 
 
 # --- Platform Detection ---
@@ -854,11 +854,49 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
     # macOS launchd plist
     src_plist = REPO_DIR / "services" / "com.claude-tts.daemon.plist"
     dst_plist = services_dir / "com.claude-tts.daemon.plist"
+    plist_label = "com.claude-tts.daemon"
     if src_plist.exists():
+        # Template the plist with real paths (launchd doesn't expand ~)
+        claude_tts_bin = shutil.which("claude-tts") or str(HOME / ".local" / "bin" / "claude-tts")
+        claude_tts_bin_dir = str(Path(claude_tts_bin).parent)
+        plist_content = src_plist.read_text()
+        plist_content = plist_content.replace("CLAUDE_TTS_BIN_DIR", claude_tts_bin_dir)
+        plist_content = plist_content.replace("CLAUDE_TTS_BIN", claude_tts_bin)
+        plist_content = plist_content.replace("CLAUDE_TTS_CONFIG", str(TTS_CONFIG_DIR))
+        plist_content = plist_content.replace("CLAUDE_TTS_HOME", str(HOME))
         if dry_run:
-            dry(f"cp {src_plist} -> {dst_plist}")
+            dry(f"template {src_plist} -> {dst_plist}")
         else:
-            shutil.copy(src_plist, dst_plist)
+            dst_plist.write_text(plist_content)
+
+        # Deploy to ~/Library/LaunchAgents on macOS
+        if PLATFORM == "macos":
+            launch_agents_dir = HOME / "Library" / "LaunchAgents"
+            deployed_plist = launch_agents_dir / "com.claude-tts.daemon.plist"
+            if dry_run:
+                dry(f"cp {dst_plist} -> {deployed_plist}")
+                dry(f"launchctl bootout gui/$UID {plist_label}")
+                dry(f"launchctl bootstrap gui/$UID {deployed_plist}")
+            else:
+                launch_agents_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy(dst_plist, deployed_plist)
+                uid = os.getuid()
+                # Unload old version (ignore errors if not loaded)
+                subprocess.run(
+                    ["launchctl", "bootout", f"gui/{uid}", f"gui/{uid}/{plist_label}"],
+                    capture_output=True,
+                )
+                # Load new version
+                result = subprocess.run(
+                    ["launchctl", "bootstrap", f"gui/{uid}", str(deployed_plist)],
+                    capture_output=True, text=True,
+                )
+                if result.returncode == 0:
+                    success(f"Launchd service installed and loaded (starts on login)")
+                else:
+                    warn(f"Launchd bootstrap failed: {result.stderr.strip()}")
+                    warn(f"Plist deployed to {deployed_plist} -- load manually with:")
+                    warn(f"  launchctl bootstrap gui/{uid} {deployed_plist}")
 
     # Linux systemd service
     src_systemd = REPO_DIR / "services" / "claude-tts.service"
