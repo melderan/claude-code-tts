@@ -584,9 +584,41 @@ def daemon_loop(lockpick: bool = False) -> None:
 
     VERSION_FILE.write_text("control-v1")
 
-    write_heartbeat()
+    # --- Detect restart type ---
+    # Respawn marker with recent timestamp = controlled restart (upgrade/config).
+    # Missing or old marker = cold start (reboot, crash, manual start).
+    is_respawn = False
     if RESPAWN_MARKER.exists():
+        try:
+            marker_age = time.time() - float(RESPAWN_MARKER.read_text().strip())
+            is_respawn = marker_age < 30.0
+        except (ValueError, OSError):
+            pass
         RESPAWN_MARKER.unlink(missing_ok=True)
+
+    # --- Clear stale state from previous daemon run ---
+    # audio_pid and mic-pause are always stale (process is dead, mic isn't
+    # recording across restarts). current_message is only preserved on
+    # controlled respawn — on cold start it's from a previous session.
+    startup_state = read_playback_state()
+    stale_fields: list[str] = []
+    if startup_state.get("audio_pid") is not None:
+        stale_fields.append("audio_pid")
+    if startup_state.get("paused") and startup_state.get("paused_by") == "mic":
+        stale_fields.append("mic-pause")
+    if not is_respawn and startup_state.get("current_message") is not None:
+        stale_fields.append("current_message")
+    if stale_fields:
+        write_playback_state(
+            audio_pid=None,
+            current_message=None if "current_message" in stale_fields else _UNSET,
+            paused=False if "mic-pause" in stale_fields else None,
+            paused_by=None if "mic-pause" in stale_fields else _UNSET,
+        )
+        log(f"Cleared stale state from previous run: {', '.join(stale_fields)}")
+
+    write_heartbeat()
+    if is_respawn:
         log("Quick respawn detected, skipping startup announcement")
     else:
         speak_announcement("Voice daemon online. Ready when you are.")
