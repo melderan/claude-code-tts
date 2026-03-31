@@ -316,6 +316,11 @@ def daemon_generate_speech(
 
     Returns True on success.
     """
+    import re
+    # Clean punctuation clusters that make Piper produce noise artifacts.
+    # Applied here so ALL text hitting Piper is safe, regardless of source.
+    text = re.sub(r"([.!?])[)\]}>\"']+", r"\1", text)
+
     persona_config = get_persona_config(persona)
 
     kokoro_blend = voice_kokoro_blend_override or persona_config.get("voice_kokoro_blend", "")
