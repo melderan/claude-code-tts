@@ -28,6 +28,7 @@ from claude_code_tts.config import (
     VOICES_DIR,
     load_raw_config,
 )
+from claude_code_tts.tone import classify_tone, ToneParams, DEFAULT_TONE
 from claude_code_tts.mic_watcher import MicWatcher
 
 # --- Daemon path constants ---
@@ -305,8 +306,12 @@ def daemon_generate_speech(
     output_file: Path,
     voice_kokoro_override: str = "",
     voice_kokoro_blend_override: str = "",
+    tone: ToneParams | None = None,
 ) -> bool:
     """Generate speech for daemon playback, resolving persona config.
+
+    If tone is provided, Piper's expressiveness parameters (noise_scale,
+    noise_w_scale, sentence_silence) are set from the tone preset.
 
     Returns True on success.
     """
@@ -323,6 +328,13 @@ def daemon_generate_speech(
     if not voice_path.exists():
         voice_path = VOICES_DIR / f"{DEFAULT_VOICE}.onnx"
 
+    # Tone-aware generation parameters
+    tone_kwargs: dict = {}
+    if tone is not None:
+        tone_kwargs["noise_scale"] = tone.noise_scale
+        tone_kwargs["noise_w_scale"] = tone.noise_w_scale
+        tone_kwargs["sentence_silence"] = tone.sentence_silence
+
     result = _generate_speech(
         text,
         voice_path=voice_path if voice_path.exists() else None,
@@ -331,6 +343,7 @@ def daemon_generate_speech(
         speed=speed,
         speed_method=speed_method,
         output_path=output_file,
+        **tone_kwargs,
     )
     return result is not None
 
@@ -758,6 +771,11 @@ def daemon_loop(lockpick: bool = False) -> None:
                 msg_file.unlink(missing_ok=True)
                 continue
 
+            # Classify content tone for expressive speech
+            tone = classify_tone(text)
+            if tone.name != "neutral":
+                log(f"Tone: {tone.name} (noise={tone.noise_scale}, silence={tone.sentence_silence})")
+
             log(f"Speaking for {project}: {text[:50]}...")
             audio_file = Path(f"/tmp/tts_queue_{session_id}.wav")
             persona_config = get_persona_config(persona)
@@ -766,12 +784,16 @@ def daemon_loop(lockpick: bool = False) -> None:
             voice_kokoro = msg.get("voice_kokoro", "")
             voice_kokoro_blend = msg.get("voice_kokoro_blend", "")
 
+            # Apply tone speed factor
+            effective_speed = speed * tone.speed_factor
+
             if not daemon_generate_speech(
                 text,
                 persona,
                 audio_file,
                 voice_kokoro_override=voice_kokoro,
                 voice_kokoro_blend_override=voice_kokoro_blend,
+                tone=tone,
             ):
                 log(f"Failed to generate speech for message from {project}", "ERROR")
                 msg_file.unlink(missing_ok=True)
@@ -803,7 +825,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 "project": project,
                 "text": text,
                 "persona": persona,
-                "speed": speed,
+                "speed": effective_speed,
                 "speed_method": speed_method,
                 "voice_kokoro": voice_kokoro,
                 "voice_kokoro_blend": voice_kokoro_blend,
@@ -813,14 +835,14 @@ def daemon_loop(lockpick: bool = False) -> None:
             wav_duration = get_wav_duration(audio_file)
 
             if speed_method == "playback":
-                _, was_killed, elapsed = daemon_play_audio(audio_file, speed)
+                _, was_killed, elapsed = daemon_play_audio(audio_file, effective_speed)
             else:
                 _, was_killed, elapsed = daemon_play_audio(audio_file)
 
             audio_file.unlink(missing_ok=True)
 
             if was_killed:
-                audio_pos = calculate_audio_position(elapsed, speed, speed_method)
+                audio_pos = calculate_audio_position(elapsed, effective_speed, speed_method)
                 remaining = wav_duration - audio_pos
                 if remaining <= NEAR_END_THRESHOLD:
                     log(
