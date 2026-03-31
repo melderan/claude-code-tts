@@ -136,6 +136,11 @@ def _filter_markdown(text: str) -> str:
     # Remove API error request IDs (e.g., "req_abc123...")
     text = re.sub(r"\breq_[a-zA-Z0-9_-]+\b", "", text)
 
+    # Clean up punctuation clusters that cause Piper to produce noise
+    # artifacts. E.g., ".)" or "?)" or "!]" -- Piper generates end-of-
+    # sentence prosody on the first mark, then chokes on the second.
+    text = re.sub(r"([.!?])[)\]}>\"']+", r"\1", text)
+
     return text
 
 
