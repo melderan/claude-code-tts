@@ -161,6 +161,145 @@ class TestMicWatcherStartStop:
         assert not w.active
 
 
+class TestCheckInitialMicState:
+    """Test log-tail scanning for current mic state on startup."""
+
+    def _make_watcher(self, log_file, monkeypatch):
+        monkeypatch.setattr("claude_code_tts.mic_watcher.HANDY_LOG", log_file)
+        return MicWatcher(
+            log_fn=MagicMock(),
+            read_playback_state=MagicMock(return_value={}),
+            write_playback_state=MagicMock(),
+        )
+
+    def test_mic_currently_recording(self, tmp_path, monkeypatch):
+        """Last event is recording start -> mic is open."""
+        log_file = tmp_path / "handy.log"
+        log_file.write_text(
+            "[10:55:00][DEBUG] Some unrelated log line\n"
+            "[10:55:33][handy_app_lib::managers::audio][DEBUG] Recording started for binding transcribe\n"
+        )
+        w = self._make_watcher(log_file, monkeypatch)
+        assert w._check_initial_mic_state() is True
+
+    def test_mic_not_recording(self, tmp_path, monkeypatch):
+        """Last event is recording stop -> mic is closed."""
+        log_file = tmp_path / "handy.log"
+        log_file.write_text(
+            "[10:55:33][handy_app_lib::managers::audio][DEBUG] Recording started for binding transcribe\n"
+            "[10:55:52][handy_app_lib::actions][DEBUG] Recording stopped and samples retrieved in 35ms\n"
+        )
+        w = self._make_watcher(log_file, monkeypatch)
+        assert w._check_initial_mic_state() is False
+
+    def test_no_recording_events(self, tmp_path, monkeypatch):
+        """No recording events in log -> not recording."""
+        log_file = tmp_path / "handy.log"
+        log_file.write_text(
+            "[10:55:00][DEBUG] App started\n"
+            "[10:55:01][DEBUG] Model loaded\n"
+        )
+        w = self._make_watcher(log_file, monkeypatch)
+        assert w._check_initial_mic_state() is False
+
+    def test_empty_log(self, tmp_path, monkeypatch):
+        """Empty log -> not recording."""
+        log_file = tmp_path / "handy.log"
+        log_file.write_text("")
+        w = self._make_watcher(log_file, monkeypatch)
+        assert w._check_initial_mic_state() is False
+
+    def test_missing_log(self, tmp_path, monkeypatch):
+        """Missing log -> not recording."""
+        log_file = tmp_path / "nonexistent.log"
+        w = self._make_watcher(log_file, monkeypatch)
+        assert w._check_initial_mic_state() is False
+
+    def test_multiple_cycles_last_is_start(self, tmp_path, monkeypatch):
+        """Multiple start/stop cycles, last event is start -> recording."""
+        log_file = tmp_path / "handy.log"
+        log_file.write_text(
+            "[10:55:33][handy_app_lib::managers::audio][DEBUG] Recording started for binding transcribe\n"
+            "[10:55:52][handy_app_lib::actions][DEBUG] Recording stopped and samples retrieved\n"
+            "[10:56:10][handy_app_lib::managers::audio][DEBUG] Recording started for binding transcribe\n"
+            "[10:56:25][handy_app_lib::actions][DEBUG] Recording stopped and samples retrieved\n"
+            "[10:57:00][handy_app_lib::managers::audio][DEBUG] Recording started for binding transcribe\n"
+        )
+        w = self._make_watcher(log_file, monkeypatch)
+        assert w._check_initial_mic_state() is True
+
+    def test_multiple_cycles_last_is_stop(self, tmp_path, monkeypatch):
+        """Multiple start/stop cycles, last event is stop -> not recording."""
+        log_file = tmp_path / "handy.log"
+        log_file.write_text(
+            "[10:55:33][handy_app_lib::managers::audio][DEBUG] Recording started for binding transcribe\n"
+            "[10:55:52][handy_app_lib::actions][DEBUG] Recording stopped and samples retrieved\n"
+            "[10:56:10][handy_app_lib::managers::audio][DEBUG] Recording started for binding transcribe\n"
+            "[10:56:25][handy_app_lib::actions][DEBUG] Recording stopped and samples retrieved\n"
+        )
+        w = self._make_watcher(log_file, monkeypatch)
+        assert w._check_initial_mic_state() is False
+
+
+class TestStartPausesIfMicOpen:
+    """Test that start() pauses the daemon if mic is currently recording."""
+
+    def test_start_pauses_when_mic_open(self, tmp_path, monkeypatch):
+        log_file = tmp_path / "handy.log"
+        log_file.write_text(
+            "[10:57:00][handy_app_lib::managers::audio][DEBUG] Recording started for binding transcribe\n"
+        )
+        monkeypatch.setattr("claude_code_tts.mic_watcher.HANDY_LOG", log_file)
+
+        state = {"paused": False, "paused_by": None}
+
+        def read_state():
+            return dict(state)
+
+        def write_state(**kwargs):
+            for k, v in kwargs.items():
+                state[k] = v
+
+        w = MicWatcher(
+            log_fn=MagicMock(),
+            read_playback_state=read_state,
+            write_playback_state=write_state,
+        )
+        w.start()
+        # Mic was open -> should be paused immediately
+        assert state["paused"] is True
+        assert state["paused_by"] == "mic"
+        assert w.recording is True
+        w.stop()
+
+    def test_start_does_not_pause_when_mic_closed(self, tmp_path, monkeypatch):
+        log_file = tmp_path / "handy.log"
+        log_file.write_text(
+            "[10:55:33][handy_app_lib::managers::audio][DEBUG] Recording started for binding transcribe\n"
+            "[10:55:52][handy_app_lib::actions][DEBUG] Recording stopped and samples retrieved\n"
+        )
+        monkeypatch.setattr("claude_code_tts.mic_watcher.HANDY_LOG", log_file)
+
+        state = {"paused": False, "paused_by": None}
+
+        def read_state():
+            return dict(state)
+
+        def write_state(**kwargs):
+            for k, v in kwargs.items():
+                state[k] = v
+
+        w = MicWatcher(
+            log_fn=MagicMock(),
+            read_playback_state=read_state,
+            write_playback_state=write_state,
+        )
+        w.start()
+        assert state["paused"] is False
+        assert w.recording is False
+        w.stop()
+
+
 class TestMicWatcherIntegration:
     """Test the full watcher with a real file being tailed."""
 
