@@ -13,6 +13,7 @@ not just WHAT they said. "JMO said this, and he was animated."
 from __future__ import annotations
 
 import math
+import shutil
 import sqlite3
 import struct
 import time
@@ -641,3 +642,131 @@ class HandyWatcher:
     def stop(self) -> None:
         """Signal the watcher to stop."""
         self._running = False
+
+
+# --- Speech history (TTS output recordings) ---
+
+SPEECH_HISTORY_DIR = Path.home() / ".claude-tts" / "speech_history"
+SPEECH_HISTORY_DB = Path.home() / ".claude-tts" / "handy_analysis.db"  # Same DB
+DEFAULT_SPEECH_HISTORY_LIMIT = 50
+
+
+def _init_speech_history_db(db_path: Path = SPEECH_HISTORY_DB) -> sqlite3.Connection:
+    """Initialize the speech history table (shares DB with voice_analysis)."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS speech_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_name TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            session_id TEXT,
+            project TEXT,
+            persona TEXT,
+            text TEXT,
+            speed REAL,
+            tone TEXT,
+            duration_seconds REAL
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_speech_history_created
+        ON speech_history(created_at DESC)
+    """)
+    conn.commit()
+    return conn
+
+
+def save_speech_wav(
+    wav_path: Path,
+    session_id: str = "",
+    project: str = "",
+    persona: str = "",
+    text: str = "",
+    speed: float = 0.0,
+    tone: str = "neutral",
+    history_limit: int = DEFAULT_SPEECH_HISTORY_LIMIT,
+    history_dir: Path = SPEECH_HISTORY_DIR,
+    db_path: Path = SPEECH_HISTORY_DB,
+) -> Optional[Path]:
+    """Copy a generated WAV to speech history before playback.
+
+    Returns the path to the history copy, or None on failure.
+    Enforces history_limit by removing oldest files.
+    """
+    if not wav_path.exists():
+        return None
+
+    history_dir.mkdir(parents=True, exist_ok=True)
+
+    # Name: timestamp_session.wav
+    ts = time.time()
+    safe_session = session_id.replace("/", "_")[:40] if session_id else "unknown"
+    hist_name = f"tts-{ts:.3f}-{safe_session}.wav"
+    hist_path = history_dir / hist_name
+
+    try:
+        shutil.copy2(wav_path, hist_path)
+    except OSError:
+        return None
+
+    # Get duration
+    duration = 0.0
+    try:
+        with wave.open(str(hist_path), "rb") as w:
+            duration = w.getnframes() / w.getframerate()
+    except (wave.Error, OSError):
+        pass
+
+    # Store metadata
+    conn = _init_speech_history_db(db_path)
+    try:
+        conn.execute(
+            """INSERT INTO speech_history
+               (file_name, created_at, session_id, project, persona, text, speed, tone, duration_seconds)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (hist_name, ts, session_id, project, persona, text[:500], speed, tone, duration),
+        )
+        conn.commit()
+
+        # Enforce limit: delete oldest beyond threshold
+        rows = conn.execute(
+            "SELECT id, file_name FROM speech_history ORDER BY created_at DESC"
+        ).fetchall()
+        if len(rows) > history_limit:
+            for row_id, old_name in rows[history_limit:]:
+                old_path = history_dir / old_name
+                old_path.unlink(missing_ok=True)
+                conn.execute("DELETE FROM speech_history WHERE id = ?", (row_id,))
+            conn.commit()
+    finally:
+        conn.close()
+
+    return hist_path
+
+
+def get_speech_history(
+    limit: int = 20,
+    db_path: Path = SPEECH_HISTORY_DB,
+) -> list[dict]:
+    """Get recent speech history entries."""
+    if not db_path.exists():
+        return []
+    conn = _init_speech_history_db(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT file_name, created_at, session_id, project, persona,
+                      text, speed, tone, duration_seconds
+               FROM speech_history ORDER BY created_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "file_name": r[0], "created_at": r[1], "session_id": r[2],
+                "project": r[3], "persona": r[4], "text": r[5],
+                "speed": r[6], "tone": r[7], "duration_seconds": r[8],
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
