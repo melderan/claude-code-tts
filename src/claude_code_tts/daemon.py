@@ -639,13 +639,10 @@ def daemon_loop(lockpick: bool = False) -> None:
         log(f"Cleared stale state from previous run: {', '.join(stale_fields)}")
 
     write_heartbeat()
-    if is_respawn:
-        log("Quick respawn detected, skipping startup announcement")
-    else:
-        speak_announcement("Voice daemon online. Ready when you are.")
-        log("Startup announcement complete")
 
-    # Start mic-aware pause watcher if enabled
+    # Start mic-aware pause watcher BEFORE the startup announcement.
+    # If Handy is actively recording, the watcher will pause us before
+    # we start talking over the user.
     mic_watcher: MicWatcher | None = None
     raw_config = load_raw_config()
     if raw_config.get("mic_aware_pause", False):
@@ -661,6 +658,12 @@ def daemon_loop(lockpick: bool = False) -> None:
             mic_watcher = None
     else:
         log("Mic-aware pause disabled (set mic_aware_pause: true in config.json to enable)")
+
+    if is_respawn:
+        log("Quick respawn detected, skipping startup announcement")
+    else:
+        speak_announcement("Voice daemon online. Ready when you are.")
+        log("Startup announcement complete")
 
     while not _shutdown_requested:
         try:
