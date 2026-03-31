@@ -29,7 +29,7 @@ from claude_code_tts.config import (
     load_raw_config,
 )
 from claude_code_tts.tone import classify_tone, ToneParams, DEFAULT_TONE
-from claude_code_tts.handy import save_speech_wav
+from claude_code_tts.handy import save_speech_wav, AnalyzerThread
 from claude_code_tts.mic_watcher import MicWatcher
 
 # --- Daemon path constants ---
@@ -659,6 +659,15 @@ def daemon_loop(lockpick: bool = False) -> None:
     else:
         log("Mic-aware pause disabled (set mic_aware_pause: true in config.json to enable)")
 
+    # Start Handy voice analyzer if recordings directory exists
+    handy_analyzer: AnalyzerThread | None = None
+    if raw_config.get("handy_analyzer", True):
+        handy_analyzer = AnalyzerThread(log_fn=log)
+        if not handy_analyzer.start():
+            handy_analyzer = None
+    else:
+        log("Handy analyzer disabled (set handy_analyzer: true in config.json to enable)")
+
     if is_respawn:
         log("Quick respawn detected, skipping startup announcement")
     else:
@@ -894,6 +903,8 @@ def daemon_loop(lockpick: bool = False) -> None:
 
     if mic_watcher:
         mic_watcher.stop()
+    if handy_analyzer:
+        handy_analyzer.stop()
     log("Shutting down gracefully...")
     if not _shutdown_by_signal:
         speak_announcement("Voice daemon shutting down. Catch you later.")

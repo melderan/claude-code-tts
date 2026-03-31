@@ -16,11 +16,12 @@ import math
 import shutil
 import sqlite3
 import struct
+import threading
 import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 
 # --- Paths ---
@@ -474,6 +475,73 @@ def get_recent_analysis(
         conn.close()
 
 
+def get_aggregated_tone(
+    max_age_seconds: float = 60.0,
+    db_path: Path = ANALYSIS_DB,
+) -> Optional[str]:
+    """Aggregate tone across all recent recordings.
+
+    When the user speaks multiple Handy blocks before hitting enter,
+    this averages the features across all of them for a single summary.
+    Returns None if no recent analyses.
+    """
+    if not db_path.exists():
+        return None
+    conn = _init_db(db_path)
+    try:
+        cutoff = time.time() - max_age_seconds
+        rows = conn.execute(
+            """SELECT rms_energy, energy_variance, pitch_mean_hz, pitch_range_hz,
+                      speaking_rate_wps, pause_count, pause_total_seconds,
+                      duration_seconds
+               FROM voice_analysis
+               WHERE analyzed_at > ? ORDER BY analyzed_at DESC""",
+            (cutoff,),
+        ).fetchall()
+        if not rows:
+            return None
+
+        n = len(rows)
+        avg_energy = sum(r[0] for r in rows) / n
+        avg_energy_var = sum(r[1] for r in rows) / n
+        avg_pitch = sum(r[2] for r in rows) / n
+        avg_pitch_range = sum(r[3] for r in rows) / n
+        avg_rate = sum(r[4] for r in rows) / n
+        total_pauses = sum(r[5] for r in rows)
+        total_pause_secs = sum(r[6] for r in rows)
+        total_duration = sum(r[7] for r in rows)
+
+        # Build aggregate labels
+        energy_label = "high" if avg_energy > 0.12 else "medium" if avg_energy > 0.05 else "low"
+        expr_score = (avg_pitch_range / 100.0) + (avg_energy_var * 10.0)
+        expr_label = "animated" if expr_score > 1.5 else "moderate" if expr_score > 0.7 else "flat"
+        pace_label = "fast" if avg_rate > 3.5 else "moderate" if avg_rate > 2.0 else "slow"
+        pause_ratio = total_pause_secs / total_duration if total_duration > 0 else 0
+
+        features = AudioFeatures(
+            duration_seconds=total_duration,
+            rms_energy=round(avg_energy, 4),
+            energy_variance=round(avg_energy_var, 4),
+            peak_energy=0.0,
+            pitch_mean_hz=round(avg_pitch, 1),
+            pitch_range_hz=round(avg_pitch_range, 1),
+            pitch_variance=0.0,
+            speaking_rate_wps=round(avg_rate, 2),
+            pause_count=total_pauses,
+            pause_total_seconds=round(total_pause_secs, 2),
+            pause_ratio=round(pause_ratio, 3),
+            energy_label=energy_label,
+            expressiveness_label=expr_label,
+            pace_label=pace_label,
+        )
+        summary = summarize_tone(features)
+        if n > 1:
+            summary += f" (across {n} recordings)"
+        return summary
+    finally:
+        conn.close()
+
+
 # --- Handy integration ---
 
 def get_handy_transcript(file_name: str) -> Optional[str]:
@@ -642,6 +710,91 @@ class HandyWatcher:
     def stop(self) -> None:
         """Signal the watcher to stop."""
         self._running = False
+
+
+class AnalyzerThread:
+    """Background thread that watches Handy recordings and analyzes them.
+
+    Designed to run inside the TTS daemon as a daemon thread, similar
+    to MicWatcher. Polls the recordings directory for new WAVs.
+    """
+
+    def __init__(
+        self,
+        log_fn: Callable[..., Any],
+        recordings_dir: Path = HANDY_RECORDINGS_DIR,
+        db_path: Path = ANALYSIS_DB,
+        poll_interval: float = 2.0,
+    ) -> None:
+        self._log = log_fn
+        self._recordings_dir = recordings_dir
+        self._db_path = db_path
+        self._poll_interval = poll_interval
+        self._known_files: set[str] = set()
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+
+    def start(self) -> bool:
+        """Start the analyzer thread. Returns False if recordings dir not found."""
+        if not self._recordings_dir.exists():
+            self._log(f"Handy analyzer: recordings dir not found at {self._recordings_dir}", "WARN")
+            return False
+
+        # Seed known files from DB + directory
+        self._known_files = {f.name for f in self._recordings_dir.glob("*.wav")}
+        if self._db_path.exists():
+            conn = _init_db(self._db_path)
+            rows = conn.execute("SELECT file_name FROM voice_analysis").fetchall()
+            self._known_files.update(row[0] for row in rows)
+            conn.close()
+
+        # Analyze any unprocessed files on startup
+        new_results = analyze_all_recordings(self._recordings_dir, self._db_path)
+        for r in new_results:
+            self._known_files.add(r.file_name)
+            self._log(f"Handy analyzer: {r.file_name} -> {summarize_tone(r.features)}")
+
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._watch_loop,
+            name="handy-analyzer",
+            daemon=True,
+        )
+        self._thread.start()
+        self._log(f"Handy analyzer started (watching {self._recordings_dir})")
+        return True
+
+    def stop(self) -> None:
+        """Stop the analyzer thread."""
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=3.0)
+            self._thread = None
+        self._log("Handy analyzer stopped")
+
+    def _watch_loop(self) -> None:
+        """Poll for new recordings and analyze them."""
+        while not self._stop_event.is_set():
+            try:
+                if self._recordings_dir.exists():
+                    current = {f.name for f in self._recordings_dir.glob("*.wav")}
+                    new_files = current - self._known_files
+                    for file_name in sorted(new_files):
+                        # Brief delay for Handy to finish writing
+                        self._stop_event.wait(0.5)
+                        if self._stop_event.is_set():
+                            return
+                        wav_path = self._recordings_dir / file_name
+                        result = analyze_recording(wav_path)
+                        if result:
+                            store_analysis(result, self._db_path)
+                            tone = summarize_tone(result.features)
+                            self._log(f"Handy analyzer: {file_name} -> {tone}")
+                        self._known_files.add(file_name)
+            except Exception as e:
+                self._log(f"Handy analyzer error: {e}", "ERROR")
+
+            self._stop_event.wait(self._poll_interval)
 
 
 # --- Speech history (TTS output recordings) ---
