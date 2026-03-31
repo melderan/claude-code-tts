@@ -5,15 +5,12 @@ Replaces tts_speak() from tts-lib.sh.
 """
 
 import json
-import math
 import os
 import platform
 import secrets
 import shutil
-import struct
 import subprocess
 import time
-import wave
 from pathlib import Path
 
 from claude_code_tts.config import TTSConfig, TTS_QUEUE_DIR, debug
@@ -45,93 +42,6 @@ def detect_player() -> list[str] | None:
         return ["aplay", "-q"]
     return None
 
-
-def trim_tail_artifact(wav_path: Path) -> None:
-    """Remove Piper's trailing noise artifact from a generated WAV.
-
-    Piper's neural network sometimes produces a noise burst after the
-    speech ends -- a "cough" or "tisk" sound. This function detects it
-    by scanning backwards from the end: if there's a silence gap followed
-    by a noise spike, it truncates at the silence point.
-
-    Modifies the file in place.
-    """
-    try:
-        with wave.open(str(wav_path), "rb") as w:
-            n_channels = w.getnchannels()
-            sample_width = w.getsampwidth()
-            frame_rate = w.getframerate()
-            n_frames = w.getnframes()
-            raw = w.readframes(n_frames)
-    except (wave.Error, OSError):
-        return
-
-    if sample_width != 2 or n_frames < frame_rate:  # Need at least 1s
-        return
-
-    # Unpack samples (mono or take left channel)
-    total_samples = n_frames * n_channels
-    int_samples = struct.unpack(f"<{total_samples}h", raw)
-    if n_channels > 1:
-        int_samples = int_samples[::n_channels]
-
-    # Scan the last 500ms in 10ms windows for the pattern:
-    # voiced -> silence gap -> noise burst
-    window_ms = 10
-    window_size = int(frame_rate * window_ms / 1000)
-    tail_samples = int(frame_rate * 0.5)
-    scan_start = max(0, len(int_samples) - tail_samples)
-
-    # Compute RMS per window
-    windows: list[tuple[int, float]] = []  # (sample_index, rms)
-    for i in range(scan_start, len(int_samples) - window_size, window_size):
-        chunk = int_samples[i:i + window_size]
-        rms = math.sqrt(sum(s * s for s in chunk) / len(chunk)) / 32768.0
-        windows.append((i, rms))
-
-    if len(windows) < 5:
-        return
-
-    # Find pattern: RMS drops below threshold, then spikes back up
-    silence_threshold = 0.003
-    speech_threshold = 0.02
-    last_silence_start = -1
-    found_silence = False
-
-    for idx, (sample_i, rms) in enumerate(windows):
-        if rms < silence_threshold and not found_silence:
-            last_silence_start = idx
-            found_silence = True
-        elif rms >= speech_threshold and found_silence:
-            # Silence followed by spike -- this is the artifact.
-            # Truncate at the start of the silence gap.
-            cut_sample = windows[last_silence_start][0]
-            # Add a tiny fade-out (5ms) to avoid a click
-            fade_samples = int(frame_rate * 0.005)
-            fade_start = max(0, cut_sample - fade_samples)
-
-            # Rebuild the samples with fade
-            new_samples = list(int_samples[:cut_sample])
-            for fi in range(fade_samples):
-                src_idx = fade_start + fi
-                if src_idx < len(new_samples):
-                    factor = 1.0 - (fi / fade_samples)
-                    new_samples[src_idx] = int(new_samples[src_idx] * factor)
-
-            # Write back
-            if n_channels > 1:
-                return  # Don't modify stereo files
-
-            new_raw = struct.pack(f"<{len(new_samples)}h", *new_samples)
-            with wave.open(str(wav_path), "wb") as w:
-                w.setnchannels(1)
-                w.setsampwidth(sample_width)
-                w.setframerate(frame_rate)
-                w.writeframes(new_raw)
-            return
-        elif rms >= speech_threshold:
-            found_silence = False
-            last_silence_start = -1
 
 
 def generate_speech(
@@ -207,7 +117,6 @@ def generate_speech(
                 cmd, input=text, text=True, capture_output=True, timeout=30,
             )
             if output_path.exists():
-                trim_tail_artifact(output_path)
                 return output_path
         except (subprocess.TimeoutExpired, OSError):
             pass

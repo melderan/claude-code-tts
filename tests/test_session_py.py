@@ -5,6 +5,7 @@ but tests the Python function directly.
 """
 
 import os
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -137,7 +138,7 @@ class TestFallbacks:
             env.pop("PROJECT_ROOT", None)
             with patch.dict(os.environ, env, clear=True):
                 result = get_session_id()
-        assert result == str(test_dir).replace("/", "-")
+        assert result == re.sub(r"[^a-zA-Z0-9]", "-", str(test_dir))
 
 
 class TestAmbiguity:

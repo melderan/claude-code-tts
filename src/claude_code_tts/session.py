@@ -11,13 +11,22 @@ import re
 from pathlib import Path
 
 
+def _path_to_session_id(path: str) -> str:
+    """Convert a filesystem path to a Claude Code-style session ID.
+
+    Claude Code encodes paths by replacing each non-alphanumeric character
+    with a dash: /Users/foo/_bar/baz → -Users-foo--bar-baz
+    """
+    return re.sub(r"[^a-zA-Z0-9]", "-", path)
+
+
 def get_session_id() -> str:
     """Resolve the current Claude Code session ID.
 
     Priority:
         1. CLAUDE_TTS_SESSION env override
         2. PROJECT_ROOT → scan ~/.claude/projects/ for matching folder
-        3. PWD fallback (naive slash-to-dash)
+        3. PWD fallback (path-to-session-id encoding)
     """
     # Explicit override
     if override := os.environ.get("CLAUDE_TTS_SESSION"):
@@ -35,7 +44,7 @@ def get_session_id() -> str:
                 if candidate == target:
                     return entry.name
         # Fallback if ~/.claude/projects/ lookup fails
-        return project_root.replace("/", "-")
+        return _path_to_session_id(project_root)
 
     # Fallback for non-Claude-Code contexts
-    return os.getcwd().replace("/", "-")
+    return _path_to_session_id(os.getcwd())
