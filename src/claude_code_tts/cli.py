@@ -1801,13 +1801,33 @@ def cmd_handy(args: argparse.Namespace) -> None:
 
     elif subcmd == "tone-context":
         # Called by UserPromptSubmit hook to inject tone into Claude's context.
-        # Aggregates across all recent recordings (user may speak multiple
-        # Handy blocks before hitting enter). Outputs nothing if no data.
+        # Works like a mutating webhook: matches Handy transcripts to segments
+        # in the user's message and injects per-segment tone metadata.
+        # Falls back to aggregated tone if no message text available.
+        from claude_code_tts.voice_context import enrich_message
         from claude_code_tts.handy import get_aggregated_tone
-        max_age = getattr(args, "age", 60.0)
-        tone = get_aggregated_tone(max_age_seconds=max_age)
-        if tone:
-            print(f"[Voice context: JMO is {tone}]")
+        max_age = getattr(args, "age", 120.0)
+
+        # Try to read the user's message from stdin (hook passes it)
+        message = ""
+        if not sys.stdin.isatty():
+            try:
+                import json as _json
+                hook_data = _json.load(sys.stdin)
+                # UserPromptSubmit hook provides the message in the input
+                message = hook_data.get("input", {}).get("message", "")
+            except (ValueError, AttributeError):
+                pass
+
+        if message:
+            result = enrich_message(message, max_age_seconds=max_age)
+            if result:
+                print(result)
+        else:
+            # Fallback: no message text, use aggregated tone
+            tone = get_aggregated_tone(max_age_seconds=max_age)
+            if tone:
+                print(f"[Voice context: JMO is {tone}]")
 
     elif subcmd == "status":
         print(f"Recordings dir: {HANDY_RECORDINGS_DIR}")
