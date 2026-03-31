@@ -328,9 +328,11 @@ def daemon_generate_speech(
     if not voice_path.exists():
         voice_path = VOICES_DIR / f"{DEFAULT_VOICE}.onnx"
 
-    # Tone-aware generation parameters
+    # Tone-aware generation parameters.
+    # Only pass when tone is non-default — otherwise let Piper use its
+    # own built-in defaults which are tuned per voice model.
     tone_kwargs: dict = {}
-    if tone is not None:
+    if tone is not None and tone.name != "neutral":
         tone_kwargs["noise_scale"] = tone.noise_scale
         tone_kwargs["noise_w_scale"] = tone.noise_w_scale
         tone_kwargs["sentence_silence"] = tone.sentence_silence
@@ -771,9 +773,13 @@ def daemon_loop(lockpick: bool = False) -> None:
                 msg_file.unlink(missing_ok=True)
                 continue
 
-            # Classify content tone for expressive speech
-            tone = classify_tone(text)
-            if tone.name != "neutral":
+            # Classify content tone for expressive speech.
+            # Tone modulation is opt-in via config until parameter ranges
+            # are validated with each voice model. noise_scale/noise_w_scale
+            # values that work for one model can produce static on another.
+            tone_enabled = raw_config.get("tone_modulation", False)
+            tone = classify_tone(text) if tone_enabled else DEFAULT_TONE
+            if tone_enabled and tone.name != "neutral":
                 log(f"Tone: {tone.name} (noise={tone.noise_scale}, silence={tone.sentence_silence})")
 
             log(f"Speaking for {project}: {text[:50]}...")
