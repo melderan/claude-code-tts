@@ -1801,16 +1801,13 @@ def cmd_handy(args: argparse.Namespace) -> None:
 
     elif subcmd == "tone-context":
         # Called by UserPromptSubmit hook to inject tone into Claude's context.
-        # Outputs a short context string if recent tone data is available.
-        max_age = getattr(args, "age", 30.0)
-        result = get_recent_analysis(max_age_seconds=max_age)
-        if result:
-            tone = summarize_tone(result.features)
-            f = result.features
-            print(f"[Voice context: JMO is {tone} "
-                  f"(pitch {f.pitch_mean_hz:.0f}Hz, "
-                  f"rate {f.speaking_rate_wps:.1f} wps)]")
-        # If no recent analysis, output nothing -- the hook adds no context.
+        # Aggregates across all recent recordings (user may speak multiple
+        # Handy blocks before hitting enter). Outputs nothing if no data.
+        from claude_code_tts.handy import get_aggregated_tone
+        max_age = getattr(args, "age", 60.0)
+        tone = get_aggregated_tone(max_age_seconds=max_age)
+        if tone:
+            print(f"[Voice context: JMO is {tone}]")
 
     elif subcmd == "status":
         print(f"Recordings dir: {HANDY_RECORDINGS_DIR}")

@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "7.5.5"
+__version__ = "7.6.0"
 
 
 # --- Platform Detection ---
@@ -945,8 +945,19 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
         ]
     }
 
+    user_prompt_hook_entry = {
+        "matcher": "*",
+        "hooks": [
+            {
+                "type": "command",
+                "command": str(HOOKS_DIR / "voice-context.sh"),
+                "timeout": 5
+            }
+        ]
+    }
+
     def _ensure_tts_hooks(settings: dict) -> bool:
-        """Ensure both Stop and PostToolUse TTS hooks are registered. Returns True if changes were made."""
+        """Ensure Stop, PostToolUse, and UserPromptSubmit TTS hooks are registered. Returns True if changes were made."""
         changed = False
         if "hooks" not in settings:
             settings["hooks"] = {}
@@ -965,6 +976,14 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
         has_post = any("speak-intermediate.sh" in h.get("hooks", [{}])[0].get("command", "") for h in settings["hooks"]["PostToolUse"] if h.get("hooks"))
         if not has_post:
             settings["hooks"]["PostToolUse"].append(post_tool_hook_entry)
+            changed = True
+
+        # Ensure UserPromptSubmit hook (voice context injection)
+        if "UserPromptSubmit" not in settings["hooks"]:
+            settings["hooks"]["UserPromptSubmit"] = []
+        has_voice = any("voice-context.sh" in h.get("hooks", [{}])[0].get("command", "") for h in settings["hooks"]["UserPromptSubmit"] if h.get("hooks"))
+        if not has_voice:
+            settings["hooks"]["UserPromptSubmit"].append(user_prompt_hook_entry)
             changed = True
 
         return changed
