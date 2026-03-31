@@ -60,11 +60,47 @@ class MicWatcher:
         """True if mic is currently recording."""
         return self._recording
 
+    def _check_initial_mic_state(self) -> bool:
+        """Scan the tail of the Handy log to determine if mic is currently recording.
+
+        Reads the last ~50 lines and finds the most recent recording event.
+        Returns True if the mic appears to be actively recording.
+        """
+        try:
+            with open(HANDY_LOG, "r") as f:
+                # Read last 8KB -- enough for ~50 lines
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - 8192))
+                tail = f.read()
+        except OSError:
+            return False
+
+        # Find the last recording start and stop events
+        last_start = -1
+        last_stop = -1
+        for i, line in enumerate(tail.splitlines()):
+            if _RE_RECORDING_START.search(line):
+                last_start = i
+            elif _RE_RECORDING_STOP.search(line):
+                last_stop = i
+
+        if last_start > last_stop:
+            self._log("Mic watcher: Handy log shows mic is currently recording")
+            return True
+        return False
+
     def start(self) -> bool:
         """Start the watcher thread. Returns False if log file not found."""
         if not HANDY_LOG.exists():
             self._log(f"Mic watcher: Handy log not found at {HANDY_LOG}", "WARN")
             return False
+
+        # Check if mic is currently recording before we start tailing.
+        # This handles the case where the daemon restarts mid-recording.
+        if self._check_initial_mic_state():
+            self._recording = True
+            self._pause_for_mic()
 
         self._stop_event.clear()
         self._thread = threading.Thread(
