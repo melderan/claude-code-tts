@@ -1729,6 +1729,116 @@ def cmd_release(args: argparse.Namespace) -> None:
     release_main(release_args if release_args else None)
 
 
+def cmd_handy(args: argparse.Namespace) -> None:
+    """Manage the Handy voice analyzer."""
+    from claude_code_tts.handy import (
+        ANALYSIS_DB,
+        HANDY_RECORDINGS_DIR,
+        HandyWatcher,
+        analyze_all_recordings,
+        analyze_recording,
+        get_recent_analysis,
+        summarize_tone,
+    )
+
+    subcmd = getattr(args, "handy_command", None)
+
+    if subcmd == "watch":
+        watcher = HandyWatcher()
+        try:
+            watcher.run()
+        except KeyboardInterrupt:
+            watcher.stop()
+
+    elif subcmd == "analyze":
+        target = getattr(args, "path", None)
+        if target:
+            target_path = Path(target)
+            if not target_path.exists():
+                print(f"File not found: {target_path}")
+                sys.exit(1)
+            result = analyze_recording(target_path)
+            if result:
+                f = result.features
+                tone = summarize_tone(f)
+                print(f"File:           {result.file_name}")
+                print(f"Duration:       {f.duration_seconds}s")
+                print(f"Energy:         {f.rms_energy:.4f} ({f.energy_label})")
+                print(f"Pitch:          {f.pitch_mean_hz:.1f} Hz (range: {f.pitch_range_hz:.1f} Hz)")
+                print(f"Speaking rate:  {f.speaking_rate_wps:.2f} wps ({f.pace_label})")
+                print(f"Pauses:         {f.pause_count} ({f.pause_total_seconds:.1f}s, {f.pause_ratio:.1%})")
+                print(f"Expressiveness: {f.expressiveness_label}")
+                print(f"Tone:           {tone}")
+                if result.transcript:
+                    print(f"Transcript:     {result.transcript[:120]}...")
+            else:
+                print("Analysis failed")
+                sys.exit(1)
+        else:
+            # Analyze all unprocessed recordings
+            results = analyze_all_recordings()
+            if results:
+                for r in results:
+                    tone = summarize_tone(r.features)
+                    print(f"  {r.file_name}: {tone}")
+                print(f"\nAnalyzed {len(results)} new recording(s)")
+            else:
+                print("No new recordings to analyze")
+
+    elif subcmd == "recent":
+        max_age = getattr(args, "age", 60.0)
+        result = get_recent_analysis(max_age_seconds=max_age)
+        if result:
+            f = result.features
+            tone = summarize_tone(f)
+            print(f"Tone: {tone}")
+            print(f"Pitch: {f.pitch_mean_hz:.1f} Hz | Energy: {f.energy_label} | "
+                  f"Rate: {f.speaking_rate_wps:.1f} wps | Pauses: {f.pause_count}")
+            if result.transcript:
+                print(f"Said: \"{result.transcript[:120]}...\"")
+        else:
+            print(f"No analysis within the last {max_age}s")
+
+    elif subcmd == "tone-context":
+        # Called by UserPromptSubmit hook to inject tone into Claude's context.
+        # Outputs a short context string if recent tone data is available.
+        max_age = getattr(args, "age", 30.0)
+        result = get_recent_analysis(max_age_seconds=max_age)
+        if result:
+            tone = summarize_tone(result.features)
+            f = result.features
+            print(f"[Voice context: JMO is {tone} "
+                  f"(pitch {f.pitch_mean_hz:.0f}Hz, "
+                  f"rate {f.speaking_rate_wps:.1f} wps)]")
+        # If no recent analysis, output nothing -- the hook adds no context.
+
+    elif subcmd == "status":
+        print(f"Recordings dir: {HANDY_RECORDINGS_DIR}")
+        print(f"Analysis DB:    {ANALYSIS_DB}")
+        if HANDY_RECORDINGS_DIR.exists():
+            wavs = list(HANDY_RECORDINGS_DIR.glob("*.wav"))
+            print(f"Recordings:     {len(wavs)}")
+        else:
+            print("Recordings:     (directory not found)")
+        if ANALYSIS_DB.exists():
+            import sqlite3
+            conn = sqlite3.connect(str(ANALYSIS_DB))
+            count = conn.execute("SELECT COUNT(*) FROM voice_analysis").fetchone()[0]
+            conn.close()
+            print(f"Analyzed:       {count}")
+        else:
+            print("Analyzed:       (no database yet)")
+
+    else:
+        print("Usage: claude-tts handy <watch|analyze|recent|status>")
+        print()
+        print("Commands:")
+        print("  watch    Watch for new recordings and analyze in real-time")
+        print("  analyze  Analyze all unprocessed recordings (or a specific file)")
+        print("  recent   Show the most recent voice tone analysis")
+        print("  status   Show Handy analyzer status")
+
+
 def _stub(args: argparse.Namespace) -> None:
     """Placeholder for commands not yet implemented."""
     print(f"claude-tts {args.command}: not yet implemented")
@@ -1873,6 +1983,22 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--check", action="store_true", help="Check for updates")
     p.add_argument("--dry-run", action="store_true", help="Show what would be done")
     p.set_defaults(func=_stub)
+
+    # --- handy ---
+    p = subparsers.add_parser("handy", help="Handy voice analyzer")
+    handy_sub = p.add_subparsers(dest="handy_command")
+    handy_sub.add_parser("watch", help="Watch for new recordings").set_defaults(func=cmd_handy)
+    hs = handy_sub.add_parser("analyze", help="Analyze recordings")
+    hs.add_argument("path", nargs="?", help="Specific WAV file to analyze")
+    hs.set_defaults(func=cmd_handy)
+    hs = handy_sub.add_parser("recent", help="Show most recent tone analysis")
+    hs.add_argument("--age", type=float, default=60.0, help="Max age in seconds (default: 60)")
+    hs.set_defaults(func=cmd_handy)
+    hs = handy_sub.add_parser("tone-context", help="Output voice tone for hook injection")
+    hs.add_argument("--age", type=float, default=30.0, help="Max age in seconds (default: 30)")
+    hs.set_defaults(func=cmd_handy)
+    handy_sub.add_parser("status", help="Show analyzer status").set_defaults(func=cmd_handy)
+    p.set_defaults(func=cmd_handy)
 
     # --- release ---
     p = subparsers.add_parser("release", help="Create a release")
