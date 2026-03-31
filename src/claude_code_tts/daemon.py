@@ -29,6 +29,7 @@ from claude_code_tts.config import (
     load_raw_config,
 )
 from claude_code_tts.tone import classify_tone, ToneParams, DEFAULT_TONE
+from claude_code_tts.handy import save_speech_wav
 from claude_code_tts.mic_watcher import MicWatcher
 
 # --- Daemon path constants ---
@@ -837,6 +838,14 @@ def daemon_loop(lockpick: bool = False) -> None:
                 "voice_kokoro_blend": voice_kokoro_blend,
             }
             write_playback_state(current_message=current_msg_info)
+
+            # Save WAV to speech history before playback
+            save_speech_wav(
+                audio_file,
+                session_id=session_id, project=project,
+                persona=persona, text=text,
+                speed=effective_speed, tone=tone.name,
+            )
 
             wav_duration = get_wav_duration(audio_file)
 
