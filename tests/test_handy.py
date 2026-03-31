@@ -23,6 +23,8 @@ from claude_code_tts.handy import (
     analyze_wav,
     get_recent_analysis,
     get_recent_tone,
+    get_speech_history,
+    save_speech_wav,
     store_analysis,
     summarize_tone,
 )
@@ -338,6 +340,68 @@ class TestAnalyzeAllRecordings:
         results = analyze_all_recordings(recordings_dir, db)
         assert len(results) == 1
         assert results[0].file_name == "b.wav"
+
+
+class TestSpeechHistory:
+    def test_save_and_retrieve(self, tmp_path):
+        hist_dir = tmp_path / "history"
+        db = tmp_path / "analysis.db"
+        wav = tmp_path / "test.wav"
+        make_sine_wav(wav, duration=0.5)
+
+        result = save_speech_wav(
+            wav, session_id="test-session", project="test-project",
+            persona="claude-prime", text="Hello world", speed=2.0,
+            history_dir=hist_dir, db_path=db,
+        )
+        assert result is not None
+        assert result.exists()
+        assert hist_dir.exists()
+
+        history = get_speech_history(limit=10, db_path=db)
+        assert len(history) == 1
+        assert history[0]["text"] == "Hello world"
+        assert history[0]["persona"] == "claude-prime"
+        assert history[0]["duration_seconds"] > 0
+
+    def test_enforces_limit(self, tmp_path):
+        hist_dir = tmp_path / "history"
+        db = tmp_path / "analysis.db"
+
+        for i in range(5):
+            wav = tmp_path / f"test_{i}.wav"
+            make_sine_wav(wav, duration=0.2)
+            save_speech_wav(
+                wav, text=f"msg {i}", history_limit=3,
+                history_dir=hist_dir, db_path=db,
+            )
+
+        # Only 3 should remain
+        history = get_speech_history(limit=10, db_path=db)
+        assert len(history) == 3
+        # Most recent should be last one saved
+        assert history[0]["text"] == "msg 4"
+
+        # Only 3 WAV files on disk
+        wav_files = list(hist_dir.glob("*.wav"))
+        assert len(wav_files) == 3
+
+    def test_missing_wav_returns_none(self, tmp_path):
+        result = save_speech_wav(
+            tmp_path / "nonexistent.wav",
+            history_dir=tmp_path / "hist", db_path=tmp_path / "db",
+        )
+        assert result is None
+
+    def test_preserves_original(self, tmp_path):
+        """Original WAV is not moved, only copied."""
+        hist_dir = tmp_path / "history"
+        db = tmp_path / "analysis.db"
+        wav = tmp_path / "original.wav"
+        make_sine_wav(wav, duration=0.3)
+
+        save_speech_wav(wav, history_dir=hist_dir, db_path=db)
+        assert wav.exists()  # Original still there
 
 
 class TestReadPCMSamples:
