@@ -53,8 +53,18 @@ def generate_speech(
     speed_method: str = "",
     speaker: int | None = None,
     output_path: Path | None = None,
+    noise_scale: float | None = None,
+    noise_w_scale: float | None = None,
+    sentence_silence: float | None = None,
 ) -> Path | None:
     """Generate a WAV file from text using Kokoro or Piper.
+
+    Piper-specific parameters for expressive speech:
+        noise_scale: Prosody variation (0.0-1.0, default 0.667).
+            Higher = more animated intonation. Lower = monotone/grave.
+        noise_w_scale: Timing variation (0.0-1.0, default 0.8).
+            Higher = more natural rhythm variation between phonemes.
+        sentence_silence: Seconds of silence between sentences (default 0.0).
 
     Returns the path to the generated WAV, or None on failure.
     """
@@ -94,6 +104,13 @@ def generate_speech(
             cmd.extend(["--length_scale", length_scale])
         if speaker is not None:
             cmd.extend(["--speaker", str(speaker)])
+        # Expressive speech parameters
+        if noise_scale is not None:
+            cmd.extend(["--noise_scale", f"{noise_scale:.3f}"])
+        if noise_w_scale is not None:
+            cmd.extend(["--noise_w", f"{noise_w_scale:.3f}"])
+        if sentence_silence is not None:
+            cmd.extend(["--sentence_silence", f"{sentence_silence:.2f}"])
         try:
             subprocess.run(
                 cmd, input=text, text=True, capture_output=True, timeout=30,

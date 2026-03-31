@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "7.4.1"
+__version__ = "7.5.0"
 
 
 # --- Platform Detection ---
@@ -118,7 +118,7 @@ TTS_SESSIONS_DIR = TTS_CONFIG_DIR / "sessions.d"
 # NOTE: As of v7.0.0, scripts are no longer deployed to ~/.claude-tts/.
 # All functionality is in the `claude-tts` CLI binary (via uv tool install).
 MANIFEST: dict[str, list[str]] = {
-    "hooks": ["speak-response.sh", "speak-intermediate.sh", "play-sound.sh"],
+    "hooks": ["speak-response.sh", "speak-intermediate.sh", "play-sound.sh", "voice-context.sh"],
     "commands": ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md", "tts-persona.md", "tts-status.md", "tts-cleanup.md", "tts-random.md", "tts-test.md", "tts-discover.md", "tts-intermediate.md", "tts-release.md"],
 }
 
