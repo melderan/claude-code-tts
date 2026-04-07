@@ -434,6 +434,12 @@ def cmd_cleanup(args: argparse.Namespace) -> None:
 
     print(f"Removed {total} stale session(s)")
 
+    # Also sweep stale session pin files (claude PIDs that no longer exist)
+    from claude_code_tts.session import cleanup_stale_pins
+    pin_count = cleanup_stale_pins()
+    if pin_count:
+        print(f"Removed {pin_count} stale session pin(s)")
+
 
 def cmd_sounds(args: argparse.Namespace) -> None:
     """Toggle or configure notification sounds."""
@@ -976,6 +982,12 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
     if not session_id:
         debug("Could not detect session")
         return
+
+    # Pin the canonical session ID so CLI subprocesses (slash commands) under
+    # the same `claude` parent can resolve the same ID via process-tree lookup.
+    # This is the single source of truth — see session.py for details.
+    from claude_code_tts.session import pin_session
+    pin_session(session_id)
 
     cfg = load_config(session_id)
 
