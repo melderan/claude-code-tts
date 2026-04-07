@@ -110,9 +110,7 @@ git commit -m "$PREFIX: $MESSAGE
 
 Version: $NEW_VERSION
 
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
+Co-Authored-By: Claude Connery <noreply@anthropic.com>"
 
 # Tag with version
 echo ""
