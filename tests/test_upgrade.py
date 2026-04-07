@@ -98,11 +98,18 @@ class TestLegacyScripts:
     """Verify the legacy scripts list is complete and correct."""
 
     def test_covers_all_v6_scripts(self):
-        assert set(inst.LEGACY_SCRIPTS) == V6_SCRIPTS, (
-            f"LEGACY_SCRIPTS mismatch with v6 scripts.\n"
-            f"  Missing: {V6_SCRIPTS - set(inst.LEGACY_SCRIPTS)}\n"
-            f"  Extra:   {set(inst.LEGACY_SCRIPTS) - V6_SCRIPTS}"
+        """LEGACY_SCRIPTS + COMPAT_SHIMS must account for every v6 script."""
+        covered = set(inst.LEGACY_SCRIPTS) | set(inst.COMPAT_SHIMS)
+        assert covered == V6_SCRIPTS, (
+            f"LEGACY_SCRIPTS + COMPAT_SHIMS mismatch with v6 scripts.\n"
+            f"  Missing: {V6_SCRIPTS - covered}\n"
+            f"  Extra:   {covered - V6_SCRIPTS}"
         )
+
+    def test_no_overlap_between_legacy_and_shims(self):
+        """A script is either deleted (legacy) or shimmed, never both."""
+        overlap = set(inst.LEGACY_SCRIPTS) & set(inst.COMPAT_SHIMS)
+        assert not overlap, f"Scripts in both LEGACY_SCRIPTS and COMPAT_SHIMS: {overlap}"
 
     def test_builder_not_in_legacy(self):
         for name in SURVIVOR_SCRIPTS:
@@ -221,9 +228,15 @@ class TestLegacyCleanup:
                 old_script.unlink()
                 removed += 1
 
-        assert removed == len(V6_SCRIPTS)
-        for script in V6_SCRIPTS:
+        # Legacy list no longer includes compat-shimmed scripts
+        shimmed = set(inst.COMPAT_SHIMS)
+        expected_removed = V6_SCRIPTS - shimmed
+        assert removed == len(expected_removed)
+        for script in expected_removed:
             assert not (tts_dir / script).exists(), f"{script} not cleaned up"
+        # Shimmed scripts still exist (original v6 version, not yet replaced by shim)
+        for script in shimmed:
+            assert (tts_dir / script).exists(), f"{script} should not be deleted by legacy cleanup"
 
     def test_preserves_builder_scripts(self, tmp_path):
         tts_dir = tmp_path / ".claude-tts"
@@ -326,6 +339,87 @@ class TestLegacyCleanup:
 
 
 # ---------------------------------------------------------------------------
+# Compatibility shims
+# ---------------------------------------------------------------------------
+
+class TestCompatShims:
+    """Verify compatibility shims forward to claude-tts CLI."""
+
+    def test_shim_content_is_valid_bash(self):
+        for shim_name, cli_cmd in inst.COMPAT_SHIMS.items():
+            content = inst._make_compat_shim(cli_cmd)
+            assert content.startswith("#!/bin/bash"), f"{shim_name} missing bash shebang"
+
+    def test_shim_forwards_to_cli(self):
+        for shim_name, cli_cmd in inst.COMPAT_SHIMS.items():
+            content = inst._make_compat_shim(cli_cmd)
+            assert f"exec claude-tts {cli_cmd}" in content, (
+                f"{shim_name} doesn't forward to claude-tts {cli_cmd}"
+            )
+
+    def test_shim_emits_deprecation_to_stderr(self):
+        for shim_name, cli_cmd in inst.COMPAT_SHIMS.items():
+            content = inst._make_compat_shim(cli_cmd)
+            assert "DEPRECATED" in content, f"{shim_name} missing deprecation notice"
+            assert ">&2" in content, f"{shim_name} deprecation not on stderr"
+
+    def test_shim_passes_args_through(self):
+        for shim_name, cli_cmd in inst.COMPAT_SHIMS.items():
+            content = inst._make_compat_shim(cli_cmd)
+            assert '"$@"' in content, f"{shim_name} doesn't forward arguments"
+
+    def test_shim_deployed_during_upgrade(self, tmp_path):
+        """Shims are written to ~/.claude-tts/ during upgrade."""
+        tts_dir = tmp_path / ".claude-tts"
+        tts_dir.mkdir()
+
+        for shim_name, cli_cmd in inst.COMPAT_SHIMS.items():
+            shim_path = tts_dir / shim_name
+            shim_content = inst._make_compat_shim(cli_cmd)
+            shim_path.write_text(shim_content)
+            shim_path.chmod(0o755)
+
+            assert shim_path.exists()
+            assert "exec claude-tts" in shim_path.read_text()
+            assert oct(shim_path.stat().st_mode)[-3:] == "755"
+
+    def test_shim_replaces_old_v6_script(self, tmp_path):
+        """If a v6 script exists, it gets replaced by the shim."""
+        tts_dir = tmp_path / ".claude-tts"
+        tts_dir.mkdir()
+
+        for shim_name, cli_cmd in inst.COMPAT_SHIMS.items():
+            shim_path = tts_dir / shim_name
+            # Write old v6 content
+            shim_path.write_text("#!/bin/bash\n# old v6 script\n")
+
+            # Deploy shim (same logic as do_install)
+            shim_content = inst._make_compat_shim(cli_cmd)
+            shim_path.write_text(shim_content)
+            shim_path.chmod(0o755)
+
+            assert "exec claude-tts" in shim_path.read_text()
+            assert "old v6 script" not in shim_path.read_text()
+
+    def test_shim_idempotent(self, tmp_path):
+        """Deploying shim twice produces identical results."""
+        tts_dir = tmp_path / ".claude-tts"
+        tts_dir.mkdir()
+
+        for shim_name, cli_cmd in inst.COMPAT_SHIMS.items():
+            shim_path = tts_dir / shim_name
+            shim_content = inst._make_compat_shim(cli_cmd)
+
+            shim_path.write_text(shim_content)
+            first = shim_path.read_text()
+
+            shim_path.write_text(shim_content)
+            second = shim_path.read_text()
+
+            assert first == second
+
+
+# ---------------------------------------------------------------------------
 # Backup manager
 # ---------------------------------------------------------------------------
 
@@ -414,9 +508,9 @@ class TestVersionConsistency:
             f"install.py ({inst.__version__}) != __init__.py ({pkg_version})"
         )
 
-    def test_version_is_7x(self):
-        assert inst.__version__.startswith("7."), (
-            f"Expected 7.x version, got {inst.__version__}"
+    def test_version_is_8x(self):
+        assert inst.__version__.startswith("8."), (
+            f"Expected 8.x version, got {inst.__version__}"
         )
 
 
@@ -534,6 +628,12 @@ class TestUpgradeSimulation:
             if old_script.exists():
                 old_script.unlink()
 
+        # Step 3: Deploy compatibility shims
+        for shim_name, cli_cmd in inst.COMPAT_SHIMS.items():
+            shim_path = tts_dir / shim_name
+            shim_path.write_text(inst._make_compat_shim(cli_cmd))
+            shim_path.chmod(0o755)
+
     def test_hooks_become_shims(self, tmp_path):
         paths = self._setup_v6_install(tmp_path)
         self._run_upgrade_file_ops(paths)
@@ -556,10 +656,18 @@ class TestUpgradeSimulation:
         paths = self._setup_v6_install(tmp_path)
         self._run_upgrade_file_ops(paths)
 
-        for script in V6_SCRIPTS:
+        shimmed = set(inst.COMPAT_SHIMS)
+        for script in V6_SCRIPTS - shimmed:
             assert not (paths["tts_dir"] / script).exists(), (
                 f"Legacy script not removed: {script}"
             )
+        # Shimmed scripts should exist but contain the forwarding shim
+        for script in shimmed:
+            shim_path = paths["tts_dir"] / script
+            assert shim_path.exists(), f"Compat shim not deployed: {script}"
+            content = shim_path.read_text()
+            assert "exec claude-tts" in content, f"Shim {script} doesn't forward to CLI"
+            assert "DEPRECATED" in content, f"Shim {script} missing deprecation notice"
 
     def test_builder_scripts_preserved(self, tmp_path):
         paths = self._setup_v6_install(tmp_path)

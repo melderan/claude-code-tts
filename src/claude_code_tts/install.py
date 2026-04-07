@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "7.7.1"
+__version__ = "8.0.0"
 
 
 # --- Platform Detection ---
@@ -128,9 +128,27 @@ LEGACY_SCRIPTS = [
     "tts-daemon.py", "tts-mode.sh", "tts-mute.sh", "tts-unmute.sh",
     "tts-status.sh", "tts-speed.sh", "tts-persona.sh", "tts-cleanup.sh",
     "tts-random.sh", "tts-test.sh", "tts-speak.sh", "tts-audition.sh",
-    "tts-discover.sh", "tts-pause.sh", "tts-lib.sh", "tts-filter.py",
+    "tts-discover.sh", "tts-lib.sh", "tts-filter.py",
     "tts-sounds.sh", "tts-intermediate.sh",
 ]
+
+# Compatibility shims: legacy script names that external tools (hotkeys,
+# Shortcuts.app, Alfred, etc.) may still reference. Instead of deleting
+# these, we deploy a forwarding shim that calls the new CLI and logs a
+# deprecation notice to stderr. Shims stay until the next major version.
+# Format: {"old_script_name": "claude-tts subcommand"}
+COMPAT_SHIMS: dict[str, str] = {
+    "tts-pause.sh": "pause",
+}
+
+def _make_compat_shim(cli_subcommand: str) -> str:
+    """Generate a bash shim that forwards to claude-tts with a deprecation notice."""
+    return (
+        '#!/bin/bash\n'
+        'echo "[claude-tts] DEPRECATED: This script is a compatibility shim.'
+        ' Update your shortcut to: claude-tts ' + cli_subcommand + '" >&2\n'
+        'exec claude-tts ' + cli_subcommand + ' "$@"\n'
+    )
 
 
 def _manifest_dirs(category: str) -> tuple[str, Path]:
@@ -511,6 +529,15 @@ def do_uninstall(dry_run: bool = False) -> None:
             else:
                 f.unlink()
             legacy_removed += 1
+    # Also clean up compat shims
+    for shim_name in COMPAT_SHIMS:
+        f = TTS_CONFIG_DIR / shim_name
+        if f.exists():
+            if dry_run:
+                dry(f"rm {f}")
+            else:
+                f.unlink()
+            legacy_removed += 1
     if legacy_removed > 0:
         success(f"Removed {legacy_removed} legacy bash script(s)")
 
@@ -806,6 +833,23 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
             legacy_removed += 1
     if legacy_removed > 0:
         success(f"Removed {legacy_removed} legacy bash script(s) from {TTS_CONFIG_DIR}")
+
+    # --- Deploy compatibility shims for externally-referenced scripts ---
+
+    shims_deployed = 0
+    for shim_name, cli_cmd in COMPAT_SHIMS.items():
+        shim_path = TTS_CONFIG_DIR / shim_name
+        shim_content = _make_compat_shim(cli_cmd)
+        needs_update = not shim_path.exists() or shim_path.read_text() != shim_content
+        if needs_update:
+            if dry_run:
+                dry(f"Deploy compat shim: {shim_path} -> claude-tts {cli_cmd}")
+            else:
+                shim_path.write_text(shim_content)
+                shim_path.chmod(0o755)
+            shims_deployed += 1
+    if shims_deployed > 0:
+        success(f"Deployed {shims_deployed} compatibility shim(s) to {TTS_CONFIG_DIR}")
 
     # --- Restart daemon if running (picks up new code) ---
     daemon_pid_file = TTS_CONFIG_DIR / "daemon.pid"
