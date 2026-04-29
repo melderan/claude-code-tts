@@ -1,4 +1,7 @@
-Toggle or configure notification sounds.
+---
+description: Toggle or configure notification sounds
+disable-model-invocation: true
+---
 
 ```bash
 claude-tts sounds $ARGUMENTS

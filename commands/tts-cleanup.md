@@ -1,4 +1,7 @@
-Clean up stale TTS session entries.
+---
+description: Clean up stale TTS session entries
+disable-model-invocation: true
+---
 
 ```bash
 claude-tts cleanup --dry-run
