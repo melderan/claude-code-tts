@@ -1,4 +1,8 @@
-Push a release and upgrade the local installation.
+---
+description: Push a release and upgrade the local installation
+argument-hint: [patch|minor|major|--check]
+disable-model-invocation: true
+---
 
 This is a two-step process:
 
