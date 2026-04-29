@@ -508,9 +508,9 @@ class TestVersionConsistency:
             f"install.py ({inst.__version__}) != __init__.py ({pkg_version})"
         )
 
-    def test_version_is_8x(self):
-        assert inst.__version__.startswith("8."), (
-            f"Expected 8.x version, got {inst.__version__}"
+    def test_version_is_9x(self):
+        assert inst.__version__.startswith("9."), (
+            f"Expected 9.x version, got {inst.__version__}"
         )
 
 
