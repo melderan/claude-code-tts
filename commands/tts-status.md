@@ -1,4 +1,7 @@
-Show TTS status for this session.
+---
+description: Show TTS status for this session
+disable-model-invocation: true
+---
 
 ```bash
 claude-tts status

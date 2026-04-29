@@ -1,5 +1,6 @@
 ---
 description: Test TTS with a realistic workflow sample
+disable-model-invocation: true
 ---
 
 ```bash
