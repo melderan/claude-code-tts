@@ -23,6 +23,8 @@ TTS_CONFIG_FILE = TTS_CONFIG_DIR / "config.json"
 TTS_SESSIONS_DIR = TTS_CONFIG_DIR / "sessions.d"
 TTS_QUEUE_DIR = TTS_CONFIG_DIR / "queue"
 VOICES_DIR = HOME / ".local" / "share" / "piper-voices"
+SHERPA_VENV_DIR = TTS_CONFIG_DIR / "venvs" / "sherpa"
+SHERPA_MODELS_DIR = TTS_CONFIG_DIR / "sherpa-models"
 PROJECTS_DIR = HOME / ".claude" / "projects"
 DEBUG_LOG = Path("/tmp/claude_tts_debug.log")
 
@@ -53,6 +55,12 @@ class TTSConfig:
     voice: str = "en_US-hfc_male-medium"
     voice_kokoro: str = ""
     voice_kokoro_blend: str = ""
+    # Sherpa-onnx backend (additive, opt-in per persona).
+    # voice_sherpa is a model identifier under SHERPA_MODELS_DIR (e.g. "vctk-vits"
+    # or "libritts-vits"). speaker_sherpa is the per-model speaker ID for
+    # multi-speaker models; -1 means "use the model's default".
+    voice_sherpa: str = ""
+    speaker_sherpa: int = -1
     max_chars: int = 10000
     active_persona: str = "claude-prime"
     session_id: str = ""
@@ -268,6 +276,8 @@ def load_config(session_id: str | None = None) -> TTSConfig:
         cfg.max_chars = int(persona.get("max_chars", 10000))
         cfg.voice_kokoro = persona.get("voice_kokoro", "")
         cfg.voice_kokoro_blend = persona.get("voice_kokoro_blend", "")
+        cfg.voice_sherpa = persona.get("voice_sherpa", "")
+        cfg.speaker_sherpa = int(persona.get("speaker_sherpa", -1))
 
     # Step 3: Determine mute state
     # Priority: session-level > global mute > default_muted for new sessions
