@@ -2,6 +2,13 @@
 
 Mirrors the test matrix from test_session_id.py (bash subprocess tests)
 but tests the Python function directly.
+
+These tests cover the legacy PROJECT_ROOT-scan and CWD-fallback paths.
+v8.0.0 added a pinned-session lookup that takes priority over both, so
+without bypassing it these tests would pick up the real `claude` ancestor's
+pinned session and never exercise the paths under test. The autouse
+no_pin fixture below stubs the pin lookup. (Pinning is covered separately
+in tests/test_session_pin.py.)
 """
 
 import os
@@ -10,6 +17,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def no_pin():
+    """Bypass pinned-session lookup so legacy-path tests are isolated."""
+    with patch("claude_code_tts.session.read_pinned_session", return_value=None):
+        yield
 
 
 @pytest.fixture
