@@ -1,7 +1,7 @@
 """Audio generation and playback for Claude Code TTS.
 
-Handles Piper, Kokoro (swift-kokoro), and system audio players.
-Replaces tts_speak() from tts-lib.sh.
+Handles Piper, Kokoro (swift-kokoro), sherpa-onnx (additive backend),
+and system audio players. Replaces tts_speak() from tts-lib.sh.
 """
 
 import json
@@ -13,7 +13,13 @@ import subprocess
 import time
 from pathlib import Path
 
-from claude_code_tts.config import TTSConfig, TTS_QUEUE_DIR, debug
+from claude_code_tts.config import (
+    TTSConfig,
+    TTS_QUEUE_DIR,
+    SHERPA_VENV_DIR,
+    SHERPA_MODELS_DIR,
+    debug,
+)
 
 
 def detect_platform() -> str:
@@ -44,12 +50,78 @@ def detect_player() -> list[str] | None:
 
 
 
+def _sherpa_python() -> Path:
+    """Path to the Python interpreter inside the sherpa venv."""
+    return SHERPA_VENV_DIR / "bin" / "python"
+
+
+def _sherpa_available() -> bool:
+    """Return True iff the sherpa venv is bootstrapped and usable.
+
+    We do NOT auto-bootstrap from this hot path — bootstrap is an explicit
+    step run via `claude-tts-install --enable-sherpa` (or similar). This
+    keeps the speak path fast and predictable.
+    """
+    py = _sherpa_python()
+    return py.is_file()
+
+
+def _generate_sherpa(
+    text: str,
+    *,
+    model_id: str,
+    speaker: int,
+    speed: float,
+    output_path: Path,
+) -> Path | None:
+    """Invoke the sherpa helper inside the isolated venv."""
+    model_dir = SHERPA_MODELS_DIR / model_id
+    if not model_dir.is_dir():
+        debug(f"sherpa: model dir missing: {model_dir}")
+        return None
+    if not _sherpa_available():
+        debug(f"sherpa: venv not bootstrapped at {SHERPA_VENV_DIR}")
+        return None
+
+    cmd = [
+        str(_sherpa_python()),
+        "-m", "claude_code_tts.sherpa_speak",
+        "--model-dir", str(model_dir),
+        "--output", str(output_path),
+        "--speaker", str(speaker),
+        "--speed", f"{speed:.3f}",
+    ]
+    try:
+        # The sherpa venv's interpreter needs to find claude_code_tts.sherpa_speak.
+        # We add this package's parent dir to PYTHONPATH so the module resolves
+        # without requiring the sherpa venv to install our package.
+        import claude_code_tts as _self_pkg
+        pkg_parent = str(Path(_self_pkg.__file__).resolve().parent.parent)
+        env = os.environ.copy()
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{pkg_parent}:{existing}" if existing else pkg_parent
+
+        result = subprocess.run(
+            cmd, input=text, text=True, capture_output=True, timeout=30, env=env,
+        )
+        if result.returncode != 0:
+            debug(f"sherpa: rc={result.returncode} stderr={result.stderr.strip()[:200]}")
+            return None
+        if output_path.exists():
+            return output_path
+    except (subprocess.TimeoutExpired, OSError) as e:
+        debug(f"sherpa: subprocess error: {e}")
+    return None
+
+
 def generate_speech(
     text: str,
     *,
     voice_path: Path | None = None,
     voice_kokoro: str = "",
     voice_kokoro_blend: str = "",
+    voice_sherpa: str = "",
+    speaker_sherpa: int = -1,
     speed: float = 2.0,
     speed_method: str = "",
     speaker: int | None = None,
@@ -97,7 +169,22 @@ def generate_speech(
         except (subprocess.TimeoutExpired, OSError):
             pass
 
-    # Priority 3: Piper
+    # Priority 3: Sherpa-onnx (opt-in per persona via voice_sherpa).
+    # Existing personas have voice_sherpa="" and never enter this branch —
+    # they continue to use Piper / Kokoro exactly as before. New personas
+    # set voice_sherpa to a model dir name under SHERPA_MODELS_DIR.
+    if voice_sherpa:
+        wav = _generate_sherpa(
+            text,
+            model_id=voice_sherpa,
+            speaker=speaker_sherpa,
+            speed=speed,
+            output_path=output_path,
+        )
+        if wav:
+            return wav
+
+    # Priority 4: Piper
     if shutil.which("piper") and voice_path and voice_path.exists():
         cmd = ["piper", "--model", str(voice_path), "--output_file", str(output_path)]
         if speed_method == "length_scale" and speed > 0:
@@ -171,6 +258,8 @@ def speak_direct(text: str, config: TTSConfig) -> None:
         voice_path=config.voice_path,
         voice_kokoro=config.voice_kokoro,
         voice_kokoro_blend=config.voice_kokoro_blend,
+        voice_sherpa=config.voice_sherpa,
+        speaker_sherpa=config.speaker_sherpa,
         speed=config.speed,
         speed_method=method,
     )
@@ -206,6 +295,8 @@ def write_queue_message(text: str, config: TTSConfig) -> Path:
         "speed_method": method,
         "voice_kokoro": config.voice_kokoro,
         "voice_kokoro_blend": config.voice_kokoro_blend,
+        "voice_sherpa": config.voice_sherpa,
+        "speaker_sherpa": config.speaker_sherpa,
     }
 
     with open(queue_file, "w") as f:
