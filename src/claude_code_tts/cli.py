@@ -1006,10 +1006,15 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
             debug(f"PostToolUse: skipping tool type {tool_name}")
             return
 
-    # Watermark handling
+    # Watermark handling.
+    # Keyed by transcript UUID, not session_id, so two `claude` instances
+    # opened in the same folder don't thrash each other's watermark. Folder-
+    # scoped session_id stays the right grain for mute/persona; per-transcript
+    # is the right grain for "what have I already spoken from this file".
     transcript = Path(transcript_path)
-    state_file = Path(f"/tmp/claude_tts_spoken_{session_id}.state")
-    lock_dir = Path(f"/tmp/claude_tts_wm_{session_id}.lock")
+    transcript_key = transcript.stem or session_id
+    state_file = Path(f"/tmp/claude_tts_spoken_{transcript_key}.state")
+    lock_dir = Path(f"/tmp/claude_tts_wm_{transcript_key}.lock")
 
     watermark = _read_watermark(state_file, lock_dir, transcript)
     current_lines = _count_lines(transcript)
