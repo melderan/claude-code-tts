@@ -608,6 +608,90 @@ def cmd_discover(args: argparse.Namespace) -> None:
     print(f"Project persona: {project_persona}")
 
 
+def _detect_sherpa_layout(model_dir: Path) -> str:
+    """Best-effort layout family detection. Mirrors sherpa_speak._build_tts logic.
+
+    Returns one of: "vits", "kokoro", "matcha", "incomplete".
+    """
+    has_model = (model_dir / "model.onnx").is_file()
+    has_tokens = (model_dir / "tokens.txt").is_file()
+    has_voices = (model_dir / "voices.bin").is_file()
+    has_am = (model_dir / "am.onnx").is_file()
+    has_vocoder = (model_dir / "vocoder.onnx").is_file()
+
+    if has_voices and has_model and has_tokens:
+        return "kokoro"
+    if has_am and has_vocoder and has_tokens:
+        return "matcha"
+    if has_model and has_tokens:
+        return "vits"
+    return "incomplete"
+
+
+def _dir_size_mb(path: Path) -> int:
+    """Sum file sizes under `path`, in megabytes. Returns -1 on error."""
+    try:
+        total = 0
+        for p in path.rglob("*"):
+            if p.is_file():
+                total += p.stat().st_size
+        return total // (1024 * 1024)
+    except OSError:
+        return -1
+
+
+def cmd_sherpa(args: argparse.Namespace) -> None:
+    """Manage sherpa-onnx models and venv."""
+    from claude_code_tts.config import SHERPA_MODELS_DIR, SHERPA_VENV_DIR
+
+    sub = getattr(args, "sherpa_command", None) or "list"
+
+    if sub == "list":
+        # Header
+        print(f"Sherpa models directory: {SHERPA_MODELS_DIR}")
+        venv_status = "ready" if (SHERPA_VENV_DIR / "bin" / "python").is_file() \
+            else "NOT bootstrapped (run: claude-tts-install --enable-sherpa)"
+        print(f"Sherpa venv:             {venv_status}")
+        print()
+
+        if not SHERPA_MODELS_DIR.is_dir():
+            print("No models installed.")
+            print()
+            print("To install a model:")
+            print(f"  1. Create directory: {SHERPA_MODELS_DIR}/<model-id>/")
+            print("  2. Drop the model artifacts in. Minimum: model.onnx + tokens.txt")
+            print("  3. Re-run `claude-tts sherpa list` to verify it's recognized")
+            print()
+            print("(Curated picklist + auto-download is on the roadmap.)")
+            return
+
+        entries = sorted([p for p in SHERPA_MODELS_DIR.iterdir() if p.is_dir()])
+        if not entries:
+            print("No models installed.")
+            print()
+            print(f"Drop a model directory under {SHERPA_MODELS_DIR}/<model-id>/")
+            print("(Minimum: model.onnx + tokens.txt)")
+            return
+
+        # Column widths
+        name_w = max(len("MODEL ID"), max(len(p.name) for p in entries))
+        print(f"{'MODEL ID':<{name_w}}  {'LAYOUT':<11}  {'SIZE':<8}  STATUS")
+        print(f"{'-' * name_w}  {'-' * 11}  {'-' * 8}  {'-' * 6}")
+        for p in entries:
+            layout = _detect_sherpa_layout(p)
+            size = _dir_size_mb(p)
+            size_str = f"{size} MB" if size >= 0 else "?"
+            status = "ready" if layout != "incomplete" else "incomplete (missing files)"
+            print(f"{p.name:<{name_w}}  {layout:<11}  {size_str:<8}  {status}")
+        print()
+        print("Test a voice:")
+        print('  claude-tts speak --voice-sherpa <id> --speaker-sherpa <n> "hello"')
+        return
+
+    print(f"Unknown sherpa subcommand: {sub}")
+    print("Available: list")
+
+
 def cmd_mode(args: argparse.Namespace) -> None:
     """Show or set TTS mode."""
     config = load_raw_config()
@@ -793,14 +877,26 @@ def cmd_speak(args: argparse.Namespace) -> None:
     voice_path = cfg.voice_path
     voice_kokoro = cfg.voice_kokoro
     voice_kokoro_blend = cfg.voice_kokoro_blend
+    voice_sherpa = cfg.voice_sherpa
+    speaker_sherpa = cfg.speaker_sherpa
     speed = cfg.speed
     speed_method = cfg.speed_method or "playback"
     speaker = None
+
+    # CLI overrides for sherpa take precedence and disable other backends
+    # for this one-shot call.
+    if getattr(args, "voice_sherpa", None):
+        voice_sherpa = args.voice_sherpa
+        speaker_sherpa = getattr(args, "speaker_sherpa", -1)
+        voice_kokoro = ""
+        voice_kokoro_blend = ""
+        voice_path = None
 
     if args.voice:
         voice_path = VOICES_DIR / f"{args.voice}.onnx"
         voice_kokoro = ""
         voice_kokoro_blend = ""
+        voice_sherpa = ""
     if args.speed:
         speed = args.speed
     if args.speaker is not None:
@@ -818,9 +914,14 @@ def cmd_speak(args: argparse.Namespace) -> None:
             except (json.JSONDecodeError, OSError):
                 pass
 
-    print(f"Voice: {voice_path.stem if voice_path else 'kokoro'}")
-    if speaker is not None:
-        print(f"Speaker: {speaker}")
+    if voice_sherpa:
+        print(f"Voice: sherpa/{voice_sherpa}")
+        if speaker_sherpa >= 0:
+            print(f"Speaker: {speaker_sherpa}")
+    else:
+        print(f"Voice: {voice_path.stem if voice_path else 'kokoro'}")
+        if speaker is not None:
+            print(f"Speaker: {speaker}")
     print(f"Speed: {speed}x ({speed_method})")
     print()
 
@@ -829,6 +930,8 @@ def cmd_speak(args: argparse.Namespace) -> None:
         voice_path=voice_path if voice_path and voice_path.exists() else None,
         voice_kokoro=voice_kokoro,
         voice_kokoro_blend=voice_kokoro_blend,
+        voice_sherpa=voice_sherpa,
+        speaker_sherpa=speaker_sherpa,
         speed=speed,
         speed_method=speed_method,
         speaker=speaker,
@@ -1956,6 +2059,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--speed", type=float, help="Speech speed")
     p.add_argument("--speaker", type=int, help="Speaker ID for multi-speaker models")
     p.add_argument("--random", action="store_true", help="Random speaker from model")
+    p.add_argument("--voice-sherpa", dest="voice_sherpa",
+                   help="Sherpa-onnx model id (a directory name under ~/.claude-tts/sherpa-models/)")
+    p.add_argument("--speaker-sherpa", dest="speaker_sherpa", type=int, default=-1,
+                   help="Speaker ID for multi-speaker sherpa models (-1 = model default)")
     p.add_argument("--from-file", metavar="PATH", help="Read and speak a file (zero context tokens)")
     p.add_argument("--preview", action="store_true", help="Show filtered text without speaking (use with --from-file)")
     p.add_argument("--reader", action="store_true", help="Side-by-side view: original | spoken (use with --from-file)")
@@ -1994,6 +2101,12 @@ def main(argv: list[str] | None = None) -> None:
     # --- discover ---
     p = subparsers.add_parser("discover", help="Auto-suggest persona based on repo context")
     p.set_defaults(func=cmd_discover)
+
+    # --- sherpa ---
+    p = subparsers.add_parser("sherpa", help="Manage sherpa-onnx TTS backend models")
+    sherpa_sub = p.add_subparsers(dest="sherpa_command")
+    sherpa_sub.add_parser("list", help="List installed sherpa models").set_defaults(func=cmd_sherpa)
+    p.set_defaults(func=cmd_sherpa)
 
     # --- random ---
     p = subparsers.add_parser("random", help="Generate a random TTS persona")
