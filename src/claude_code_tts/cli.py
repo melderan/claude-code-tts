@@ -654,24 +654,17 @@ def cmd_sherpa(args: argparse.Namespace) -> None:
         print(f"Sherpa venv:             {venv_status}")
         print()
 
-        if not SHERPA_MODELS_DIR.is_dir():
+        if not SHERPA_MODELS_DIR.is_dir() or not any(
+            p.is_dir() for p in SHERPA_MODELS_DIR.iterdir()
+        ):
             print("No models installed.")
             print()
-            print("To install a model:")
-            print(f"  1. Create directory: {SHERPA_MODELS_DIR}/<model-id>/")
-            print("  2. Drop the model artifacts in. Minimum: model.onnx + tokens.txt")
-            print("  3. Re-run `claude-tts sherpa list` to verify it's recognized")
-            print()
-            print("(Curated picklist + auto-download is on the roadmap.)")
+            print("Browse curated picks:   claude-tts sherpa list-available")
+            print("Install a curated pick: claude-tts sherpa install <id>")
+            print(f"Or drop a model directory manually under {SHERPA_MODELS_DIR}/<id>/")
             return
 
         entries = sorted([p for p in SHERPA_MODELS_DIR.iterdir() if p.is_dir()])
-        if not entries:
-            print("No models installed.")
-            print()
-            print(f"Drop a model directory under {SHERPA_MODELS_DIR}/<model-id>/")
-            print("(Minimum: model.onnx + tokens.txt)")
-            return
 
         # Column widths
         name_w = max(len("MODEL ID"), max(len(p.name) for p in entries))
@@ -688,8 +681,285 @@ def cmd_sherpa(args: argparse.Namespace) -> None:
         print('  claude-tts speak --voice-sherpa <id> --speaker-sherpa <n> "hello"')
         return
 
+    if sub == "list-available":
+        _print_sherpa_catalog()
+        return
+
+    if sub == "install":
+        model_id = getattr(args, "model_id", None)
+        assume_yes = getattr(args, "yes", False)
+        if not model_id:
+            print("Usage: claude-tts sherpa install <id>")
+            print()
+            print("Available ids:")
+            from claude_code_tts.sherpa_catalog import list_ids
+            for mid in list_ids():
+                print(f"  {mid}")
+            sys.exit(2)
+        sys.exit(_sherpa_install(model_id, assume_yes=assume_yes))
+
     print(f"Unknown sherpa subcommand: {sub}")
-    print("Available: list")
+    print("Available: list, list-available, install")
+    sys.exit(2)
+
+
+def _print_sherpa_catalog() -> None:
+    """Render the curated picklist as a human-readable table."""
+    from claude_code_tts.sherpa_catalog import CATALOG
+
+    if not CATALOG:
+        print("No catalog entries.")
+        return
+
+    print("Curated, supply-chain-verified sherpa-onnx models.")
+    print("Each entry's SHA256 is verified against a locally-computed digest.")
+    print()
+    for entry in CATALOG.values():
+        print(f"  {entry['id']}")
+        print(f"    Layout:    {entry['layout']}")
+        print(f"    Voices:    {entry['voices']} ({entry['language']})")
+        print(f"    Size:      {entry['compressed_bytes'] // (1024*1024)} MB compressed "
+              f"→ {entry['extracted_mb']} MB extracted")
+        print(f"    License:   {entry['license_weights']} (weights)")
+        print(f"    Notes:     {entry['license_notes']}")
+        print(f"    Source:    {entry['source_page']}")
+        print(f"    Verified:  {entry['verified_date']}")
+        print()
+    print("Install one with:")
+    print("  claude-tts sherpa install <id>")
+    print()
+    print("Or pass --yes for non-interactive use:")
+    print("  claude-tts sherpa install <id> --yes")
+
+
+# --- Sherpa download / verify / extract ---
+
+
+def _sha256_file(path: Path, chunk_size: int = 65536) -> str:
+    """Compute the hex SHA256 of a file."""
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _format_bytes(n: int) -> str:
+    """Render a byte count as human-readable."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024  # type: ignore[assignment]
+    return f"{n:.1f} TB"
+
+
+def _download_with_progress(url: str, dest: Path, expected_bytes: int) -> bool:
+    """Download `url` to `dest` with a simple progress indicator.
+
+    Returns True on success, False on network/IO failure. Writes to a
+    .part file and renames on success so a partial download isn't mistaken
+    for a complete one.
+    """
+    import urllib.request
+    import urllib.error
+
+    part = dest.with_suffix(dest.suffix + ".part")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    last_pct = -1
+
+    def report(block_num: int, block_size: int, total_size: int) -> None:
+        nonlocal last_pct
+        downloaded = block_num * block_size
+        if total_size > 0:
+            pct = min(100, int(downloaded * 100 / total_size))
+            # Only redraw on percentage change to avoid terminal spam.
+            if pct != last_pct:
+                bar_w = 40
+                filled = bar_w * pct // 100
+                bar = "█" * filled + "░" * (bar_w - filled)
+                print(
+                    f"\r  [{bar}] {pct:3d}%  "
+                    f"{_format_bytes(downloaded)} / {_format_bytes(total_size)}",
+                    end="", flush=True,
+                )
+                last_pct = pct
+
+    try:
+        urllib.request.urlretrieve(url, str(part), reporthook=report)
+        print()  # newline after progress bar
+        part.rename(dest)
+        return True
+    except (urllib.error.URLError, OSError) as e:
+        print()
+        print(f"Download failed: {e}")
+        part.unlink(missing_ok=True)
+        return False
+
+
+def _extract_tarbz2(archive: Path, dest_parent: Path) -> Path | None:
+    """Extract a .tar.bz2 into dest_parent. Returns the path of the
+    extracted top-level directory, or None on failure.
+
+    Refuses extraction if the archive contains absolute paths or `..`
+    components — basic tarball-bomb defense.
+    """
+    import tarfile
+
+    try:
+        with tarfile.open(archive, "r:bz2") as tar:
+            members = tar.getmembers()
+            top_levels = set()
+            for m in members:
+                # Defense in depth against malicious tarballs.
+                if m.name.startswith("/") or ".." in Path(m.name).parts:
+                    print(f"Refusing to extract suspicious path: {m.name}")
+                    return None
+                # Top-level dir name (first path component)
+                top = Path(m.name).parts[0] if Path(m.name).parts else ""
+                if top:
+                    top_levels.add(top)
+
+            if len(top_levels) != 1:
+                print(f"Archive has {len(top_levels)} top-level dirs, expected 1: "
+                      f"{sorted(top_levels)}")
+                return None
+            top_name = top_levels.pop()
+
+            dest_parent.mkdir(parents=True, exist_ok=True)
+            # Python 3.12+ requires explicit filter= arg for tarfile.extractall.
+            try:
+                tar.extractall(dest_parent, filter="data")
+            except TypeError:
+                tar.extractall(dest_parent)  # older Python fallback
+
+        return dest_parent / top_name
+    except (tarfile.TarError, OSError) as e:
+        print(f"Extraction failed: {e}")
+        return None
+
+
+def _sherpa_install(model_id: str, *, assume_yes: bool = False) -> int:
+    """Download, verify, and extract a curated sherpa model.
+
+    Returns 0 on success, non-zero on any failure or user abort. Idempotent:
+    if the target directory already has a recognized layout, reports and
+    exits without re-downloading.
+    """
+    from claude_code_tts.config import SHERPA_MODELS_DIR
+    from claude_code_tts.sherpa_catalog import get_entry
+
+    entry = get_entry(model_id)
+    if entry is None:
+        print(f"Unknown model id: {model_id}")
+        print("Run `claude-tts sherpa list-available` to see the curated picks.")
+        return 2
+
+    target_dir = SHERPA_MODELS_DIR / model_id
+    if target_dir.is_dir() and _detect_sherpa_layout(target_dir) != "incomplete":
+        print(f"Model already installed at {target_dir}")
+        print(f"(layout: {_detect_sherpa_layout(target_dir)})")
+        print()
+        print("Test it:")
+        print(f'  claude-tts speak --voice-sherpa {model_id} "hello there"')
+        return 0
+
+    # Show plan + confirm
+    print(f"Model: {entry['id']}")
+    print(f"Layout: {entry['layout']} ({entry['voices']} voices, {entry['language']})")
+    print(f"License: {entry['license_weights']} (weights)")
+    print(f"License notes:")
+    # Wrap the long notes string at ~70 cols for readability
+    notes = entry['license_notes']
+    line = ""
+    for word in notes.split():
+        if len(line) + len(word) + 1 > 68:
+            print(f"  {line}")
+            line = word
+        else:
+            line = f"{line} {word}" if line else word
+    if line:
+        print(f"  {line}")
+    print()
+    print(f"Download: {entry['compressed_bytes'] // (1024*1024)} MB → ~{entry['extracted_mb']} MB extracted")
+    print(f"URL: {entry['url']}")
+    print(f"SHA256 (expected): {entry['sha256']}")
+    print(f"Install to: {target_dir}")
+    print()
+
+    if not assume_yes:
+        try:
+            ans = input("Proceed? [Y/n] ").strip().lower()
+        except EOFError:
+            ans = ""
+        if ans and ans not in ("y", "yes"):
+            print("Aborted by user. No changes made.")
+            return 0
+
+    # Download
+    archive = SHERPA_MODELS_DIR / ".tmp" / f"{model_id}.tar.bz2"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading {entry['url']} ...")
+    if not _download_with_progress(
+        entry["url"], archive, entry["compressed_bytes"]
+    ):
+        return 3
+
+    # Verify
+    print(f"Verifying SHA256 ...", end=" ", flush=True)
+    digest = _sha256_file(archive)
+    if digest != entry["sha256"]:
+        print("MISMATCH")
+        print(f"  Expected: {entry['sha256']}")
+        print(f"  Got:      {digest}")
+        archive.unlink(missing_ok=True)
+        return 4
+    print("OK")
+
+    # Extract
+    print(f"Extracting to {SHERPA_MODELS_DIR} ...")
+    extracted = _extract_tarbz2(archive, SHERPA_MODELS_DIR)
+    archive.unlink(missing_ok=True)
+    if extracted is None:
+        return 5
+
+    # If the archive's top-level dir name doesn't match our id, rename.
+    if extracted != target_dir:
+        if target_dir.exists():
+            import shutil
+            shutil.rmtree(target_dir)
+        extracted.rename(target_dir)
+
+    # Verify the layout
+    layout = _detect_sherpa_layout(target_dir)
+    if layout == "incomplete":
+        print(f"Warning: extracted directory has unrecognized layout. "
+              f"Files present: {sorted(p.name for p in target_dir.iterdir())}")
+        return 6
+
+    # Cleanup tmp dir if empty
+    tmp = SHERPA_MODELS_DIR / ".tmp"
+    if tmp.is_dir() and not any(tmp.iterdir()):
+        tmp.rmdir()
+
+    print()
+    print(f"Installed: {target_dir} (layout: {layout})")
+    print()
+    print("Test it:")
+    print(f'  claude-tts speak --voice-sherpa {model_id} "hello there, this is a test"')
+    print()
+    print("Configure as a persona — add to ~/.claude-tts/config.json:")
+    print(f'  "personas": {{')
+    print(f'    "claude-{model_id}": {{')
+    print(f'      "voice_sherpa": "{model_id}",')
+    print(f'      "speaker_sherpa": 0,')
+    print(f'      "speed": 1.0')
+    print(f'    }}')
+    print(f'  }}')
+    return 0
 
 
 def cmd_mode(args: argparse.Namespace) -> None:
@@ -2106,6 +2376,20 @@ def main(argv: list[str] | None = None) -> None:
     p = subparsers.add_parser("sherpa", help="Manage sherpa-onnx TTS backend models")
     sherpa_sub = p.add_subparsers(dest="sherpa_command")
     sherpa_sub.add_parser("list", help="List installed sherpa models").set_defaults(func=cmd_sherpa)
+    sherpa_sub.add_parser(
+        "list-available",
+        help="List the curated, supply-chain-verified models you can install",
+    ).set_defaults(func=cmd_sherpa)
+    sp_install = sherpa_sub.add_parser(
+        "install",
+        help="Download, verify, and extract a curated sherpa model",
+    )
+    sp_install.add_argument("model_id", nargs="?", help="Catalog id to install")
+    sp_install.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Assume yes to confirmation prompt (for non-interactive use)",
+    )
+    sp_install.set_defaults(func=cmd_sherpa)
     p.set_defaults(func=cmd_sherpa)
 
     # --- random ---
