@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "9.1.0"
+__version__ = "9.2.0"
 
 
 # --- Platform Detection ---
@@ -2002,6 +2002,220 @@ def do_interactive() -> None:
         sys.exit(0)
 
 
+# --- Sherpa-onnx backend bootstrap ---
+
+# Heuristic minimum free space for the sherpa venv (~77 MB observed on macOS)
+# plus headroom for a small first model under sherpa-models/. Real models
+# range from ~30 MB (kitten) to ~450 MB (libritts), so this is the floor for
+# "install just sherpa", not "install sherpa + a real model."
+SHERPA_VENV_MIN_FREE_MB = 200
+
+
+def _sherpa_paths() -> tuple[Path, Path, Path]:
+    """Return (venv_dir, venv_python, models_dir) without importing them.
+
+    We resolve these locally rather than importing config.py because install.py
+    is structured to be runnable as a standalone script (`python install.py`)
+    even when the package isn't fully importable yet.
+    """
+    home = Path.home()
+    tts_dir = home / ".claude-tts"
+    venv = tts_dir / "venvs" / "sherpa"
+    return venv, venv / "bin" / "python", tts_dir / "sherpa-models"
+
+
+def _free_mb(path: Path) -> int:
+    """Free space at `path` (or its nearest existing parent) in megabytes."""
+    p = path
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    try:
+        usage = shutil.disk_usage(p)
+        return usage.free // (1024 * 1024)
+    except OSError:
+        return -1
+
+
+def _ask_yes_no(prompt: str, default_yes: bool = True, assume_yes: bool = False) -> bool:
+    """Tiny y/N helper. assume_yes short-circuits to True (for --yes / scripts)."""
+    if assume_yes:
+        return True
+    suffix = "[Y/n]" if default_yes else "[y/N]"
+    try:
+        ans = input(f"{prompt} {suffix} ").strip().lower()
+    except EOFError:
+        return default_yes
+    if not ans:
+        return default_yes
+    return ans in ("y", "yes")
+
+
+def _detect_onnx_providers(venv_python: Path) -> list[str]:
+    """Probe the sherpa venv's onnxruntime for available execution providers.
+
+    Returns provider names like 'CPUExecutionProvider', 'CoreMLExecutionProvider'.
+    Returns [] if the probe fails for any reason — this is informational only,
+    not load-bearing.
+    """
+    if not venv_python.is_file():
+        return []
+    try:
+        result = subprocess.run(
+            [str(venv_python), "-c",
+             "import onnxruntime; "
+             "print('\\n'.join(onnxruntime.get_available_providers()))"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return []
+
+
+def _verify_sherpa_import(venv_python: Path) -> tuple[bool, str]:
+    """Verify the venv's sherpa-onnx is importable. Returns (ok, version_or_error)."""
+    if not venv_python.is_file():
+        return False, "venv python not found"
+    try:
+        result = subprocess.run(
+            [str(venv_python), "-c",
+             "import sherpa_onnx; print(sherpa_onnx.__version__)"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            return True, result.stdout.strip()
+        return False, result.stderr.strip()[:200]
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, str(e)
+
+
+def do_enable_sherpa(*, assume_yes: bool = False, dry_run: bool = False) -> int:
+    """Bootstrap the sherpa-onnx backend in an isolated venv.
+
+    Returns 0 on success, non-zero on failure. Designed to be re-runnable;
+    if the venv already exists with a working sherpa_onnx, it reports that
+    and exits without re-downloading.
+    """
+    venv_dir, venv_py, models_dir = _sherpa_paths()
+
+    print(f"\n{Colors.MAGENTA}Sherpa-onnx TTS backend{Colors.NC}")
+    print("=" * 60)
+    print("Apache 2.0, runs locally, additive to existing personas.")
+    print("Existing personas (claude-prime, claude-connery, etc.) are NOT")
+    print("changed — sherpa is opt-in via voice_sherpa on a persona.\n")
+
+    # 1. Idempotency check: already bootstrapped?
+    if venv_py.is_file():
+        ok, info_msg = _verify_sherpa_import(venv_py)
+        if ok:
+            success(f"sherpa-onnx already installed at {venv_dir} (v{info_msg})")
+            providers = _detect_onnx_providers(venv_py)
+            if providers:
+                info(f"ONNX Runtime providers available: {', '.join(providers)}")
+            print()
+            print(f"  Models directory: {models_dir}")
+            print(f"  (drop a model.onnx + tokens.txt under <id>/ to use it)")
+            print()
+            return 0
+        else:
+            warn(f"venv exists at {venv_dir} but sherpa_onnx import failed: {info_msg}")
+            if not _ask_yes_no("Reinstall?", default_yes=True, assume_yes=assume_yes):
+                return 1
+
+    # 2. Preflight: uv on PATH?
+    if not shutil.which("uv"):
+        error("`uv` is required to bootstrap the sherpa venv but was not found on PATH.")
+        print("  Install uv: https://docs.astral.sh/uv/getting-started/installation/")
+        return 2
+
+    # 3. Preflight: free disk
+    parent = venv_dir.parent
+    free = _free_mb(parent)
+    if free >= 0 and free < SHERPA_VENV_MIN_FREE_MB:
+        error(f"Only {free} MB free under {parent}; need at least {SHERPA_VENV_MIN_FREE_MB} MB.")
+        return 3
+
+    # 4. Show plan, confirm
+    plat = detect_platform()
+    print(f"This will:")
+    print(f"  • Create a Python 3.12 venv at {venv_dir}")
+    print(f"  • Install sherpa-onnx (~77 MB) into that venv")
+    print(f"  • Create models directory at {models_dir}")
+    print(f"  • Touch nothing outside ~/.claude-tts/")
+    print()
+    print(f"  Platform:    {plat}")
+    if free >= 0:
+        print(f"  Free disk:   {free} MB available")
+    print()
+
+    if dry_run:
+        dry(f"uv venv {venv_dir} --python 3.12")
+        dry(f"uv pip install --python {venv_py} sherpa-onnx")
+        dry(f"mkdir -p {models_dir}")
+        return 0
+
+    if not _ask_yes_no(
+        "Proceed with bootstrap?", default_yes=True, assume_yes=assume_yes
+    ):
+        info("Aborted by user. No changes made.")
+        return 0
+
+    # 5. Run the bootstrap
+    info(f"Creating venv at {venv_dir}...")
+    venv_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            ["uv", "venv", str(venv_dir), "--python", "3.12"],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        error(f"`uv venv` failed: {e.stderr.strip()[:300]}")
+        return 4
+
+    info("Installing sherpa-onnx into the venv...")
+    try:
+        subprocess.run(
+            ["uv", "pip", "install", "--python", str(venv_py), "sherpa-onnx"],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        error(f"`uv pip install sherpa-onnx` failed: {e.stderr.strip()[:300]}")
+        return 5
+
+    # 6. Verify
+    ok, info_msg = _verify_sherpa_import(venv_py)
+    if not ok:
+        error(f"Bootstrap completed but sherpa_onnx import failed: {info_msg}")
+        return 6
+    success(f"sherpa-onnx {info_msg} installed and verified.")
+
+    # 7. Detect providers — informational
+    providers = _detect_onnx_providers(venv_py)
+    if providers:
+        info(f"ONNX Runtime providers available: {', '.join(providers)}")
+        if "CoreMLExecutionProvider" in providers:
+            print("  (CoreML available on this Mac — sherpa-onnx will use it where models support it.)")
+
+    # 8. Create models dir
+    models_dir.mkdir(parents=True, exist_ok=True)
+    info(f"Models directory ready at {models_dir}")
+
+    # 9. Next steps
+    print()
+    print(f"{Colors.GREEN}Next steps:{Colors.NC}")
+    print(f"  1. Drop a sherpa-onnx model under {models_dir}/<id>/")
+    print(f"     Minimum: model.onnx + tokens.txt")
+    print(f"  2. Configure a persona in ~/.claude-tts/config.json with:")
+    print(f'       "voice_sherpa": "<id>"')
+    print(f'       "speaker_sherpa": <int>   (multi-speaker models only)')
+    print(f"  3. /tts-persona <name> --project   (in your target repo)")
+    print()
+    print("Curated model picklist + auto-download is the next slice.")
+    print()
+    return 0
+
+
 # --- Main ---
 
 def main() -> None:
@@ -2073,6 +2287,16 @@ Examples:
         action="store_true",
         help="Check if updates are available",
     )
+    parser.add_argument(
+        "--enable-sherpa",
+        action="store_true",
+        help="Bootstrap the sherpa-onnx TTS backend in an isolated venv (additive, opt-in)",
+    )
+    parser.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        help="Assume yes to interactive prompts (for scripted / non-interactive use)",
+    )
 
     args = parser.parse_args()
 
@@ -2085,6 +2309,8 @@ Examples:
         sys.exit(0)
     elif args.check:
         do_check()
+    elif args.enable_sherpa:
+        sys.exit(do_enable_sherpa(assume_yes=args.yes, dry_run=args.dry_run))
     elif args.uninstall:
         do_uninstall(dry_run=args.dry_run)
     elif args.bootstrap:
