@@ -66,7 +66,9 @@ class TestSherpaList:
         cli.cmd_sherpa(args)
         out = capsys.readouterr().out
         assert "No models installed" in out
-        assert "Drop a model directory" in out
+        # Points user at the curated picklist + manual-install fallback
+        assert "claude-tts sherpa list-available" in out
+        assert "claude-tts sherpa install" in out
 
     def test_missing_dir_prints_helpful_next_steps(self, tmp_path, monkeypatch, capsys):
         missing = tmp_path / "nope"
@@ -79,8 +81,7 @@ class TestSherpaList:
         cli.cmd_sherpa(args)
         out = capsys.readouterr().out
         assert "No models installed" in out
-        # When the dir is entirely absent, point user at how to create one
-        assert "Create directory" in out
+        assert "claude-tts sherpa list-available" in out
 
     def test_lists_installed_models_with_layouts(self, tmp_path, monkeypatch, capsys):
         models_dir = tmp_path / "sherpa-models"
