@@ -1,6 +1,6 @@
 # Claude Code TTS - Instructions for Claude
 
-Welcome, fellow Claude! TTS for Claude Code using Piper and Kokoro. Version 9.4.0.
+Welcome, fellow Claude! TTS for Claude Code using Piper and Kokoro. Version 9.5.0.
 
 ## Ownership
 
@@ -73,6 +73,7 @@ claude-tts release --check  # Verify without releasing
 | `/tts-sounds` | Configure sound effects |
 | `/tts-intermediate [on\|off]` | Toggle intermediate narration (between tool calls) |
 | `/tts-discover` | Auto-suggest persona based on repo context |
+| `/tts-personas` | Sibling-Claude voice picker guide (who do you want to be?) |
 | `/tts-release` | Push a release and upgrade local installation |
 
 ## Standalone Tools

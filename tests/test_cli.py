@@ -164,6 +164,68 @@ class TestPersona:
         assert config["project_personas"]["test-session"] == "claude-chill"
 
 
+class TestPersonasGuide:
+    """`claude-tts personas` — sibling-Claude voice picker guide."""
+
+    def test_personas_lists_all_visible(self, tts_home, patched_env, capsys):
+        main(["personas"])
+        out = capsys.readouterr().out
+        assert "claude-prime" in out
+        assert "claude-chill" in out
+        assert "PICK YOUR VOICE" in out
+        assert "HOW TO AUDITION" in out
+        assert "HOW TO COMMIT" in out
+
+    def test_personas_includes_vibe_for_known_voice(self, tts_home, patched_env, capsys):
+        main(["personas"])
+        out = capsys.readouterr().out
+        # claude-prime uses en_US-hfc_male-medium
+        assert "American male" in out
+
+    def test_personas_hides_random_by_default(self, tts_home, patched_env, capsys):
+        cfg_path = tts_home / ".claude-tts" / "config.json"
+        cfg = json.loads(cfg_path.read_text())
+        cfg["personas"]["random-1234567890"] = {
+            "description": "Random",
+            "voice": "en_US-amy-medium",
+            "speed": 1.5,
+            "ai_type": "claude",
+        }
+        cfg_path.write_text(json.dumps(cfg))
+
+        main(["personas"])
+        out = capsys.readouterr().out
+        assert "random-1234567890" not in out
+        assert "1 random-* personas hidden" in out
+
+    def test_personas_include_random_flag(self, tts_home, patched_env, capsys):
+        cfg_path = tts_home / ".claude-tts" / "config.json"
+        cfg = json.loads(cfg_path.read_text())
+        cfg["personas"]["random-1234567890"] = {
+            "description": "Random",
+            "voice": "en_US-amy-medium",
+            "speed": 1.5,
+            "ai_type": "claude",
+        }
+        cfg_path.write_text(json.dumps(cfg))
+
+        main(["personas", "--include-random"])
+        out = capsys.readouterr().out
+        assert "random-1234567890" in out
+        assert "hidden" not in out
+
+    def test_personas_marks_project_persona(self, tts_home, patched_env, capsys):
+        main(["persona", "--project", "claude-chill"])
+        capsys.readouterr()  # drain
+        main(["personas"])
+        out = capsys.readouterr().out
+        # claude-chill should be tagged as the project persona
+        chill_line_idx = out.index("claude-chill")
+        # Find the line containing claude-chill and verify [project] marker is on it
+        line_with_chill = out[chill_line_idx:].split("\n", 1)[0]
+        assert "[project]" in line_with_chill
+
+
 class TestIntermediate:
     def test_show_intermediate(self, tts_home, patched_env, capsys):
         main(["intermediate"])
