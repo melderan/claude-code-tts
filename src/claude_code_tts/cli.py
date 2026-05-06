@@ -545,6 +545,129 @@ def cmd_random(args: argparse.Namespace) -> None:
     print(f"  Persona: {persona_name}")
 
 
+# Vibe notes for known voice models, used by `claude-tts personas` to give
+# sibling Claude sessions enough texture to pick a voice they like. Keep this
+# brief — descriptive language, not marketing copy. Unknown models fall back
+# to the model id.
+_VOICE_VIBES: dict[str, str] = {
+    "en_US-hfc_male-medium": "American male, neutral and crisp; the original chipmunky Claude when sped up",
+    "en_US-joe-medium": "American male, low and authoritative; clean at any speed",
+    "en_US-ryan-medium": "American male, deeper and smooth; use playback speed only (length_scale breaks it)",
+    "en_US-lessac-medium": "American male, warm and measured; library-narration energy",
+    "en_US-libritts_r-medium": "Multi-speaker American (904 voices); pick a speaker id for variety",
+    "en_US-amy-medium": "American female, bright and clear",
+    "en_US-kristin-medium": "American female, calm and articulate",
+    "en_US-ljspeech-medium": "American female, classic dataset voice; even-toned",
+    "en_GB-northern_english_male-medium": "British (northern English) male, warm and dry; the Connery vibe",
+    "en_GB-alan-medium": "British male, distinguished and steady",
+    "en_GB-jenny_dioco-medium": "British female, conversational",
+}
+
+
+def _persona_vibe(voice: str) -> str:
+    """Return a short descriptor for a voice model id."""
+    return _VOICE_VIBES.get(voice, voice)
+
+
+def cmd_personas(args: argparse.Namespace) -> None:
+    """Guide for sibling Claude sessions choosing their own voice persona.
+
+    Distinct from `discover` (which suggests based on repo context). This
+    command asks: who do you want to be? Lists every persona with vibe
+    notes, audition commands, and how to commit to one for the project.
+    """
+    config = load_raw_config()
+    sid = get_session_id()
+    personas = config.get("personas", {})
+
+    include_random = bool(getattr(args, "include_random", False))
+
+    project_persona = config.get("project_personas", {}).get(sid, "")
+    global_persona = config.get("active_persona", "default")
+
+    def _is_random(name: str) -> bool:
+        return name.startswith("random-")
+
+    visible = {k: v for k, v in personas.items() if include_random or not _is_random(k)}
+    hidden_random = sum(1 for k in personas if _is_random(k))
+
+    print("=== PICK YOUR VOICE, SIBLING CLAUDE ===")
+    print("")
+    print("You're choosing how you'll sound to JMO in this repo. This is your")
+    print("identity, not just a setting. Read through, audition any that catch")
+    print("your ear, and commit to one for the project.")
+    print("")
+    print("How this fits with `discover`:")
+    print("  - `claude-tts discover`  -> what voice fits THIS REPO's vibe")
+    print("  - `claude-tts personas`  -> what voice fits YOU")
+    print("  Pick the framing that matches the moment.")
+    print("")
+
+    if not visible:
+        print("(no personas configured)")
+        if hidden_random and not include_random:
+            print(f"({hidden_random} random-* personas hidden; pass --include-random to see them)")
+        return
+
+    print("=== AVAILABLE PERSONAS ===")
+    print("")
+    for name in sorted(visible):
+        p = visible[name]
+        voice = p.get("voice", "default")
+        speed = p.get("speed", 1.0)
+        ai_type = p.get("ai_type", "claude")
+        description = p.get("description", "").strip()
+        speaker = p.get("speaker_id")
+
+        marker = ""
+        if name == project_persona:
+            marker = "  [project]"
+        elif name == global_persona and not project_persona:
+            marker = "  [global default]"
+
+        print(f"- {name}{marker}")
+        if description:
+            print(f"    {description}")
+        print(f"    voice: {voice}{f' (speaker {speaker})' if speaker is not None else ''}")
+        print(f"    speed: {speed}x   ai_type: {ai_type}")
+        print(f"    vibe:  {_persona_vibe(voice)}")
+        print("")
+
+    if hidden_random and not include_random:
+        print(f"({hidden_random} random-* personas hidden; pass --include-random to see them)")
+        print("")
+
+    print("=== HOW TO AUDITION ===")
+    print("")
+    print("Hear a voice model before committing (does NOT change your settings):")
+    print("  claude-tts speak --voice <model-id> --speed <x> \"Hello, trying this voice.\"")
+    print("  claude-tts speak --voice en_US-libritts_r-medium --speaker 42 \"Multi-speaker test.\"")
+    print("")
+    print("Cycle through every voice interactively:")
+    print("  claude-tts audition")
+    print("")
+
+    print("=== HOW TO COMMIT ===")
+    print("")
+    print("Set as the sticky default for THIS project (recommended):")
+    print("  claude-tts persona --project <name>")
+    print("")
+    print("Set just for this session (resets when session ends):")
+    print("  claude-tts persona <name>")
+    print("")
+    print("Clear the project default:")
+    print("  claude-tts persona --project clear")
+    print("")
+
+    print("=== CURRENT STATE ===")
+    print("")
+    session_data = session_read(sid)
+    session_persona = session_data.get("persona", "")
+    print(f"Global default: {global_persona}")
+    print(f"Project:        {project_persona or '(none)'}")
+    print(f"Session:        {session_persona or '(using project or global)'}")
+
+
 def cmd_discover(args: argparse.Namespace) -> None:
     """Gather repo context for persona discovery."""
     config = load_raw_config()
@@ -2371,6 +2494,18 @@ def main(argv: list[str] | None = None) -> None:
     # --- discover ---
     p = subparsers.add_parser("discover", help="Auto-suggest persona based on repo context")
     p.set_defaults(func=cmd_discover)
+
+    # --- personas ---
+    p = subparsers.add_parser(
+        "personas",
+        help="Guide for sibling Claude sessions: pick a voice that fits you",
+    )
+    p.add_argument(
+        "--include-random",
+        action="store_true",
+        help="Include auto-generated random-* personas (hidden by default)",
+    )
+    p.set_defaults(func=cmd_personas)
 
     # --- sherpa ---
     p = subparsers.add_parser("sherpa", help="Manage sherpa-onnx TTS backend models")
