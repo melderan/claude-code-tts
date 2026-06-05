@@ -1267,6 +1267,23 @@ def cmd_speak(args: argparse.Namespace) -> None:
             sys.exit(1)
 
     cfg = load_config()
+
+    # Queue routing: when no CLI overrides given, honour cfg.mode so that
+    # `claude-tts speak "text"` called by the VoiceServer (or any automation)
+    # serialises through the daemon instead of playing a concurrent direct stream.
+    _has_overrides = (
+        args.voice
+        or args.speed
+        or args.speaker is not None
+        or getattr(args, "voice_sherpa", None)
+        or getattr(args, "random", False)
+    )
+    if cfg.mode == "queue" and not _has_overrides:
+        from claude_code_tts.audio import daemon_healthy, speak as _queue_speak
+        if daemon_healthy():
+            _queue_speak(text, cfg)
+            return
+
     voice_path = cfg.voice_path
     voice_kokoro = cfg.voice_kokoro
     voice_kokoro_blend = cfg.voice_kokoro_blend
@@ -1435,6 +1452,33 @@ def _print_reader(original: str, filtered: str) -> None:
         print(f"{'':<{col_width}} | {'':<{col_width}}")
 
 
+def extract_pai_summary(text: str) -> str | None:
+    """Return the spoken summary from a PAI-formatted response, or None.
+
+    PAI responses end with a line like:
+        🗣️ Lode: Eight-to-sixteen word summary of what happened.
+        🗣️ Summary with no label prefix.
+
+    When multiple 🗣️ lines are present the last one wins.
+    Returns None if no such line exists or the summary is empty/whitespace.
+    Only the stop hook calls this; post_tool_use is left untouched.
+    """
+    import re
+    # U+1F5E3 speaking-head, optional U+FE0F variation selector (VS16), then
+    # optional "Label:" prefix (no colon in the label itself), then summary.
+    # Cannot use a raw string for the emoji — raw strings don't process \U escapes.
+    _head = "\U0001F5E3️?"
+    pattern = re.compile(
+        r"^\s*" + _head + r"\s*(?:[^:\n]+:\s*)?(.+)$",
+        re.MULTILINE,
+    )
+    matches = pattern.findall(text)
+    if not matches:
+        return None
+    summary = matches[-1].strip()
+    return summary if summary else None
+
+
 def _speak_from_hook(args: argparse.Namespace) -> None:
     """Handle --from-hook mode: read hook JSON from stdin, process transcript."""
     from claude_code_tts.audio import speak
@@ -1534,6 +1578,14 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
         return
 
     debug(f"{hook_type}: extracted {len(text)} chars: {text[:100]}...")
+
+    # For stop hooks: if this is a PAI response, speak only the 🗣️ summary line.
+    if hook_type == "stop":
+        pai_summary = extract_pai_summary(text)
+        if pai_summary:
+            debug(f"stop: PAI summary detected, speaking: {pai_summary[:80]}")
+            speak(pai_summary, cfg)
+            return
 
     # Filter and check length
     cliff_notes = filter_text(text)
