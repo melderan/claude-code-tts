@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "9.6.0"
+__version__ = "9.6.1"
 
 
 # --- Platform Detection ---
@@ -1079,35 +1079,40 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
         info("Verifying installation...")
 
         if command_exists("piper") and VOICE_FILE.exists():
-            test_file = Path("/tmp/claude_tts_test.wav")
-            try:
-                # Generate test audio with 2x speed (length_scale=0.5)
-                subprocess.run(
-                    ["piper", "--model", str(VOICE_FILE), "--length_scale", "0.5",
-                     "--output_file", str(test_file)],
-                    input="Hello, Claude Code TTS is now installed.",
-                    text=True,
-                    capture_output=True,
-                )
-                if test_file.exists():
-                    success("Piper TTS is working")
-                    info("Playing test audio...")
+            if upgrade:
+                # Skip audio playback on upgrade — piper already verified at first install,
+                # and playing directly via afplay competes with a running queue daemon.
+                success("Piper TTS is working (audio test skipped on upgrade)")
+            else:
+                test_file = Path("/tmp/claude_tts_test.wav")
+                try:
+                    # Generate test audio with 2x speed (length_scale=0.5)
+                    subprocess.run(
+                        ["piper", "--model", str(VOICE_FILE), "--length_scale", "0.5",
+                         "--output_file", str(test_file)],
+                        input="Hello, Claude Code TTS is now installed.",
+                        text=True,
+                        capture_output=True,
+                    )
+                    if test_file.exists():
+                        success("Piper TTS is working")
+                        info("Playing test audio...")
 
-                    # Use platform-appropriate player
-                    if PLATFORM == "macos" and command_exists("afplay"):
-                        subprocess.run(["afplay", str(test_file)], check=False)
-                    elif command_exists("paplay"):
-                        subprocess.run(["paplay", str(test_file)], check=False)
-                    elif command_exists("aplay"):
-                        subprocess.run(["aplay", "-q", str(test_file)], check=False)
+                        # Use platform-appropriate player
+                        if PLATFORM == "macos" and command_exists("afplay"):
+                            subprocess.run(["afplay", str(test_file)], check=False)
+                        elif command_exists("paplay"):
+                            subprocess.run(["paplay", str(test_file)], check=False)
+                        elif command_exists("aplay"):
+                            subprocess.run(["aplay", "-q", str(test_file)], check=False)
+                        else:
+                            warn("No audio player available for test")
+
+                        test_file.unlink()
                     else:
-                        warn("No audio player available for test")
-
-                    test_file.unlink()
-                else:
-                    warn("Could not generate test audio")
-            except Exception as e:
-                warn(f"Could not test TTS: {e}")
+                        warn("Could not generate test audio")
+                except Exception as e:
+                    warn(f"Could not test TTS: {e}")
     else:
         dry("Test TTS with sample audio")
 
