@@ -83,17 +83,25 @@ def pin_session(session_id: str) -> None:
     transcript path. Subsequent CLI invocations under the same `claude`
     parent will read this file via read_pinned_session().
 
+    Also writes active/latest.session so processes without a claude ancestor
+    (e.g. VoiceServer-spawned speak calls) can resolve the active session.
+
     No-op if no claude ancestor can be found or the write fails.
     """
     claude_pid = find_claude_ancestor_pid()
-    if claude_pid is None:
-        return
     try:
         ACTIVE_DIR.mkdir(parents=True, exist_ok=True)
-        path = _pin_path(claude_pid)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(session_id)
-        tmp.replace(path)
+        # Per-PID pin (used by hooks in the same claude process tree)
+        if claude_pid is not None:
+            path = _pin_path(claude_pid)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(session_id)
+            tmp.replace(path)
+        # Cross-process breadcrumb (used by VoiceServer and other orphan callers)
+        latest = ACTIVE_DIR / "latest.session"
+        tmp2 = ACTIVE_DIR / "latest.session.tmp"
+        tmp2.write_text(session_id)
+        tmp2.replace(latest)
     except OSError:
         pass
 
@@ -153,6 +161,17 @@ def get_session_id() -> str:
     # 2. Pinned by hook — canonical, matches what hooks see from transcript_path
     if pinned := read_pinned_session():
         return pinned
+
+    # 2.5. Latest breadcrumb — set by pin_session() for cross-process callers
+    # (e.g. VoiceServer daemon that has no claude ancestor in its process tree)
+    latest = ACTIVE_DIR / "latest.session"
+    if latest.is_file():
+        try:
+            content = latest.read_text().strip()
+            if content:
+                return content
+        except OSError:
+            pass
 
     # 3. PROJECT_ROOT scan (legacy — kept for backward compatibility)
     project_root = os.environ.get("PROJECT_ROOT")
