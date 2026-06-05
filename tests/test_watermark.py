@@ -189,3 +189,52 @@ class TestDuplicationRegression:
             f.write(json.dumps(_user("u")) + "\n")
             f.write(json.dumps(_assistant(text_c)) + "\n")
         assert _run_hook(ta, "stop") == text_c
+
+
+class TestPAISummaryExtraction:
+    """Stop hook speaks only the 🗣️ summary line from PAI-formatted responses."""
+
+    def test_labeled_pai_line_speaks_summary_only(self, tmp_path, fake_state_dir):
+        """Transcript with 🗣️ Lode: <summary> → only the summary is spoken."""
+        projects = tmp_path / "projects" / "-Users-jwmoore"
+        transcript = projects / "uuid-pai-a.jsonl"
+        pai_block = (
+            "════ PAI | NATIVE MODE ════\n"
+            "\U0001F5E3 Lode: Voice bridge online; PAI now speaks through claude-code-tts."
+        )
+        _write_transcript(transcript, [_user("go"), _assistant(pai_block)])
+        spoken = _run_hook(transcript, "stop")
+        assert spoken == "Voice bridge online; PAI now speaks through claude-code-tts."
+
+    def test_no_pai_line_falls_through_to_filter(self, tmp_path, fake_state_dir):
+        """Transcript with no 🗣️ line uses the existing filter_text path unchanged."""
+        projects = tmp_path / "projects" / "-Users-jwmoore"
+        transcript = projects / "uuid-pai-b.jsonl"
+        plain = "Done. The file has been updated with the requested changes."
+        _write_transcript(transcript, [_user("fix it"), _assistant(plain)])
+        spoken = _run_hook(transcript, "stop")
+        # filter_text will return the plain text largely unchanged at this length
+        assert spoken is not None
+        assert "Done" in spoken
+
+    def test_multiple_pai_lines_last_wins(self, tmp_path, fake_state_dir):
+        """When multiple 🗣️ lines present, the last one is spoken."""
+        projects = tmp_path / "projects" / "-Users-jwmoore"
+        transcript = projects / "uuid-pai-c.jsonl"
+        pai_block = (
+            "\U0001F5E3 Connery: First summary line that should be ignored.\n"
+            "some intermediate content\n"
+            "\U0001F5E3 Connery: Second summary line that wins."
+        )
+        _write_transcript(transcript, [_user("go"), _assistant(pai_block)])
+        spoken = _run_hook(transcript, "stop")
+        assert spoken == "Second summary line that wins."
+
+    def test_labelless_pai_line_strips_emoji_only(self, tmp_path, fake_state_dir):
+        """🗣️ line with no label: emoji stripped, rest spoken."""
+        projects = tmp_path / "projects" / "-Users-jwmoore"
+        transcript = projects / "uuid-pai-d.jsonl"
+        pai_block = "\U0001F5E3 All tiers verified and serving on flare."
+        _write_transcript(transcript, [_user("status"), _assistant(pai_block)])
+        spoken = _run_hook(transcript, "stop")
+        assert spoken == "All tiers verified and serving on flare."
