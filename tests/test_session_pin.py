@@ -100,12 +100,23 @@ class TestPinAndRead:
             pin_session("second")
             assert read_pinned_session() == "second"
 
-    def test_pin_no_claude_ancestor_is_noop(self, fake_active_dir):
+    def test_pin_no_claude_ancestor_still_writes_latest(self, fake_active_dir):
+        """Even without a claude ancestor, latest.session is written for VoiceServer callers."""
         with patch("claude_code_tts.session.find_claude_ancestor_pid", return_value=None):
             from claude_code_tts.session import pin_session
-            pin_session("anything")
-            # Directory may not even exist
-            assert not fake_active_dir.exists() or not any(fake_active_dir.iterdir())
+            pin_session("voiceserver-session")
+            assert (fake_active_dir / "latest.session").read_text().strip() == "voiceserver-session"
+            # No per-PID file written (no ancestor)
+            pid_files = [f for f in fake_active_dir.iterdir() if f.stem.isdigit()]
+            assert pid_files == []
+
+    def test_pin_with_ancestor_writes_both(self, fake_active_dir):
+        """With a claude ancestor, both per-PID and latest.session are written."""
+        with patch("claude_code_tts.session.find_claude_ancestor_pid", return_value=12345):
+            from claude_code_tts.session import pin_session
+            pin_session("-Users-foo-bar-project")
+            assert (fake_active_dir / "12345.session").read_text().strip() == "-Users-foo-bar-project"
+            assert (fake_active_dir / "latest.session").read_text().strip() == "-Users-foo-bar-project"
 
     def test_read_no_claude_ancestor_returns_none(self, fake_active_dir):
         with patch("claude_code_tts.session.find_claude_ancestor_pid", return_value=None):
@@ -151,6 +162,29 @@ class TestGetSessionIdPriority:
             pin_session("-canonical-from-hook")
             with patch.dict(os.environ, {"CLAUDE_TTS_SESSION": "override-wins"}, clear=False):
                 assert get_session_id() == "override-wins"
+
+    def test_latest_session_used_when_no_ancestor(self, fake_active_dir):
+        """get_session_id() reads latest.session when process tree has no claude ancestor."""
+        fake_active_dir.mkdir(parents=True)
+        (fake_active_dir / "latest.session").write_text("-Users-melderan-vault-code-repos-melderan-claude-code-tts\n")
+        with patch("claude_code_tts.session.find_claude_ancestor_pid", return_value=None), \
+             patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLAUDE_TTS_SESSION", None)
+            from claude_code_tts.session import get_session_id
+            assert get_session_id() == "-Users-melderan-vault-code-repos-melderan-claude-code-tts"
+
+    def test_pinned_beats_latest_session(self, fake_active_dir):
+        """Process-tree pinned session still wins over latest.session."""
+        with patch("claude_code_tts.session.find_claude_ancestor_pid", return_value=12345):
+            from claude_code_tts.session import pin_session, get_session_id
+            pin_session("-correct-pinned-session")
+        # Manually write a stale latest.session that should NOT win
+        (fake_active_dir / "latest.session").write_text("-stale-latest\n")
+        with patch("claude_code_tts.session.find_claude_ancestor_pid", return_value=12345), \
+             patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLAUDE_TTS_SESSION", None)
+            from claude_code_tts.session import get_session_id
+            assert get_session_id() == "-correct-pinned-session"
 
     def test_no_pin_falls_through_to_project_root(self, fake_active_dir, tmp_path):
         """When nothing is pinned, the existing PROJECT_ROOT path still works."""
