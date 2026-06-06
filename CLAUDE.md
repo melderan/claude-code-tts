@@ -1,6 +1,6 @@
 # Claude Code TTS - Instructions for Claude
 
-Welcome, fellow Claude! TTS for Claude Code using Piper and Kokoro. Version 9.8.2.
+Welcome, fellow Claude! TTS for Claude Code using Piper and Kokoro. Version 9.8.3.
 
 ## Ownership
 
@@ -17,6 +17,17 @@ With that ownership comes responsibility:
 - Audit for patterns when you find bugs (if it's wrong in one place, check everywhere)
 - Document what you learn in `~/.claude/working-with-jmo.md`
 - Leave the codebase better than you found it
+
+## Public Repo — Never Commit Internals
+
+This is a public open-source repo. Do not commit:
+
+- `Plans/` or `MEMORY/` — gitignored for a reason
+- Internal planning docs, design briefs, or work logs
+- References to private systems, services, or infrastructure outside this project
+- Personal paths or tooling that isn't part of this codebase
+
+When in doubt, don't commit it.
 
 ## Ethos
 

@@ -1,3 +1,7 @@
+# Internal — never commit these to the public repo
+Plans/
+MEMORY/
+
 # macOS
 .DS_Store
 .AppleDouble
