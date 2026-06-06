@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import secrets
+import select
 import shutil
 import subprocess
 import time
@@ -66,6 +67,137 @@ def _sherpa_available() -> bool:
     return py.is_file()
 
 
+def _sherpa_env() -> dict[str, str]:
+    """Build env with PYTHONPATH so the sherpa venv can find our package."""
+    import claude_code_tts as _self_pkg
+    pkg_parent = str(Path(_self_pkg.__file__).resolve().parent.parent)
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{pkg_parent}:{existing}" if existing else pkg_parent
+    return env
+
+
+class _SherpaWorker:
+    """Persistent sherpa-onnx subprocess — model loaded once, reused per request.
+
+    Keeps one long-lived Python process alive in the isolated sherpa venv so
+    the ONNX model stays in memory. Each call to generate() sends a JSON-line
+    request and reads a JSON-line response. Auto-restarts if the process dies.
+    """
+
+    def __init__(self, model_id: str) -> None:
+        self.model_id = model_id
+        self._proc: subprocess.Popen | None = None
+
+    def _alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def _start(self) -> bool:
+        model_dir = SHERPA_MODELS_DIR / self.model_id
+        if not model_dir.is_dir():
+            debug(f"sherpa worker: model dir missing: {model_dir}")
+            return False
+        if not _sherpa_available():
+            debug(f"sherpa worker: venv not bootstrapped at {SHERPA_VENV_DIR}")
+            return False
+
+        try:
+            proc = subprocess.Popen(
+                [
+                    str(_sherpa_python()),
+                    "-m", "claude_code_tts.sherpa_speak",
+                    "--serve",
+                    "--model-dir", str(model_dir),
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=_sherpa_env(),
+            )
+            # Wait up to 120s for model load — no-data after that means a hang.
+            ready = select.select([proc.stdout], [], [], 120.0)[0]  # type: ignore[union-attr]
+            if not ready:
+                debug("sherpa worker: timed out waiting for ready signal (>120s)")
+                proc.terminate()
+                return False
+            ready_line = proc.stdout.readline()  # type: ignore[union-attr]
+            try:
+                resp = json.loads(ready_line)
+            except (json.JSONDecodeError, TypeError):
+                debug(f"sherpa worker: unexpected ready response: {ready_line!r}")
+                proc.terminate()
+                return False
+            if not resp.get("ready"):
+                debug(f"sherpa worker: failed to start: {resp.get('error')}")
+                proc.terminate()
+                return False
+            self._proc = proc
+            debug(f"sherpa worker started for model {self.model_id} (PID {proc.pid})")
+            return True
+        except OSError as e:
+            debug(f"sherpa worker start failed: {e}")
+            return False
+
+    def generate(self, text: str, *, speaker: int, speed: float, output_path: Path) -> bool:
+        if not self._alive():
+            if not self._start():
+                return False
+
+        req = json.dumps({
+            "text": text,
+            "output": str(output_path),
+            "speaker": speaker,
+            "speed": speed,
+        })
+        try:
+            assert self._proc and self._proc.stdin and self._proc.stdout
+            self._proc.stdin.write(req + "\n")
+            self._proc.stdin.flush()
+            resp_line = self._proc.stdout.readline()
+            resp = json.loads(resp_line)
+            if resp.get("ok"):
+                return True
+            debug(f"sherpa worker: generation failed: {resp.get('error')}")
+            return False
+        except (OSError, json.JSONDecodeError, AssertionError) as e:
+            debug(f"sherpa worker: communication error: {e}")
+            if self._proc:
+                try:
+                    self._proc.terminate()
+                except Exception:
+                    pass
+                self._proc = None
+            return False
+
+
+_sherpa_workers: dict[str, _SherpaWorker] = {}
+
+
+def _get_sherpa_worker(model_id: str) -> _SherpaWorker:
+    if model_id not in _sherpa_workers:
+        _sherpa_workers[model_id] = _SherpaWorker(model_id)
+    return _sherpa_workers[model_id]
+
+
+def warm_sherpa_workers(personas: dict) -> None:
+    """Pre-start sherpa workers for all personas that have voice_sherpa set.
+
+    Call at daemon startup so the first speech request doesn't block on model
+    load. Blocking here is intentional — better to wait at startup than to
+    freeze mid-session.
+    """
+    seen: set[str] = set()
+    for persona_config in personas.values():
+        model_id = persona_config.get("voice_sherpa", "")
+        if model_id and model_id not in seen:
+            seen.add(model_id)
+            worker = _get_sherpa_worker(model_id)
+            if not worker._alive():
+                debug(f"warming sherpa worker for model: {model_id}")
+                worker._start()  # blocks until model is loaded
+
+
 def _generate_sherpa(
     text: str,
     *,
@@ -74,7 +206,7 @@ def _generate_sherpa(
     speed: float,
     output_path: Path,
 ) -> Path | None:
-    """Invoke the sherpa helper inside the isolated venv."""
+    """Generate speech via the persistent sherpa worker (model stays in memory)."""
     model_dir = SHERPA_MODELS_DIR / model_id
     if not model_dir.is_dir():
         debug(f"sherpa: model dir missing: {model_dir}")
@@ -83,34 +215,11 @@ def _generate_sherpa(
         debug(f"sherpa: venv not bootstrapped at {SHERPA_VENV_DIR}")
         return None
 
-    cmd = [
-        str(_sherpa_python()),
-        "-m", "claude_code_tts.sherpa_speak",
-        "--model-dir", str(model_dir),
-        "--output", str(output_path),
-        "--speaker", str(speaker),
-        "--speed", f"{speed:.3f}",
-    ]
-    try:
-        # The sherpa venv's interpreter needs to find claude_code_tts.sherpa_speak.
-        # We add this package's parent dir to PYTHONPATH so the module resolves
-        # without requiring the sherpa venv to install our package.
-        import claude_code_tts as _self_pkg
-        pkg_parent = str(Path(_self_pkg.__file__).resolve().parent.parent)
-        env = os.environ.copy()
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = f"{pkg_parent}:{existing}" if existing else pkg_parent
-
-        result = subprocess.run(
-            cmd, input=text, text=True, capture_output=True, timeout=30, env=env,
-        )
-        if result.returncode != 0:
-            debug(f"sherpa: rc={result.returncode} stderr={result.stderr.strip()[:200]}")
-            return None
+    worker = _get_sherpa_worker(model_id)
+    sid = speaker if speaker >= 0 else 0
+    if worker.generate(text, speaker=sid, speed=speed, output_path=output_path):
         if output_path.exists():
             return output_path
-    except (subprocess.TimeoutExpired, OSError) as e:
-        debug(f"sherpa: subprocess error: {e}")
     return None
 
 

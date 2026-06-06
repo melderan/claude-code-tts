@@ -22,7 +22,9 @@ docs/sherpa-models.md (forthcoming).
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import wave
 from pathlib import Path
 
 
@@ -97,25 +99,138 @@ def _build_tts(model_dir: Path):
     return sherpa_onnx.OfflineTts(cfg)
 
 
+# Kokoro's ONNX inference discards the first ~80-120ms of audio as it
+# initialises its internal state, clipping the first real syllable.
+# Fix: synthesise a short warm-up word first so the model eats that
+# instead of real content, then trim it from the output.
+_WARMUP_TEXT = "hey. "
+# How many seconds to trim from the front of the WAV after synthesis.
+# Must cover: warm-up artifact (~80ms) + _WARMUP_TEXT audio (~150ms at 1x).
+# Uses a speed-adaptive formula so it stays correct at any synthesis speed.
+_WARMUP_ARTIFACT_SEC = 0.10   # fixed model init cost
+_WARMUP_WORD_SEC_AT_1X = 0.28  # rough duration of "hey." at speed=1.0
+
+
+def _trim_leading_wav(wav_path: Path, trim_sec: float) -> None:
+    """Remove the first trim_sec seconds from a WAV file in-place."""
+    try:
+        with wave.open(str(wav_path), "rb") as r:
+            params = r.getparams()
+            trim_frames = int(trim_sec * params.framerate)
+            if trim_frames <= 0 or trim_frames >= params.nframes:
+                return
+            r.setpos(trim_frames)
+            remaining = params.nframes - trim_frames
+            audio_data = r.readframes(remaining)
+
+        tmp = wav_path.with_suffix(".trim.wav")
+        with wave.open(str(tmp), "wb") as w:
+            w.setparams(params._replace(nframes=remaining))
+            w.writeframes(audio_data)
+        tmp.replace(wav_path)
+    except Exception:
+        pass  # non-fatal
+
+
+def _serve_mode(model_dir: Path) -> int:
+    """Long-lived server: load model once, process JSON-line requests from stdin.
+
+    Protocol (one JSON object per line):
+      Request:  {"text": "...", "output": "/path/to/out.wav", "speaker": N, "speed": 1.0}
+      Response: {"ok": true} | {"ok": false, "error": "..."}
+
+    Signals readiness after model load:
+      {"ready": true}
+
+    Runs until stdin closes or an unrecoverable error occurs.
+    All non-JSON diagnostic output goes to stderr only.
+    """
+    try:
+        tts = _build_tts(model_dir)
+    except FileNotFoundError as e:
+        print(json.dumps({"ready": False, "error": str(e)}), flush=True)
+        return 4
+
+    import sherpa_onnx  # type: ignore[import-not-found]
+
+    # One-time warmup: Kokoro's ONNX runtime discards the first ~80-120ms of
+    # audio frames during session init. Synthesise a throw-away phrase now so
+    # all real requests are clean — no clipping, no audible prefix.
+    try:
+        tts.generate(_WARMUP_TEXT, sid=0, speed=1.0)
+    except Exception:
+        pass  # warmup failure is non-fatal; first real request may still clip
+
+    print(json.dumps({"ready": True}), flush=True)
+
+    for raw_line in sys.stdin:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError as e:
+            print(json.dumps({"ok": False, "error": f"bad json: {e}"}), flush=True)
+            continue
+
+        text: str = req.get("text", "")
+        output: str = req.get("output", "")
+        speaker: int = req.get("speaker", 0)
+        speed: float = req.get("speed", 1.0)
+
+        if not text.strip():
+            print(json.dumps({"ok": False, "error": "empty text"}), flush=True)
+            continue
+        if not output:
+            print(json.dumps({"ok": False, "error": "no output path"}), flush=True)
+            continue
+
+        try:
+            sid = speaker if speaker >= 0 else 0
+            audio = tts.generate(text, sid=sid, speed=speed)
+            if not audio.samples:
+                print(json.dumps({"ok": False, "error": "no samples generated"}), flush=True)
+                continue
+            out_path = Path(output)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            sherpa_onnx.write_wave(str(out_path), audio.samples, audio.sample_rate)
+            print(json.dumps({"ok": True}), flush=True)
+        except Exception as e:
+            print(json.dumps({"ok": False, "error": str(e)}), flush=True)
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Generate speech via sherpa-onnx.")
     p.add_argument("--model-dir", required=True, type=Path,
                    help="Directory containing the sherpa-onnx model artifacts.")
-    p.add_argument("--output", required=True, type=Path,
-                   help="Output WAV path.")
+    p.add_argument("--serve", action="store_true",
+                   help="Run as a persistent worker: load model once, accept JSON requests "
+                        "on stdin, write JSON responses to stdout.")
+    p.add_argument("--output", type=Path, default=None,
+                   help="Output WAV path (single-shot mode only).")
     p.add_argument("--speaker", type=int, default=-1,
                    help="Speaker ID for multi-speaker models (libritts, vctk, kokoro). "
                         "-1 = model default.")
     p.add_argument("--speed", type=float, default=1.0,
                    help="Speed multiplier passed to OfflineTts.generate.")
     p.add_argument("--text", default=None,
-                   help="Text to speak. If omitted, read from stdin.")
+                   help="Text to speak (single-shot mode). If omitted, read from stdin.")
     args = p.parse_args(argv)
 
     model_dir: Path = args.model_dir.expanduser()
     if not model_dir.is_dir():
         print(f"sherpa_speak: model dir not found: {model_dir}", file=sys.stderr)
         return 2
+
+    if args.serve:
+        return _serve_mode(model_dir)
+
+    # Single-shot mode (original behaviour)
+    if args.output is None:
+        print("sherpa_speak: --output is required in single-shot mode", file=sys.stderr)
+        return 1
 
     text = args.text if args.text is not None else sys.stdin.read()
     if not text.strip():
