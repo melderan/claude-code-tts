@@ -21,7 +21,7 @@ from datetime import datetime
 from io import TextIOWrapper
 from pathlib import Path
 
-from claude_code_tts.audio import generate_speech as _generate_speech, detect_player
+from claude_code_tts.audio import generate_speech as _generate_speech, detect_player, warm_sherpa_workers
 from claude_code_tts.config import (
     TTS_CONFIG_DIR,
     TTS_QUEUE_DIR,
@@ -679,6 +679,15 @@ def daemon_loop(lockpick: bool = False) -> None:
     else:
         speak_announcement("Voice daemon online. Ready when you are.")
         log("Startup announcement complete")
+
+    # Pre-warm sherpa workers after startup announcement so the first real
+    # speech request isn't blocked on model load. Runs synchronously here;
+    # the daemon is idle at this point so blocking is fine.
+    personas = raw_config.get("personas", {})
+    if any(p.get("voice_sherpa") for p in personas.values()):
+        log("Pre-warming sherpa worker(s)...")
+        warm_sherpa_workers(personas)
+        log("Sherpa worker(s) ready")
 
     while not _shutdown_requested:
         try:

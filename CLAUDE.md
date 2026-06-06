@@ -1,6 +1,6 @@
 # Claude Code TTS - Instructions for Claude
 
-Welcome, fellow Claude! TTS for Claude Code using Piper and Kokoro. Version 9.8.3.
+Welcome, fellow Claude! TTS for Claude Code using Piper and Kokoro. Version 9.8.5.
 
 ## Ownership
 
@@ -27,7 +27,7 @@ This is a public open-source repo. Do not commit:
 - References to private systems, services, or infrastructure outside this project
 - Personal paths or tooling that isn't part of this codebase
 
-When in doubt, don't commit it.
+When in doubt, ask your friend before commit. A little pre-work goes a long way.
 
 ## Ethos
 
