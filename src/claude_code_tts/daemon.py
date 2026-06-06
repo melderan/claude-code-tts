@@ -329,6 +329,9 @@ def daemon_generate_speech(
     voice_path = VOICES_DIR / f"{voice_name}.onnx"
     speed = persona_config.get("speed", 2.0)
     speed_method = persona_config.get("speed_method", "playback")
+    voice_sherpa = persona_config.get("voice_sherpa", "")
+    speaker_sherpa = int(persona_config.get("speaker_sherpa", -1))
+    pitch_filter = persona_config.get("pitch_filter", "")
 
     # Fall back to default voice if persona voice not found
     if not voice_path.exists():
@@ -348,9 +351,12 @@ def daemon_generate_speech(
         voice_path=voice_path if voice_path.exists() else None,
         voice_kokoro=kokoro_voice,
         voice_kokoro_blend=kokoro_blend,
+        voice_sherpa=voice_sherpa,
+        speaker_sherpa=speaker_sherpa,
         speed=speed,
         speed_method=speed_method,
         output_path=output_file,
+        pitch_filter=pitch_filter,
         **tone_kwargs,
     )
     return result is not None
@@ -807,6 +813,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             speed_method = msg.get("speed_method", persona_config.get("speed_method", "playback"))
             voice_kokoro = msg.get("voice_kokoro", "")
             voice_kokoro_blend = msg.get("voice_kokoro_blend", "")
+            pitch_filter_msg = msg.get("pitch_filter", "")
 
             # Apply tone speed factor
             effective_speed = speed * tone.speed_factor
@@ -853,6 +860,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 "speed_method": speed_method,
                 "voice_kokoro": voice_kokoro,
                 "voice_kokoro_blend": voice_kokoro_blend,
+                "pitch_filter": pitch_filter_msg,
             }
             write_playback_state(current_message=current_msg_info)
 

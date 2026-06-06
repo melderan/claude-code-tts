@@ -20,9 +20,15 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def no_pin():
-    """Bypass pinned-session lookup so legacy-path tests are isolated."""
-    with patch("claude_code_tts.session.read_pinned_session", return_value=None):
+def no_pin(tmp_path):
+    """Bypass pinned-session lookup so legacy-path tests are isolated.
+
+    Patches both read_pinned_session and ACTIVE_DIR (step 2.5) so that
+    the real latest.session file on disk doesn't bleed into these tests.
+    """
+    empty_active = tmp_path / "active"
+    with patch("claude_code_tts.session.read_pinned_session", return_value=None), \
+         patch("claude_code_tts.session.ACTIVE_DIR", empty_active):
         yield
 
 

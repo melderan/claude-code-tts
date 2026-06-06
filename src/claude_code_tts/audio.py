@@ -114,6 +114,23 @@ def _generate_sherpa(
     return None
 
 
+def _apply_pitch_filter(path: Path, pitch_filter: str) -> None:
+    """Apply ffmpeg pitch filter in-place. Silent no-op on any failure."""
+    if not pitch_filter or not path.exists() or not shutil.which("ffmpeg"):
+        return
+    tmp = path.with_suffix(".pf.wav")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error",
+             "-i", str(path), "-af", pitch_filter, str(tmp)],
+            capture_output=True, check=True, timeout=15,
+        )
+        tmp.replace(path)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+        debug(f"pitch_filter ffmpeg failed: {e}")
+        tmp.unlink(missing_ok=True)
+
+
 def generate_speech(
     text: str,
     *,
@@ -129,6 +146,7 @@ def generate_speech(
     noise_scale: float | None = None,
     noise_w_scale: float | None = None,
     sentence_silence: float | None = None,
+    pitch_filter: str = "",
 ) -> Path | None:
     """Generate a WAV file from text using Kokoro or Piper.
 
@@ -153,6 +171,7 @@ def generate_speech(
                 input=text, text=True, capture_output=True, timeout=30,
             )
             if output_path.exists():
+                _apply_pitch_filter(output_path, pitch_filter)
                 return output_path
         except (subprocess.TimeoutExpired, OSError):
             pass
@@ -165,6 +184,7 @@ def generate_speech(
                 input=text, text=True, capture_output=True, timeout=30,
             )
             if output_path.exists():
+                _apply_pitch_filter(output_path, pitch_filter)
                 return output_path
         except (subprocess.TimeoutExpired, OSError):
             pass
@@ -182,6 +202,7 @@ def generate_speech(
             output_path=output_path,
         )
         if wav:
+            _apply_pitch_filter(wav, pitch_filter)
             return wav
 
     # Priority 4: Piper
@@ -204,6 +225,7 @@ def generate_speech(
                 cmd, input=text, text=True, capture_output=True, timeout=30,
             )
             if output_path.exists():
+                _apply_pitch_filter(output_path, pitch_filter)
                 return output_path
         except (subprocess.TimeoutExpired, OSError):
             pass
@@ -262,6 +284,7 @@ def speak_direct(text: str, config: TTSConfig) -> None:
         speaker_sherpa=config.speaker_sherpa,
         speed=config.speed,
         speed_method=method,
+        pitch_filter=config.pitch_filter,
     )
     if wav:
         play_audio(wav, speed=config.speed, speed_method=method, background=True)
@@ -297,6 +320,7 @@ def write_queue_message(text: str, config: TTSConfig) -> Path:
         "voice_kokoro_blend": config.voice_kokoro_blend,
         "voice_sherpa": config.voice_sherpa,
         "speaker_sherpa": config.speaker_sherpa,
+        "pitch_filter": config.pitch_filter,
     }
 
     with open(queue_file, "w") as f:
