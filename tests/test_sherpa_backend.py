@@ -217,7 +217,7 @@ class TestSherpaConfigPlumbing:
 
 
 class TestSherpaQueueMessage:
-    """Queue mode (write_queue_message) carries voice_sherpa fields."""
+    """Queue mode (write_queue_message) carries voice_sherpa and pitch_filter fields."""
 
     def test_queue_message_includes_sherpa_fields(self, tmp_path, monkeypatch):
         from claude_code_tts.audio import write_queue_message
@@ -236,3 +236,133 @@ class TestSherpaQueueMessage:
         msg = json.loads(path.read_text())
         assert msg["voice_sherpa"] == "kokoro-multi"
         assert msg["speaker_sherpa"] == 3
+
+    def test_queue_message_includes_pitch_filter(self, tmp_path, monkeypatch):
+        from claude_code_tts.audio import write_queue_message
+        from claude_code_tts.config import TTSConfig
+        import json
+
+        monkeypatch.setattr(audio, "TTS_QUEUE_DIR", tmp_path / "queue")
+
+        cfg = TTSConfig(
+            pitch_filter="asetrate=24000*0.86,aresample=24000*1.0,atempo=1.0",
+            session_id="test",
+            project_name="test-project",
+        )
+        path = write_queue_message("hello", cfg)
+        msg = json.loads(path.read_text())
+        assert msg["pitch_filter"] == "asetrate=24000*0.86,aresample=24000*1.0,atempo=1.0"
+
+    def test_queue_message_pitch_filter_empty_by_default(self, tmp_path, monkeypatch):
+        from claude_code_tts.audio import write_queue_message
+        from claude_code_tts.config import TTSConfig
+        import json
+
+        monkeypatch.setattr(audio, "TTS_QUEUE_DIR", tmp_path / "queue")
+
+        cfg = TTSConfig(session_id="test", project_name="test-project")
+        path = write_queue_message("hello", cfg)
+        msg = json.loads(path.read_text())
+        assert msg["pitch_filter"] == ""
+
+
+class TestPitchFilter:
+    """_apply_pitch_filter applies ffmpeg in-place and fails silently."""
+
+    def test_noop_when_pitch_filter_empty(self, tmp_path):
+        from claude_code_tts.audio import _apply_pitch_filter
+
+        wav = tmp_path / "out.wav"
+        wav.write_bytes(b"RIFF")
+        with patch("claude_code_tts.audio.subprocess.run") as mock_run:
+            _apply_pitch_filter(wav, "")
+        mock_run.assert_not_called()
+        assert wav.read_bytes() == b"RIFF"
+
+    def test_noop_when_ffmpeg_missing(self, tmp_path):
+        from claude_code_tts.audio import _apply_pitch_filter
+
+        wav = tmp_path / "out.wav"
+        wav.write_bytes(b"RIFF")
+        with patch("claude_code_tts.audio.shutil.which", return_value=None), \
+             patch("claude_code_tts.audio.subprocess.run") as mock_run:
+            _apply_pitch_filter(wav, "asetrate=24000*0.86")
+        mock_run.assert_not_called()
+
+    def test_noop_when_file_missing(self, tmp_path):
+        from claude_code_tts.audio import _apply_pitch_filter
+
+        wav = tmp_path / "missing.wav"
+        with patch("claude_code_tts.audio.subprocess.run") as mock_run:
+            _apply_pitch_filter(wav, "asetrate=24000*0.86")
+        mock_run.assert_not_called()
+
+    def test_applies_ffmpeg_and_replaces_file(self, tmp_path):
+        from claude_code_tts.audio import _apply_pitch_filter
+
+        wav = tmp_path / "out.wav"
+        wav.write_bytes(b"RIFF-original")
+        tmp_pf = wav.with_suffix(".pf.wav")
+
+        def fake_run(cmd, **kwargs):
+            # Simulate ffmpeg writing the output file
+            Path(cmd[-1]).write_bytes(b"RIFF-deepened")
+            return MagicMock(returncode=0)
+
+        with patch("claude_code_tts.audio.shutil.which", return_value="/usr/bin/ffmpeg"), \
+             patch("claude_code_tts.audio.subprocess.run", side_effect=fake_run):
+            _apply_pitch_filter(wav, "asetrate=24000*0.86")
+
+        assert wav.read_bytes() == b"RIFF-deepened"
+        assert not tmp_pf.exists()
+
+    def test_silent_on_ffmpeg_failure(self, tmp_path):
+        from claude_code_tts.audio import _apply_pitch_filter
+
+        wav = tmp_path / "out.wav"
+        wav.write_bytes(b"RIFF-original")
+
+        with patch("claude_code_tts.audio.shutil.which", return_value="/usr/bin/ffmpeg"), \
+             patch("claude_code_tts.audio.subprocess.run",
+                   side_effect=subprocess.CalledProcessError(1, "ffmpeg")):
+            _apply_pitch_filter(wav, "asetrate=24000*0.86")
+
+        # Original file untouched, no crash
+        assert wav.read_bytes() == b"RIFF-original"
+
+    def test_pitch_filter_loaded_from_persona(self, tmp_path, monkeypatch):
+        """load_config reads pitch_filter from the persona block."""
+        import json
+        from claude_code_tts.config import load_config
+
+        monkeypatch.setattr("claude_code_tts.config.HOME", tmp_path)
+        monkeypatch.setattr("claude_code_tts.config.TTS_CONFIG_DIR", tmp_path / ".claude-tts")
+        monkeypatch.setattr(
+            "claude_code_tts.config.TTS_CONFIG_FILE",
+            tmp_path / ".claude-tts" / "config.json",
+        )
+        monkeypatch.setattr(
+            "claude_code_tts.config.TTS_SESSIONS_DIR",
+            tmp_path / ".claude-tts" / "sessions.d",
+        )
+
+        cfg_dir = tmp_path / ".claude-tts"
+        cfg_dir.mkdir()
+        (cfg_dir / "config.json").write_text(json.dumps({
+            "active_persona": "lode",
+            "personas": {
+                "lode": {
+                    "voice_sherpa": "kokoro-en-v0_19",
+                    "speaker_sherpa": 5,
+                    "speed": 2.0,
+                    "pitch_filter": "asetrate=24000*0.86,aresample=24000*1.0,atempo=1.0",
+                },
+            },
+        }))
+
+        cfg = load_config("test-session")
+        assert cfg.pitch_filter == "asetrate=24000*0.86,aresample=24000*1.0,atempo=1.0"
+
+    def test_default_pitch_filter_is_empty(self):
+        from claude_code_tts.config import TTSConfig
+        assert TTSConfig().pitch_filter == ""
