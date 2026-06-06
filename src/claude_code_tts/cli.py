@@ -1583,16 +1583,13 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
     if hook_type == "stop":
         pai_summary = extract_pai_summary(text)
         if pai_summary:
-            import dataclasses
             # Strip all 🗣️ lines from body (labeled and label-less)
             _head = "\U0001F5E3️?"
             body = re.sub(r"^\s*" + _head + r"\s*.*$", "", text, flags=re.MULTILINE).strip()
             body_notes = filter_text(body) if body else ""
             if body_notes and len(body_notes) >= 10:
                 speak(body_notes, cfg)
-            # Speak 🗣️ summary at 1x — deliberate identity pace
-            summary_cfg = dataclasses.replace(cfg, speed=1.0)
-            speak(pai_summary, summary_cfg)
+            speak(pai_summary, cfg)
             debug(f"stop: PAI summary detected, speaking: {pai_summary[:80]}")
             return
 
