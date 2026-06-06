@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import wave
 from pathlib import Path
 
 
@@ -99,37 +98,11 @@ def _build_tts(model_dir: Path):
     return sherpa_onnx.OfflineTts(cfg)
 
 
-# Kokoro's ONNX inference discards the first ~80-120ms of audio as it
-# initialises its internal state, clipping the first real syllable.
-# Fix: synthesise a short warm-up word first so the model eats that
-# instead of real content, then trim it from the output.
-_WARMUP_TEXT = "hey. "
-# How many seconds to trim from the front of the WAV after synthesis.
-# Must cover: warm-up artifact (~80ms) + _WARMUP_TEXT audio (~150ms at 1x).
-# Uses a speed-adaptive formula so it stays correct at any synthesis speed.
-_WARMUP_ARTIFACT_SEC = 0.10   # fixed model init cost
-_WARMUP_WORD_SEC_AT_1X = 0.28  # rough duration of "hey." at speed=1.0
-
-
-def _trim_leading_wav(wav_path: Path, trim_sec: float) -> None:
-    """Remove the first trim_sec seconds from a WAV file in-place."""
-    try:
-        with wave.open(str(wav_path), "rb") as r:
-            params = r.getparams()
-            trim_frames = int(trim_sec * params.framerate)
-            if trim_frames <= 0 or trim_frames >= params.nframes:
-                return
-            r.setpos(trim_frames)
-            remaining = params.nframes - trim_frames
-            audio_data = r.readframes(remaining)
-
-        tmp = wav_path.with_suffix(".trim.wav")
-        with wave.open(str(tmp), "wb") as w:
-            w.setparams(params._replace(nframes=remaining))
-            w.writeframes(audio_data)
-        tmp.replace(wav_path)
-    except Exception:
-        pass  # non-fatal
+# Kokoro needs a priming phrase before real content or it skips the first
+# word's phonemes. We prepend _WARMUP_TEXT, then trim exactly that many
+# samples from the output — measured by synthesising the warmup alone so
+# there's no hardcoded duration estimate.
+_WARMUP_TEXT = "Hey. "
 
 
 def _serve_mode(model_dir: Path) -> int:
@@ -163,6 +136,11 @@ def _serve_mode(model_dir: Path) -> int:
 
     print(json.dumps({"ready": True}), flush=True)
 
+    # Cache: (speaker_id, speed) -> warmup sample count.
+    # Populated on first synthesis for each combo; ONNX is deterministic so
+    # the same inputs always produce the same number of samples.
+    _warmup_trim_cache: dict[tuple[int, float], int] = {}
+
     for raw_line in sys.stdin:
         line = raw_line.strip()
         if not line:
@@ -187,13 +165,30 @@ def _serve_mode(model_dir: Path) -> int:
 
         try:
             sid = speaker if speaker >= 0 else 0
-            audio = tts.generate(text, sid=sid, speed=speed)
+            cache_key = (sid, speed)
+
+            # Measure warmup length on first call for this speaker+speed pair.
+            if cache_key not in _warmup_trim_cache:
+                try:
+                    w = tts.generate(_WARMUP_TEXT, sid=sid, speed=speed)
+                    _warmup_trim_cache[cache_key] = len(w.samples)
+                except Exception:
+                    _warmup_trim_cache[cache_key] = 0
+
+            # Synthesise warmup + content, then slice off exactly the warmup
+            # samples. This primes Kokoro's phoneme context without the user
+            # hearing the preamble word.
+            audio = tts.generate(_WARMUP_TEXT + text, sid=sid, speed=speed)
             if not audio.samples:
                 print(json.dumps({"ok": False, "error": "no samples generated"}), flush=True)
                 continue
+
+            trim_n = _warmup_trim_cache[cache_key]
+            clean = audio.samples[trim_n:] if trim_n < len(audio.samples) else audio.samples
+
             out_path = Path(output)
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            sherpa_onnx.write_wave(str(out_path), audio.samples, audio.sample_rate)
+            sherpa_onnx.write_wave(str(out_path), clean, audio.sample_rate)
             print(json.dumps({"ok": True}), flush=True)
         except Exception as e:
             print(json.dumps({"ok": False, "error": str(e)}), flush=True)
