@@ -136,6 +136,16 @@ def _filter_markdown(text: str) -> str:
     # Remove API error request IDs (e.g., "req_abc123...")
     text = re.sub(r"\breq_[a-zA-Z0-9_-]+\b", "", text)
 
+    # Strip emoji and pictographic symbols — TTS engines read their Unicode names
+    # aloud (e.g., "magnifying glass", "angular ruler") which is always noise.
+    text = re.sub(
+        r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF︀-️‍⃣]+",
+        " ", text,
+    )
+
+    # Strip box-drawing and block-element runs (Algorithm phase headers: ━━━ OBSERVE ━━━)
+    text = re.sub(r"[─-▟]+", "", text)
+
     # Clean up punctuation clusters that cause Piper to produce noise
     # artifacts. E.g., ".)" or "?)" or "!]" -- Piper generates end-of-
     # sentence prosody on the first mark, then chokes on the second.
