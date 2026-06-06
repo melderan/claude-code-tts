@@ -195,7 +195,7 @@ class TestPAISummaryExtraction:
     """Stop hook speaks only the 🗣️ summary line from PAI-formatted responses."""
 
     def test_labeled_pai_line_speaks_summary_only(self, tmp_path, fake_state_dir):
-        """Transcript with 🗣️ Lode: <summary> → only the summary is spoken."""
+        """Transcript with 🗣️ Lode: <summary> → summary always present in spoken output."""
         projects = tmp_path / "projects" / "-Users-jwmoore"
         transcript = projects / "uuid-pai-a.jsonl"
         pai_block = (
@@ -204,7 +204,8 @@ class TestPAISummaryExtraction:
         )
         _write_transcript(transcript, [_user("go"), _assistant(pai_block)])
         spoken = _run_hook(transcript, "stop")
-        assert spoken == "Voice bridge online; PAI now speaks through claude-code-tts."
+        assert spoken is not None
+        assert spoken.endswith("Voice bridge online; PAI now speaks through claude-code-tts.")
 
     def test_no_pai_line_falls_through_to_filter(self, tmp_path, fake_state_dir):
         """Transcript with no 🗣️ line uses the existing filter_text path unchanged."""
@@ -218,7 +219,7 @@ class TestPAISummaryExtraction:
         assert "Done" in spoken
 
     def test_multiple_pai_lines_last_wins(self, tmp_path, fake_state_dir):
-        """When multiple 🗣️ lines present, the last one is spoken."""
+        """When multiple 🗣️ lines present, the last summary is spoken (body+summary combined)."""
         projects = tmp_path / "projects" / "-Users-jwmoore"
         transcript = projects / "uuid-pai-c.jsonl"
         pai_block = (
@@ -228,7 +229,9 @@ class TestPAISummaryExtraction:
         )
         _write_transcript(transcript, [_user("go"), _assistant(pai_block)])
         spoken = _run_hook(transcript, "stop")
-        assert spoken == "Second summary line that wins."
+        assert spoken is not None
+        assert spoken.endswith("Second summary line that wins.")
+        assert "First summary line" not in spoken
 
     def test_labelless_pai_line_strips_emoji_only(self, tmp_path, fake_state_dir):
         """🗣️ line with no label: emoji stripped, rest spoken."""
