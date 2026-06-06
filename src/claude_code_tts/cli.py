@@ -1588,8 +1588,10 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
             body = re.sub(r"^\s*" + _head + r"\s*.*$", "", text, flags=re.MULTILINE).strip()
             body_notes = filter_text(body) if body else ""
             if body_notes and len(body_notes) >= 10:
-                speak(body_notes, cfg)
-            speak(pai_summary, cfg)
+                combined = body_notes.rstrip() + " " + pai_summary
+            else:
+                combined = pai_summary
+            speak(combined, cfg)
             debug(f"stop: PAI summary detected, speaking: {pai_summary[:80]}")
             return
 
