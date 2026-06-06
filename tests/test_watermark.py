@@ -99,7 +99,7 @@ def _run_hook(transcript_path: Path, hook_type: str, tool_name: str = "Bash") ->
         )
         _speak_from_hook(args)
 
-    return spoken[0] if spoken else None
+    return spoken[-1] if spoken else None
 
 
 class TestWatermarkScoping:

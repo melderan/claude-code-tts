@@ -275,6 +275,9 @@ def speak_direct(text: str, config: TTSConfig) -> None:
     if not method:
         method = "playback" if plat == "macos" else "length_scale"
 
+    # Sherpa applies speed during synthesis — don't also apply it at playback
+    effective_method = "length_scale" if config.voice_sherpa else method
+
     wav = generate_speech(
         text,
         voice_path=config.voice_path,
@@ -283,11 +286,11 @@ def speak_direct(text: str, config: TTSConfig) -> None:
         voice_sherpa=config.voice_sherpa,
         speaker_sherpa=config.speaker_sherpa,
         speed=config.speed,
-        speed_method=method,
+        speed_method=effective_method,
         pitch_filter=config.pitch_filter,
     )
     if wav:
-        play_audio(wav, speed=config.speed, speed_method=method, background=True)
+        play_audio(wav, speed=config.speed, speed_method=effective_method, background=True)
     elif shutil.which("say"):
         # Last resort fallback
         rate = int(config.speed * 200)
