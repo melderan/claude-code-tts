@@ -61,6 +61,7 @@ class TTSConfig:
     # multi-speaker models; -1 means "use the model's default".
     voice_sherpa: str = ""
     speaker_sherpa: int = -1
+    pitch_filter: str = ""  # ffmpeg -af filter applied after synthesis (e.g. for pitch shift)
     max_chars: int = 10000
     active_persona: str = "claude-prime"
     session_id: str = ""
@@ -278,6 +279,7 @@ def load_config(session_id: str | None = None) -> TTSConfig:
         cfg.voice_kokoro_blend = persona.get("voice_kokoro_blend", "")
         cfg.voice_sherpa = persona.get("voice_sherpa", "")
         cfg.speaker_sherpa = int(persona.get("speaker_sherpa", -1))
+        cfg.pitch_filter = persona.get("pitch_filter", "")
 
     # Step 3: Determine mute state
     # Priority: session-level > global mute > default_muted for new sessions
