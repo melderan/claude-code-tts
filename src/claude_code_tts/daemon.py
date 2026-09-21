@@ -46,6 +46,8 @@ RESPAWN_MARKER = TTS_CONFIG_DIR / "daemon.respawn"
 
 # Default voice model
 DEFAULT_VOICE = "en_US-hfc_male-medium"
+# (persona, voice) pairs already reported as missing, so the log says it once.
+_missing_voice_warned: set[tuple[str, str]] = set()
 
 # Global state
 _lock_fd: TextIOWrapper | None = None
@@ -335,8 +337,19 @@ def daemon_generate_speech(
     speaker_sherpa = int(persona_config.get("speaker_sherpa", -1))
     pitch_filter = persona_config.get("pitch_filter", "")
 
-    # Fall back to default voice if persona voice not found
-    if not voice_path.exists():
+    # Fall back to default voice if persona voice not found, and say so once
+    # per persona: a silent substitution sounds like the wrong voice with no
+    # trail to follow (found 2026-09-21 when a new persona's model was on
+    # another machine).
+    if not voice_path.exists() and not voice_sherpa and not kokoro_voice:
+        key = (persona, voice_name)
+        if key not in _missing_voice_warned:
+            _missing_voice_warned.add(key)
+            log(
+                f"Voice {voice_name} for persona {persona} is not installed at {voice_path}; "
+                f"using {DEFAULT_VOICE}. Fetch it with: claude-tts-install --voice {voice_name}",
+                "WARN",
+            )
         voice_path = VOICES_DIR / f"{DEFAULT_VOICE}.onnx"
 
     # Tone-aware generation parameters.

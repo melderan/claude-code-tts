@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "9.10.1"
+__version__ = "9.10.2"
 
 
 # --- Platform Detection ---
@@ -1755,6 +1755,33 @@ def do_preview_voices() -> None:
         do_preview_voices()
 
 
+def do_download_named_voices(names: list[str], dry_run: bool = False) -> int:
+    """Download the named voices from the curated list without prompting.
+
+    Returns the number of voices that are missing afterwards, so a scripted
+    caller (or a daemon log line) can tell whether it worked.
+    """
+    by_name = {v[0]: v for v in AVAILABLE_VOICES}
+    installed = get_installed_voices()
+    missing_after = 0
+    for name in names:
+        if name in installed:
+            success(f"{name} already installed")
+            continue
+        voice = by_name.get(name)
+        if voice is None:
+            error(f"{name} is not in the curated voice list")
+            info("Known voices: " + ", ".join(sorted(by_name)))
+            missing_after += 1
+            continue
+        info(f"Downloading {name}...")
+        if download_voice(name, voice[4], dry_run=dry_run):
+            success(f"{name} {'would be downloaded' if dry_run else 'downloaded'} to {VOICES_DIR}")
+        else:
+            missing_after += 1
+    return missing_after
+
+
 def do_download_voices() -> None:
     """Interactive voice download menu."""
     print()
@@ -2286,6 +2313,12 @@ Examples:
         help="Download new voice models from Hugging Face",
     )
     parser.add_argument(
+        "--voice",
+        action="append",
+        metavar="NAME",
+        help="Download one named voice model without prompting (repeatable)",
+    )
+    parser.add_argument(
         "--preview",
         action="store_true",
         help="Preview installed voice models",
@@ -2345,6 +2378,8 @@ Examples:
         do_install(dry_run=args.dry_run, upgrade=False)
     elif args.personas:
         do_manage_personas()
+    elif args.voice:
+        sys.exit(1 if do_download_named_voices(args.voice, dry_run=args.dry_run) else 0)
     elif args.voices:
         do_download_voices()
     elif args.preview:
