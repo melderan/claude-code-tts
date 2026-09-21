@@ -56,15 +56,9 @@ def cmd_status(args: argparse.Namespace) -> None:
         mute_source = "default"
 
     # Daemon status
-    pid_file = Path.home() / ".claude-tts" / "daemon.pid"
-    daemon_status = "not running"
-    if pid_file.exists():
-        try:
-            pid = int(pid_file.read_text().strip())
-            os.kill(pid, 0)
-            daemon_status = f"running (PID {pid})"
-        except (ValueError, OSError):
-            pass
+    from claude_code_tts.daemon import is_daemon_running
+    running, pid = is_daemon_running()
+    daemon_status = f"running (PID {pid})" if running else "not running"
 
     # Playback state
     playback_file = Path.home() / ".claude-tts" / "playback.json"
