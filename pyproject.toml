@@ -47,6 +47,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/claude_code_tts"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"hooks" = "claude_code_tts/hooks"
+"commands" = "claude_code_tts/commands"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

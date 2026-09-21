@@ -94,6 +94,7 @@ def _find_repo_dir() -> Path:
     """Find the repository root directory containing hooks/ and commands/."""
     # Check common locations
     candidates = [
+        SCRIPT_DIR,                 # installed wheel ships hooks/ and commands/ in the package
         SCRIPT_DIR.parent,          # scripts/install.py -> repo
         SCRIPT_DIR.parent.parent,   # src/claude_code_tts/install.py -> repo
         SCRIPT_DIR.parent.parent.parent,  # deeper package structures
