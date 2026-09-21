@@ -261,3 +261,16 @@ class TestVoicePreview:
             with patch.object(install, "VOICES_DIR", Path(tmpdir)):
                 result = install.preview_voice("nonexistent-voice")
                 assert result is False
+
+
+class TestFindRepoDirPrefersPackage:
+    def test_package_dir_wins_over_cwd(self, tmp_path, monkeypatch):
+        # An installed wheel has no repo around it; the files ship inside the package.
+        pkg = tmp_path / "site-packages" / "claude_code_tts"
+        for sub in ("hooks", "commands"):
+            (pkg / sub).mkdir(parents=True)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        monkeypatch.setattr(install, "SCRIPT_DIR", pkg)
+        assert install._find_repo_dir() == pkg
