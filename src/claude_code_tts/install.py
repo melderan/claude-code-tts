@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "9.10.3"
+from claude_code_tts import __version__
 
 
 # --- Platform Detection ---
