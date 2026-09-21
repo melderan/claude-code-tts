@@ -241,3 +241,176 @@ class TestPAISummaryExtraction:
         _write_transcript(transcript, [_user("status"), _assistant(pai_block)])
         spoken = _run_hook(transcript, "stop")
         assert spoken == "All tiers verified and serving on flare."
+
+
+# --- v9.10.0: summary-shaped prose, async-safe claims, unspoken intermediates ---
+
+
+def _redacted_thinking(msg_id: str) -> dict:
+    """Real reasoning as Claude Code 2.1.278 stores it: empty body, signature kept."""
+    return {
+        "type": "assistant",
+        "message": {"id": msg_id, "content": [{"type": "thinking", "thinking": "", "signature": "sig-real"}]},
+    }
+
+
+def _summary_thinking(msg_id: str, text: str) -> dict:
+    """The prose shown to the user, stored as a short signed thinking block."""
+    return {
+        "type": "assistant",
+        "message": {"id": msg_id, "content": [{"type": "thinking", "thinking": text, "signature": "sig-short"}]},
+    }
+
+
+def _full_thinking(msg_id: str, text: str) -> dict:
+    """A transcript that keeps full reasoning: non-empty body, no redacted twin."""
+    return {
+        "type": "assistant",
+        "message": {"id": msg_id, "content": [{"type": "thinking", "thinking": text, "signature": "sig"}]},
+    }
+
+
+def _tool_use(msg_id: str) -> dict:
+    return {
+        "type": "assistant",
+        "message": {"id": msg_id, "content": [{"type": "tool_use", "name": "Bash", "input": {}}]},
+    }
+
+
+def _assistant_msg(msg_id: str, text: str) -> dict:
+    return {"type": "assistant", "message": {"id": msg_id, "content": [{"type": "text", "text": text}]}}
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    monkeypatch.setattr("claude_code_tts.cli.time.sleep", lambda _s: None)
+
+
+class TestSummaryShapedProse:
+    """Prose stored as a signed thinking block beside redacted reasoning is spoken."""
+
+    def test_post_tool_use_speaks_summary_block(self, tmp_path, fake_state_dir):
+        transcript = tmp_path / "projects" / "-Users-jwmoore" / "uuid-S.jsonl"
+        _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
+        assert _run_hook(transcript, "stop") == "opening reply text here"
+
+        summary = "The debug log lived in the sandbox, so the evidence was lost. Reading the parser next."
+        with open(transcript, "a") as f:
+            for line in (_user("go"), _redacted_thinking("m1"), _summary_thinking("m1", summary),
+                         _tool_use("m1"), _tool_result()):
+                f.write(json.dumps(line) + "\n")
+
+        assert _run_hook(transcript, "post_tool_use") == summary
+
+    def test_full_reasoning_is_never_spoken(self, tmp_path, fake_state_dir):
+        transcript = tmp_path / "projects" / "-Users-jwmoore" / "uuid-F.jsonl"
+        _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
+        _run_hook(transcript, "stop")
+
+        with open(transcript, "a") as f:
+            for line in (_user("go"), _full_thinking("m1", "private reasoning that must stay private, long enough"),
+                         _tool_use("m1"), _tool_result()):
+                f.write(json.dumps(line) + "\n")
+
+        assert _run_hook(transcript, "post_tool_use") is None
+
+    def test_text_block_wins_over_summary_in_same_message(self, tmp_path, fake_state_dir):
+        transcript = tmp_path / "projects" / "-Users-jwmoore" / "uuid-T.jsonl"
+        _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
+        _run_hook(transcript, "stop")
+
+        with open(transcript, "a") as f:
+            for line in (_user("go"), _redacted_thinking("m1"), _summary_thinking("m1", "a rewrite of the text"),
+                         _assistant_msg("m1", "the verbatim text the user saw"), _tool_use("m1"), _tool_result()):
+                f.write(json.dumps(line) + "\n")
+
+        assert _run_hook(transcript, "post_tool_use") == "the verbatim text the user saw"
+
+
+class TestAsyncHookClaims:
+    """Two overlapping PostToolUse hooks that read the same text: one speaks."""
+
+    def test_second_hook_over_same_lines_is_silent(self, tmp_path, fake_state_dir):
+        transcript = tmp_path / "projects" / "-Users-jwmoore" / "uuid-C.jsonl"
+        _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
+        _run_hook(transcript, "stop")
+        with open(transcript, "a") as f:
+            for line in (_user("go"), _assistant_msg("m1", "intermediate update for the user"),
+                         _tool_use("m1"), _tool_result()):
+                f.write(json.dumps(line) + "\n")
+
+        assert _run_hook(transcript, "post_tool_use") == "intermediate update for the user"
+        assert _run_hook(transcript, "post_tool_use") is None
+
+    def test_claim_refuses_line_below_watermark(self, tmp_path):
+        from claude_code_tts.cli import _claim_watermark
+        state = tmp_path / "wm.state"
+        lock = tmp_path / "wm.lock"
+        state.write_text("10")
+        assert _claim_watermark(state, lock, text_line=12, line_count=15) is True
+        assert state.read_text() == "15"
+        assert _claim_watermark(state, lock, text_line=12, line_count=16) is False
+        assert state.read_text() == "15"
+
+
+class TestStopSpeaksUnspokenIntermediates:
+    def _transcript_with_missed_intermediates(self, tmp_path, name):
+        transcript = tmp_path / "projects" / "-Users-jwmoore" / f"{name}.jsonl"
+        _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
+        _run_hook(transcript, "stop")
+        with open(transcript, "a") as f:
+            for line in (_user("go"),
+                         _assistant_msg("m1", "first intermediate update text"), _tool_use("m1"), _tool_result(),
+                         _redacted_thinking("m2"), _summary_thinking("m2", "second intermediate as a summary block"),
+                         _tool_use("m2"), _tool_result(),
+                         _assistant_msg("m3", "the final response text")):
+                f.write(json.dumps(line) + "\n")
+        return transcript
+
+    def test_stop_reads_missed_intermediates_in_order(self, tmp_path, fake_state_dir):
+        transcript = self._transcript_with_missed_intermediates(tmp_path, "uuid-U")
+        spoken = _run_hook(transcript, "stop")
+        assert spoken == (
+            "first intermediate update text second intermediate as a summary block the final response text"
+        )
+
+    def test_stop_skips_missed_intermediates_when_intermediate_off(self, tmp_path, fake_state_dir):
+        transcript = self._transcript_with_missed_intermediates(tmp_path, "uuid-V")
+        spoken: list[str] = []
+        hook_input = json.dumps({"transcript_path": str(transcript), "tool_name": "Bash"})
+        with patch("sys.stdin", io.StringIO(hook_input)), \
+             patch("claude_code_tts.cli.load_config") as mock_load, \
+             patch("claude_code_tts.audio.speak", side_effect=lambda text, cfg: spoken.append(text)), \
+             patch("claude_code_tts.session.pin_session"):
+            mock_load.return_value = TTSConfig(
+                mode="direct", muted=False, intermediate=False,
+                session_id="-Users-jwmoore", project_name="home",
+            )
+            _speak_from_hook(argparse.Namespace(hook_type="stop"))
+        assert spoken == ["the final response text"]
+
+
+class TestTranscriptReread:
+    def test_post_tool_use_waits_for_lagging_transcript(self, tmp_path, fake_state_dir, monkeypatch):
+        transcript = tmp_path / "projects" / "-Users-jwmoore" / "uuid-L.jsonl"
+        _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
+        _run_hook(transcript, "stop")
+
+        def late_write(_seconds):
+            with open(transcript, "a") as f:
+                for line in (_user("go"), _assistant_msg("m1", "text that arrived a moment late"),
+                             _tool_use("m1"), _tool_result()):
+                    f.write(json.dumps(line) + "\n")
+
+        monkeypatch.setattr("claude_code_tts.cli.time.sleep", late_write)
+        assert _run_hook(transcript, "post_tool_use") == "text that arrived a moment late"
+
+    def test_task_tool_is_no_longer_skipped(self, tmp_path, fake_state_dir):
+        transcript = tmp_path / "projects" / "-Users-jwmoore" / "uuid-K.jsonl"
+        _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
+        _run_hook(transcript, "stop")
+        with open(transcript, "a") as f:
+            for line in (_user("go"), _assistant_msg("m1", "text before launching a sub-agent"),
+                         _tool_use("m1"), _tool_result()):
+                f.write(json.dumps(line) + "\n")
+        assert _run_hook(transcript, "post_tool_use", tool_name="Task") == "text before launching a sub-agent"

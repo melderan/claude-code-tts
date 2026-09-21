@@ -1529,16 +1529,20 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
         debug(f"{hook_type}: muted, skipping")
         return
 
+    tool_name = hook_data.get("tool_name", "")
+    agent_id = hook_data.get("agent_id", "")
+    debug(
+        f"{hook_type}: tool={tool_name or '-'} agent={agent_id or '-'} "
+        f"transcript={Path(transcript_path).stem} session={session_id}"
+    )
+
     # Skip intermediate speech if disabled
-    if hook_type == "post_tool_use":
-        if not cfg.intermediate:
-            debug("PostToolUse: intermediate disabled, skipping")
-            return
-        # Skip boilerplate tools
-        tool_name = hook_data.get("tool_name", "")
-        if tool_name in ("Task", "TodoWrite"):
-            debug(f"PostToolUse: skipping tool type {tool_name}")
-            return
+    if hook_type == "post_tool_use" and not cfg.intermediate:
+        debug("PostToolUse: intermediate disabled, skipping")
+        return
+    # Note: text written before a Task/TodoWrite call used to be skipped here.
+    # That text is as much for the user as any other, and the watermark keeps
+    # it from being spoken twice, so every tool is treated alike now.
 
     # Watermark handling.
     # Keyed by transcript UUID, not session_id, so two `claude` instances
@@ -1559,32 +1563,56 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
         time.sleep(0.1)
         watermark = _read_watermark(state_file, lock_dir, transcript)
         current_lines = _count_lines(transcript)
-        _write_watermark(state_file, lock_dir, current_lines)
+    elif current_lines <= watermark:
+        # Claude Code writes the transcript asynchronously; right after a tool
+        # call the file may not yet hold the tool_use line, let alone the text
+        # before it. Hooks run async since v9.10.0, so a short wait is free.
+        # Only the "nothing new at all" case waits: new lines without text is
+        # the normal shape of a second tool call in the same response.
+        for attempt in range(1, HOOK_REREAD_ATTEMPTS + 1):
+            time.sleep(HOOK_REREAD_DELAY)
+            current_lines = _count_lines(transcript)
+            if current_lines > watermark:
+                debug(f"{hook_type}: transcript caught up on reread {attempt}: current={current_lines}")
+                break
 
     if current_lines <= watermark:
+        if hook_type == "stop":
+            _write_watermark(state_file, lock_dir, current_lines)
         debug(f"{hook_type}: no new lines since last speak")
         return
 
     # Scan transcript for assistant text
-    text = _extract_assistant_text(transcript, watermark, hook_type)
-    if not text:
-        debug(f"{hook_type}: no assistant text found")
+    speakable = _speakable_messages(transcript, watermark, hook_type)
+    if not speakable:
+        if hook_type == "stop":
+            _write_watermark(state_file, lock_dir, current_lines)
+        debug(f"{hook_type}: no assistant text in lines {watermark}..{current_lines}")
         return
 
-    debug(f"{hook_type}: extracted {len(text)} chars: {text[:100]}...")
+    for line_no, source, msg_text in speakable:
+        debug(f"{hook_type}: line {line_no} {source} {len(msg_text)} chars: {msg_text[:100]!r}")
+
+    if hook_type == "stop":
+        text_line, _, text = speakable[-1]
+        unspoken = [t for _, _, t in speakable[:-1]]
+    else:
+        text_line, _, text = speakable[-1]
+        unspoken = []
 
     # For stop hooks: if this is a PAI response, speak body then 🗣️ summary.
     if hook_type == "stop":
         pai_summary = extract_pai_summary(text)
         if pai_summary:
             # Strip all 🗣️ lines from body (labeled and label-less)
-            _head = "\U0001F5E3️?"
+            _head = "\U0001F5E3\ufe0f?"
             body = re.sub(r"^\s*" + _head + r"\s*.*$", "", text, flags=re.MULTILINE).strip()
             body_notes = filter_text(body) if body else ""
             if body_notes and len(body_notes) >= 10:
                 combined = body_notes.rstrip() + " " + pai_summary
             else:
                 combined = pai_summary
+            _write_watermark(state_file, lock_dir, current_lines)
             speak(combined, cfg)
             debug(f"stop: PAI summary detected, speaking: {pai_summary[:80]}")
             return
@@ -1592,16 +1620,43 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
     # Filter and check length
     cliff_notes = filter_text(text)
     if not cliff_notes or len(cliff_notes) < 10:
+        if hook_type == "stop":
+            _write_watermark(state_file, lock_dir, current_lines)
         debug(f"{hook_type}: text too short after filtering")
         return
 
-    # Update watermark before speaking (for post_tool_use)
-    if hook_type == "post_tool_use":
+    # Intermediate texts that no PostToolUse hook spoke would otherwise be
+    # dropped here without a trace. With intermediate on, the Stop hook reads
+    # them in order before the final response; either way it says how many.
+    if hook_type == "stop" and unspoken:
+        if cfg.intermediate:
+            parts = [filter_text(t) for t in unspoken]
+            parts = [p for p in parts if p and len(p) >= 10]
+            debug(f"stop: {len(unspoken)} unspoken intermediate texts, speaking {len(parts)} before the response")
+            if parts:
+                cliff_notes = " ".join(parts) + " " + cliff_notes
+        else:
+            debug(f"stop: {len(unspoken)} unspoken intermediate texts skipped (intermediate off)")
+
+    # Claim the lines before speaking. Async hooks overlap, so two PostToolUse
+    # hooks can both read the same text; the claim makes exactly one of them
+    # speak it. Stop always advances the watermark to the end of the file.
+    if hook_type == "stop":
         _write_watermark(state_file, lock_dir, current_lines)
+    elif not _claim_watermark(state_file, lock_dir, text_line, current_lines):
+        debug(f"PostToolUse: line {text_line} already claimed by another hook, skipping")
+        return
+    else:
         debug(f"PostToolUse: watermark updated to {current_lines}")
 
     speak(cliff_notes, cfg)
-    debug(f"{hook_type}: speech queued/played")
+    debug(f"{hook_type}: speech queued/played ({len(cliff_notes)} chars)")
+
+
+# How long a PostToolUse hook waits for the transcript to catch up when it
+# finds nothing new at all. Hooks run async, so this never delays Claude Code.
+HOOK_REREAD_ATTEMPTS = 3
+HOOK_REREAD_DELAY = 0.2
 
 
 def _count_lines(path: Path) -> int:
@@ -1650,6 +1705,31 @@ def _write_watermark(state_file: Path, lock_dir: Path, line_count: int) -> None:
         _watermark_unlock(lock_dir)
 
 
+def _claim_watermark(state_file: Path, lock_dir: Path, text_line: int, line_count: int) -> bool:
+    """Advance the watermark past `line_count` unless `text_line` is already spoken.
+
+    Read-compare-write under the lock, so of several async hooks that found
+    the same text exactly one wins. Returns True for the winner.
+    """
+    _watermark_lock(lock_dir)
+    try:
+        wm = 0
+        if state_file.exists():
+            try:
+                wm = int(state_file.read_text().strip())
+            except (ValueError, OSError):
+                wm = 0
+        if text_line < wm:
+            return False
+        try:
+            state_file.write_text(str(line_count))
+        except OSError:
+            pass
+        return True
+    finally:
+        _watermark_unlock(lock_dir)
+
+
 def _watermark_lock(lock_dir: Path) -> None:
     """Acquire mkdir-based lock (works on macOS and Linux)."""
     for attempt in range(20):
@@ -1675,33 +1755,87 @@ def _watermark_unlock(lock_dir: Path) -> None:
     shutil.rmtree(lock_dir, ignore_errors=True)
 
 
-def _extract_assistant_text(transcript: Path, watermark: int, hook_type: str) -> str:
-    """Extract assistant text from transcript lines after watermark."""
+def _speakable_messages(transcript: Path, watermark: int, hook_type: str) -> list[tuple[int, str, str]]:
+    """Return (line_no, source, text) for each assistant message worth speaking.
+
+    Claude Code writes one transcript line per content block, so the blocks
+    of one API response are grouped by message id here. A message is spoken
+    from its text blocks when it has any. Since Claude Code 2.1.278 (seen with
+    Fable 5.1 on 2026-09-21) the prose before a tool call is sometimes stored
+    not as text but as a short non-empty `thinking` block, next to the model's
+    real reasoning stored with empty content and only a signature. In that
+    shape the non-empty block is what the user was shown, so it is spoken;
+    transcripts that keep full reasoning never match it. `source` is "text"
+    or "thinking-summary". For a Stop hook with no watermark only the last
+    message is returned, as before.
+    """
     try:
         with open(transcript) as f:
             all_lines = f.readlines()
     except OSError:
-        return ""
+        return []
 
     if hook_type == "stop" and watermark == 0:
         # No watermark: scan in reverse for last assistant message with text
-        for line in reversed(all_lines):
-            text = _parse_assistant_text(line)
+        for idx in range(len(all_lines) - 1, -1, -1):
+            text = _parse_assistant_text(all_lines[idx])
             if text:
-                return text
-        return ""
+                return [(idx, "text", text)]
+        return []
 
-    # Scan new lines (after watermark) for the last assistant text
-    new_lines = all_lines[watermark:]
-    last_text = ""
-    for line in new_lines:
-        text = _parse_assistant_text(line)
-        if text:
-            last_text = text
-            if hook_type == "stop":
-                continue  # Want the last one
-            # For post_tool_use, also want the last one
-    return last_text
+    order: list[str] = []
+    groups: dict[str, dict] = {}
+    for idx in range(watermark, len(all_lines)):
+        try:
+            data = json.loads(all_lines[idx])
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if data.get("type") != "assistant":
+            continue
+        message = data.get("message") or {}
+        content = message.get("content")
+        key = message.get("id") or data.get("uuid") or f"line-{idx}"
+        group = groups.get(key)
+        if group is None:
+            group = groups[key] = {"texts": [], "summaries": [], "redacted": False, "line": idx}
+            order.append(key)
+        if isinstance(content, str):
+            if content.strip():
+                group["texts"].append(content)
+                group["line"] = idx
+            continue
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("type")
+            if kind == "text" and item.get("text", "").strip():
+                group["texts"].append(item["text"])
+                group["line"] = idx
+            elif kind == "thinking":
+                body = (item.get("thinking") or "").strip()
+                if body and item.get("signature"):
+                    group["summaries"].append(body)
+                    if not group["texts"]:
+                        group["line"] = idx
+                elif not body:
+                    group["redacted"] = True
+
+    result: list[tuple[int, str, str]] = []
+    for key in order:
+        group = groups[key]
+        if group["texts"]:
+            result.append((group["line"], "text", " ".join(group["texts"])))
+        elif group["redacted"] and group["summaries"]:
+            result.append((group["line"], "thinking-summary", " ".join(group["summaries"])))
+    return result
+
+
+def _extract_assistant_text(transcript: Path, watermark: int, hook_type: str) -> str:
+    """Extract the last speakable assistant text after watermark (see _speakable_messages)."""
+    found = _speakable_messages(transcript, watermark, hook_type)
+    return found[-1][2] if found else ""
 
 
 def _parse_assistant_text(line: str) -> str:
