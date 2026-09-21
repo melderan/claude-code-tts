@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "9.9.2"
+__version__ = "9.10.0"
 
 
 # --- Platform Detection ---
@@ -974,13 +974,16 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
     # --- Configure settings.json ---
 
     print()
+    # Both speech hooks run async: Claude Code never waits on synthesis,
+    # playback, or the hook's short transcript reread.
     stop_hook_entry = {
         "matcher": "*",
         "hooks": [
             {
                 "type": "command",
                 "command": str(HOOKS_DIR / "speak-response.sh"),
-                "timeout": 180
+                "timeout": 180,
+                "async": True
             }
         ]
     }
@@ -990,7 +993,8 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
             {
                 "type": "command",
                 "command": str(HOOKS_DIR / "speak-intermediate.sh"),
-                "timeout": 30
+                "timeout": 30,
+                "async": True
             }
         ]
     }
@@ -1028,6 +1032,15 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
             settings["hooks"]["PostToolUse"].append(post_tool_hook_entry)
             changed = True
 
+        # Existing speech hook entries from older installs ran synchronously;
+        # mark them async so an upgrade changes them in place.
+        for event, script in (("Stop", "speak-response.sh"), ("PostToolUse", "speak-intermediate.sh")):
+            for entry in settings["hooks"].get(event, []):
+                for hook in entry.get("hooks", []):
+                    if script in hook.get("command", "") and hook.get("async") is not True:
+                        hook["async"] = True
+                        changed = True
+
         # Ensure UserPromptSubmit hook (voice context injection)
         if "UserPromptSubmit" not in settings["hooks"]:
             settings["hooks"]["UserPromptSubmit"] = []
@@ -1046,7 +1059,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
             if _ensure_tts_hooks(settings):
                 with open(SETTINGS_FILE, "w") as f:
                     json.dump(settings, f, indent=2)
-                success("Settings updated (added PostToolUse intermediate speech hook)")
+                success("Settings updated (speech hooks registered and marked async)")
             else:
                 info("Upgrade mode: keeping existing settings.json configuration")
                 success("Settings preserved")
@@ -1169,7 +1182,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
         print("  claude-tts daemon start     Start the TTS daemon")
         print("  claude-tts speak 'hello'    Test TTS directly")
         print()
-        print("Debug log: /tmp/claude_tts_debug.log")
+        print(f"Debug log: {TTS_CONFIG_DIR / 'debug.log'}")
         print()
 
         # Migrate legacy .sessions from config.json to sessions.d/
