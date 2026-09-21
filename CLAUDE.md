@@ -1,6 +1,9 @@
 # Claude Code TTS - Instructions for Claude
 
-Welcome, fellow Claude! TTS for Claude Code using Piper and Kokoro. Version 9.10.3.
+Welcome, fellow Claude! TTS for Claude Code using Piper and Kokoro. The current version is the
+one line imported here, so this file never needs a bump of its own:
+
+@src/claude_code_tts/__init__.py
 
 ## Ownership
 
@@ -200,7 +203,9 @@ Then push: `git push && git push --tags` (tags only needed for feat/fix)
 
 **Why this matters:** The version must reflect the exact state of the repo. Every commit changes the repo, so every commit needs a version bump.
 
-**If you forget:** The pre-push hook will block you. Amend your commit to include version files.
+**If you forget:** `claude-tts release --check` (which runs `scripts/check-version.sh`) fails. Amend
+your commit to include the bump. The version lives in one place, `src/claude_code_tts/__init__.py`;
+pyproject reads it at build time (hatch dynamic version) and the installer imports it.
 
 ## Testing Changes (IMPORTANT)
 
