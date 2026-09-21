@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
 import secrets
 import signal
 import subprocess
@@ -30,6 +31,7 @@ from claude_code_tts.config import (
 )
 from claude_code_tts.tone import classify_tone, ToneParams, DEFAULT_TONE
 from claude_code_tts.handy import save_speech_wav, AnalyzerThread
+from claude_code_tts.audio import last_error as audio_last_error
 from claude_code_tts.mic_watcher import MicWatcher
 
 # --- Daemon path constants ---
@@ -838,7 +840,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 voice_kokoro_blend_override=voice_kokoro_blend,
                 tone=tone,
             ):
-                log(f"Failed to generate speech for message from {project}", "ERROR")
+                log(f"Failed to generate speech for message from {project}: {audio_last_error()}", "ERROR")
                 msg_file.unlink(missing_ok=True)
                 continue
 
@@ -936,17 +938,41 @@ def daemon_loop(lockpick: bool = False) -> None:
 # --- Daemon Management ---
 
 
+def _heartbeat_fresh() -> bool:
+    try:
+        return time.time() - float(HEARTBEAT_FILE.read_text().strip()) <= 30
+    except (OSError, ValueError):
+        return False
+
+
 def is_daemon_running() -> tuple[bool, int | None]:
     """Check if daemon is running. Returns (is_running, pid)."""
     if not PID_FILE.exists():
         return False, None
     try:
         pid = int(PID_FILE.read_text().strip())
-        os.kill(pid, 0)
-        return True, pid
-    except (ValueError, ProcessLookupError, PermissionError):
+    except ValueError:
         PID_FILE.unlink(missing_ok=True)
         return False, None
+    # A fresh heartbeat wins: a sandbox sharing this directory cannot see the host pid.
+    if _heartbeat_fresh():
+        return True, pid
+    try:
+        os.kill(pid, 0)
+        return True, pid
+    except (ProcessLookupError, PermissionError):
+        PID_FILE.unlink(missing_ok=True)
+        return False, None
+
+
+def service_path_env(claude_tts_bin: str) -> str:
+    """PATH for the service: tool bins first, then the usual system dirs."""
+    dirs = [str(Path(claude_tts_bin).parent)]
+    piper = shutil.which("piper")
+    if piper:
+        dirs.append(str(Path(piper).parent))
+    dirs += ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+    return ":".join(dict.fromkeys(dirs))
 
 
 def start_daemon(lockpick: bool = False) -> bool:
@@ -1171,6 +1197,13 @@ def _install_launchd() -> None:
     <key>SuccessfulExit</key>
     <false/>
   </dict>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>{service_path_env(claude_tts_bin)}</string>
+    <key>HOME</key>
+    <string>{Path.home()}</string>
+  </dict>
   <key>StandardOutPath</key>
   <string>{LOG_FILE}</string>
   <key>StandardErrorPath</key>
@@ -1206,6 +1239,7 @@ Description=Claude Code TTS Daemon
 After=default.target
 
 [Service]
+Environment=PATH={service_path_env(claude_tts_bin)}
 ExecStart={claude_tts_bin} daemon foreground
 Restart=on-failure
 RestartSec=5

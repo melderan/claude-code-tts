@@ -240,6 +240,21 @@ def _apply_pitch_filter(path: Path, pitch_filter: str) -> None:
         tmp.unlink(missing_ok=True)
 
 
+_LAST_ERROR = ""
+
+
+def _set_last_error(msg: str) -> None:
+    global _LAST_ERROR
+    _LAST_ERROR = msg
+    if msg:
+        debug(f"speech generation: {msg}")
+
+
+def last_error() -> str:
+    """Why the most recent generate_speech() returned None, or empty."""
+    return _LAST_ERROR
+
+
 def generate_speech(
     text: str,
     *,
@@ -315,7 +330,11 @@ def generate_speech(
             return wav
 
     # Priority 4: Piper
-    if shutil.which("piper") and voice_path and voice_path.exists():
+    if not shutil.which("piper"):
+        _set_last_error(f"piper not on PATH ({os.environ.get('PATH', '')})")
+    elif not (voice_path and voice_path.exists()):
+        _set_last_error(f"voice model missing: {voice_path}")
+    else:
         cmd = ["piper", "--model", str(voice_path), "--output_file", str(output_path)]
         if speed_method == "length_scale" and speed > 0:
             length_scale = f"{1.0 / speed:.2f}"
@@ -330,14 +349,16 @@ def generate_speech(
         if sentence_silence is not None:
             cmd.extend(["--sentence_silence", f"{sentence_silence:.2f}"])
         try:
-            subprocess.run(
+            proc = subprocess.run(
                 cmd, input=text, text=True, capture_output=True, timeout=30,
             )
             if output_path.exists():
                 _apply_pitch_filter(output_path, pitch_filter)
+                _set_last_error("")
                 return output_path
-        except (subprocess.TimeoutExpired, OSError):
-            pass
+            _set_last_error(f"piper exit {proc.returncode}: {proc.stderr.strip()[-300:]}")
+        except (subprocess.TimeoutExpired, OSError) as e:
+            _set_last_error(f"piper failed to run: {e}")
 
     return None
 
