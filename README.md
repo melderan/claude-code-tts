@@ -31,6 +31,8 @@ uv tool install git+https://github.com/melderan/claude-code-tts
 claude-tts-install
 ```
 
+If uv is configured to refuse source builds, add `--build` to the first command; this package has no prebuilt wheel.
+
 ### Option 2: From source
 
 ```bash
@@ -41,7 +43,7 @@ claude-tts-install
 ```
 
 The installer auto-detects your platform and will:
-1. Install Piper TTS via pipx
+1. Install Piper TTS via uv (pipx if uv is absent)
 2. Download a voice model (~60MB)
 3. Install audio player (paplay on Linux/WSL)
 4. Configure Claude Code hooks and slash commands
