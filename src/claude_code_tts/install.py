@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 # Version of this installer/package
-__version__ = "9.10.2"
+__version__ = "9.10.3"
 
 
 # --- Platform Detection ---
@@ -166,6 +166,118 @@ def _manifest_entries():
         repo_subdir, install_dir = _manifest_dirs(category)
         for name in files:
             yield name, REPO_DIR / repo_subdir / name, install_dir / name
+
+
+# --- Claude Code settings.json hook registry ---
+#
+# Everything that touches a user's settings.json goes through these helpers.
+# They recognise our hooks by command, look at every hook in every entry, only
+# ever add or remove entries that are ours, and write the file atomically with
+# the user's non-ASCII intact.
+
+TTS_HOOK_EVENTS: dict[str, tuple[str, int]] = {
+    # event: (script, timeout seconds)
+    "Stop": ("speak-response.sh", 180),
+    "PostToolUse": ("speak-intermediate.sh", 30),
+    "UserPromptSubmit": ("voice-context.sh", 5),
+}
+# Both speech hooks run async so Claude Code never waits on synthesis or playback.
+TTS_ASYNC_SCRIPTS = ("speak-response.sh", "speak-intermediate.sh")
+TTS_HOOK_MARKERS = tuple(script for script, _ in TTS_HOOK_EVENTS.values()) + ("claude-tts speak --from-hook",)
+
+
+def _is_tts_hook(hook: dict) -> bool:
+    """True if a single hook dict is one of ours, by its command."""
+    command = hook.get("command", "") if isinstance(hook, dict) else ""
+    return any(marker in command for marker in TTS_HOOK_MARKERS)
+
+
+def _entry_hooks(entry: dict) -> list[dict]:
+    hooks = entry.get("hooks", []) if isinstance(entry, dict) else []
+    return [h for h in hooks if isinstance(h, dict)]
+
+
+def _tts_hook_entry(event: str, hooks_dir: Path) -> dict:
+    script, timeout = TTS_HOOK_EVENTS[event]
+    hook: dict = {"type": "command", "command": str(hooks_dir / script), "timeout": timeout}
+    if script in TTS_ASYNC_SCRIPTS:
+        hook["async"] = True
+    return {"matcher": "*", "hooks": [hook]}
+
+
+def ensure_tts_hooks(settings: dict, hooks_dir: Path | None = None) -> bool:
+    """Register our Stop, PostToolUse and UserPromptSubmit hooks in a settings dict.
+
+    Looks at every hook in every entry, so a TTS hook the user grouped with
+    their own is found and not duplicated. Existing speech hooks are marked
+    async in place. Returns True if the dict changed.
+    """
+    hooks_dir = hooks_dir or HOOKS_DIR
+    changed = False
+    hooks = settings.setdefault("hooks", {})
+    for event, (script, _timeout) in TTS_HOOK_EVENTS.items():
+        entries = hooks.setdefault(event, [])
+        present = any(
+            script in hook.get("command", "")
+            for entry in entries
+            for hook in _entry_hooks(entry)
+        )
+        if not present:
+            entries.append(_tts_hook_entry(event, hooks_dir))
+            changed = True
+        if script in TTS_ASYNC_SCRIPTS:
+            for entry in entries:
+                for hook in _entry_hooks(entry):
+                    if script in hook.get("command", "") and hook.get("async") is not True:
+                        hook["async"] = True
+                        changed = True
+    return changed
+
+
+def remove_tts_hooks(settings: dict) -> int:
+    """Remove our hooks from every event, leaving the user's hooks untouched.
+
+    A hook is removed from its group; a group left empty is removed; an event
+    left empty is removed; an empty "hooks" object is removed. Returns the
+    number of hooks removed.
+    """
+    removed = 0
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return 0
+    for event in list(hooks):
+        entries = hooks.get(event)
+        if not isinstance(entries, list):
+            continue
+        kept_entries = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                kept_entries.append(entry)
+                continue
+            kept_hooks = [h for h in entry.get("hooks", []) if not _is_tts_hook(h)]
+            removed += len(entry.get("hooks", [])) - len(kept_hooks)
+            if kept_hooks or "hooks" not in entry:
+                if kept_hooks != entry.get("hooks", []):
+                    entry = {**entry, "hooks": kept_hooks}
+                kept_entries.append(entry)
+        if kept_entries:
+            hooks[event] = kept_entries
+        else:
+            del hooks[event]
+    if not hooks:
+        del settings["hooks"]
+    return removed
+
+
+def write_settings(settings: dict, path: Path | None = None) -> None:
+    """Write settings.json atomically, keeping non-ASCII and the file mode."""
+    path = path or SETTINGS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".claude-tts.tmp")
+    tmp.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
+    if path.exists():
+        tmp.chmod(path.stat().st_mode & 0o777)
+    os.replace(tmp, path)
 
 
 # Hugging Face Piper voices base URL
@@ -492,34 +604,20 @@ def do_uninstall(dry_run: bool = False) -> None:
             mute_file.unlink()
         success("Removed mute file")
 
-    # Remove hook from settings.json
+    # Remove our hooks from settings.json: all three events, only our entries
     if SETTINGS_FILE.exists():
         with open(SETTINGS_FILE) as f:
             settings = json.load(f)
 
-        stop_hooks = settings.get("hooks", {}).get("Stop", [])
-        original_count = len(stop_hooks)
-
-        # Filter out TTS hook
-        stop_hooks = [
-            h
-            for h in stop_hooks
-            if not any(
-                "speak-response.sh" in hook.get("command", "")
-                for hook in h.get("hooks", [])
-            )
-        ]
-
-        if len(stop_hooks) < original_count:
+        removed = remove_tts_hooks(settings)
+        if removed:
             if dry_run:
-                dry("Remove speak-response.sh entry from settings.json")
+                dry(f"Remove {removed} TTS hook(s) from settings.json")
             else:
-                settings["hooks"]["Stop"] = stop_hooks
-                with open(SETTINGS_FILE, "w") as f:
-                    json.dump(settings, f, indent=2)
-            success("Removed hook from settings.json")
+                write_settings(settings)
+            success(f"Removed {removed} TTS hook(s) from settings.json")
         else:
-            info("No TTS hook found in settings.json")
+            info("No TTS hooks found in settings.json")
 
     # Clean up legacy scripts from ~/.claude-tts/
     legacy_removed = 0
@@ -974,91 +1072,13 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
     # --- Configure settings.json ---
 
     print()
-    # Both speech hooks run async: Claude Code never waits on synthesis,
-    # playback, or the hook's short transcript reread.
-    stop_hook_entry = {
-        "matcher": "*",
-        "hooks": [
-            {
-                "type": "command",
-                "command": str(HOOKS_DIR / "speak-response.sh"),
-                "timeout": 180,
-                "async": True
-            }
-        ]
-    }
-    post_tool_hook_entry = {
-        "matcher": "*",
-        "hooks": [
-            {
-                "type": "command",
-                "command": str(HOOKS_DIR / "speak-intermediate.sh"),
-                "timeout": 30,
-                "async": True
-            }
-        ]
-    }
-
-    user_prompt_hook_entry = {
-        "matcher": "*",
-        "hooks": [
-            {
-                "type": "command",
-                "command": str(HOOKS_DIR / "voice-context.sh"),
-                "timeout": 5
-            }
-        ]
-    }
-
-    def _ensure_tts_hooks(settings: dict) -> bool:
-        """Ensure Stop, PostToolUse, and UserPromptSubmit TTS hooks are registered. Returns True if changes were made."""
-        changed = False
-        if "hooks" not in settings:
-            settings["hooks"] = {}
-
-        # Ensure Stop hook
-        if "Stop" not in settings["hooks"]:
-            settings["hooks"]["Stop"] = []
-        has_stop = any("speak-response.sh" in h.get("hooks", [{}])[0].get("command", "") for h in settings["hooks"]["Stop"] if h.get("hooks"))
-        if not has_stop:
-            settings["hooks"]["Stop"].append(stop_hook_entry)
-            changed = True
-
-        # Ensure PostToolUse hook
-        if "PostToolUse" not in settings["hooks"]:
-            settings["hooks"]["PostToolUse"] = []
-        has_post = any("speak-intermediate.sh" in h.get("hooks", [{}])[0].get("command", "") for h in settings["hooks"]["PostToolUse"] if h.get("hooks"))
-        if not has_post:
-            settings["hooks"]["PostToolUse"].append(post_tool_hook_entry)
-            changed = True
-
-        # Existing speech hook entries from older installs ran synchronously;
-        # mark them async so an upgrade changes them in place.
-        for event, script in (("Stop", "speak-response.sh"), ("PostToolUse", "speak-intermediate.sh")):
-            for entry in settings["hooks"].get(event, []):
-                for hook in entry.get("hooks", []):
-                    if script in hook.get("command", "") and hook.get("async") is not True:
-                        hook["async"] = True
-                        changed = True
-
-        # Ensure UserPromptSubmit hook (voice context injection)
-        if "UserPromptSubmit" not in settings["hooks"]:
-            settings["hooks"]["UserPromptSubmit"] = []
-        has_voice = any("voice-context.sh" in h.get("hooks", [{}])[0].get("command", "") for h in settings["hooks"]["UserPromptSubmit"] if h.get("hooks"))
-        if not has_voice:
-            settings["hooks"]["UserPromptSubmit"].append(user_prompt_hook_entry)
-            changed = True
-
-        return changed
-
     if upgrade:
         # In upgrade mode, check if PostToolUse hook needs to be added
         if SETTINGS_FILE.exists():
             with open(SETTINGS_FILE) as f:
                 settings = json.load(f)
-            if _ensure_tts_hooks(settings):
-                with open(SETTINGS_FILE, "w") as f:
-                    json.dump(settings, f, indent=2)
+            if ensure_tts_hooks(settings):
+                write_settings(settings)
                 success("Settings updated (speech hooks registered and marked async)")
             else:
                 info("Upgrade mode: keeping existing settings.json configuration")
@@ -1073,9 +1093,8 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
         else:
             with open(SETTINGS_FILE) as f:
                 settings = json.load(f)
-            if _ensure_tts_hooks(settings):
-                with open(SETTINGS_FILE, "w") as f:
-                    json.dump(settings, f, indent=2)
+            if ensure_tts_hooks(settings):
+                write_settings(settings)
                 success("TTS hooks added to settings.json (preserving existing hooks)")
             else:
                 success("TTS hooks already configured in settings.json")
@@ -1085,10 +1104,8 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
             dry(f"Create {SETTINGS_FILE} with hook configuration")
         else:
             settings = {}
-            _ensure_tts_hooks(settings)
-            SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with open(SETTINGS_FILE, "w") as f:
-                json.dump(settings, f, indent=2)
+            ensure_tts_hooks(settings)
+            write_settings(settings)
             success("Created settings.json with hook configuration")
 
     # --- Verify installation ---

@@ -73,7 +73,7 @@ def base_config():
         intermediate=True,
         speed=2.0,
         active_persona="claude-prime",
-        session_id="-Users-jwmoore",
+        session_id="-Users-dev",
         project_name="home",
     )
 
@@ -95,7 +95,7 @@ def _run_hook(transcript_path: Path, hook_type: str, tool_name: str = "Bash") ->
          patch("claude_code_tts.session.pin_session"):
         mock_load.return_value = TTSConfig(
             mode="direct", muted=False, intermediate=True,
-            session_id="-Users-jwmoore", project_name="home",
+            session_id="-Users-dev", project_name="home",
         )
         _speak_from_hook(args)
 
@@ -106,7 +106,7 @@ class TestWatermarkScoping:
     """Watermark files are named per transcript UUID, not per session folder."""
 
     def test_state_file_uses_transcript_uuid(self, tmp_path, fake_state_dir):
-        projects = tmp_path / "projects" / "-Users-jwmoore"
+        projects = tmp_path / "projects" / "-Users-dev"
         transcript = projects / "uuid-A.jsonl"
         _write_transcript(transcript, [_user("hi there"), _assistant("hello there world")])
 
@@ -114,10 +114,10 @@ class TestWatermarkScoping:
 
         assert (fake_state_dir / "claude_tts_spoken_uuid-A.state").exists()
         # The legacy session-id-keyed name is NOT written.
-        assert not (fake_state_dir / "claude_tts_spoken_-Users-jwmoore.state").exists()
+        assert not (fake_state_dir / "claude_tts_spoken_-Users-dev.state").exists()
 
     def test_two_transcripts_have_independent_state(self, tmp_path, fake_state_dir):
-        projects = tmp_path / "projects" / "-Users-jwmoore"
+        projects = tmp_path / "projects" / "-Users-dev"
         ta = projects / "uuid-A.jsonl"
         tb = projects / "uuid-B.jsonl"
         _write_transcript(ta, [_user("hi there"), _assistant("hello from session A")])
@@ -144,7 +144,7 @@ class TestDuplicationRegression:
     the OTHER session's hook stale-resets the shared watermark."""
 
     def test_post_tool_use_does_not_replay_prior_turn(self, tmp_path, fake_state_dir):
-        projects = tmp_path / "projects" / "-Users-jwmoore"
+        projects = tmp_path / "projects" / "-Users-dev"
         ta = projects / "uuid-A.jsonl"
         tb = projects / "uuid-B.jsonl"
 
@@ -196,7 +196,7 @@ class TestPAISummaryExtraction:
 
     def test_labeled_pai_line_speaks_summary_only(self, tmp_path, fake_state_dir):
         """Transcript with 🗣️ Lode: <summary> → summary always present in spoken output."""
-        projects = tmp_path / "projects" / "-Users-jwmoore"
+        projects = tmp_path / "projects" / "-Users-dev"
         transcript = projects / "uuid-pai-a.jsonl"
         pai_block = (
             "════ PAI | NATIVE MODE ════\n"
@@ -209,7 +209,7 @@ class TestPAISummaryExtraction:
 
     def test_no_pai_line_falls_through_to_filter(self, tmp_path, fake_state_dir):
         """Transcript with no 🗣️ line uses the existing filter_text path unchanged."""
-        projects = tmp_path / "projects" / "-Users-jwmoore"
+        projects = tmp_path / "projects" / "-Users-dev"
         transcript = projects / "uuid-pai-b.jsonl"
         plain = "Done. The file has been updated with the requested changes."
         _write_transcript(transcript, [_user("fix it"), _assistant(plain)])
@@ -220,7 +220,7 @@ class TestPAISummaryExtraction:
 
     def test_multiple_pai_lines_last_wins(self, tmp_path, fake_state_dir):
         """When multiple 🗣️ lines present, the last summary is spoken (body+summary combined)."""
-        projects = tmp_path / "projects" / "-Users-jwmoore"
+        projects = tmp_path / "projects" / "-Users-dev"
         transcript = projects / "uuid-pai-c.jsonl"
         pai_block = (
             "\U0001F5E3 Connery: First summary line that should be ignored.\n"
@@ -235,7 +235,7 @@ class TestPAISummaryExtraction:
 
     def test_labelless_pai_line_strips_emoji_only(self, tmp_path, fake_state_dir):
         """🗣️ line with no label: emoji stripped, rest spoken."""
-        projects = tmp_path / "projects" / "-Users-jwmoore"
+        projects = tmp_path / "projects" / "-Users-dev"
         transcript = projects / "uuid-pai-d.jsonl"
         pai_block = "\U0001F5E3 All tiers verified and serving on flare."
         _write_transcript(transcript, [_user("status"), _assistant(pai_block)])
@@ -290,7 +290,7 @@ class TestSummaryShapedProse:
     """Prose stored as a signed thinking block beside redacted reasoning is spoken."""
 
     def test_post_tool_use_speaks_summary_block(self, tmp_path, fake_state_dir):
-        transcript = tmp_path / "projects" / "-Users-jwmoore" / "uuid-S.jsonl"
+        transcript = tmp_path / "projects" / "-Users-dev" / "uuid-S.jsonl"
         _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
         assert _run_hook(transcript, "stop") == "opening reply text here"
 
@@ -303,7 +303,7 @@ class TestSummaryShapedProse:
         assert _run_hook(transcript, "post_tool_use") == summary
 
     def test_full_reasoning_is_never_spoken(self, tmp_path, fake_state_dir):
-        transcript = tmp_path / "projects" / "-Users-jwmoore" / "uuid-F.jsonl"
+        transcript = tmp_path / "projects" / "-Users-dev" / "uuid-F.jsonl"
         _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
         _run_hook(transcript, "stop")
 
@@ -315,7 +315,7 @@ class TestSummaryShapedProse:
         assert _run_hook(transcript, "post_tool_use") is None
 
     def test_text_block_wins_over_summary_in_same_message(self, tmp_path, fake_state_dir):
-        transcript = tmp_path / "projects" / "-Users-jwmoore" / "uuid-T.jsonl"
+        transcript = tmp_path / "projects" / "-Users-dev" / "uuid-T.jsonl"
         _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
         _run_hook(transcript, "stop")
 
@@ -331,7 +331,7 @@ class TestAsyncHookClaims:
     """Two overlapping PostToolUse hooks that read the same text: one speaks."""
 
     def test_second_hook_over_same_lines_is_silent(self, tmp_path, fake_state_dir):
-        transcript = tmp_path / "projects" / "-Users-jwmoore" / "uuid-C.jsonl"
+        transcript = tmp_path / "projects" / "-Users-dev" / "uuid-C.jsonl"
         _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
         _run_hook(transcript, "stop")
         with open(transcript, "a") as f:
@@ -355,7 +355,7 @@ class TestAsyncHookClaims:
 
 class TestStopSpeaksUnspokenIntermediates:
     def _transcript_with_missed_intermediates(self, tmp_path, name):
-        transcript = tmp_path / "projects" / "-Users-jwmoore" / f"{name}.jsonl"
+        transcript = tmp_path / "projects" / "-Users-dev" / f"{name}.jsonl"
         _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
         _run_hook(transcript, "stop")
         with open(transcript, "a") as f:
@@ -384,7 +384,7 @@ class TestStopSpeaksUnspokenIntermediates:
              patch("claude_code_tts.session.pin_session"):
             mock_load.return_value = TTSConfig(
                 mode="direct", muted=False, intermediate=False,
-                session_id="-Users-jwmoore", project_name="home",
+                session_id="-Users-dev", project_name="home",
             )
             _speak_from_hook(argparse.Namespace(hook_type="stop"))
         assert spoken == ["the final response text"]
@@ -392,7 +392,7 @@ class TestStopSpeaksUnspokenIntermediates:
 
 class TestTranscriptReread:
     def test_post_tool_use_waits_for_lagging_transcript(self, tmp_path, fake_state_dir, monkeypatch):
-        transcript = tmp_path / "projects" / "-Users-jwmoore" / "uuid-L.jsonl"
+        transcript = tmp_path / "projects" / "-Users-dev" / "uuid-L.jsonl"
         _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
         _run_hook(transcript, "stop")
 
@@ -406,7 +406,7 @@ class TestTranscriptReread:
         assert _run_hook(transcript, "post_tool_use") == "text that arrived a moment late"
 
     def test_task_tool_is_no_longer_skipped(self, tmp_path, fake_state_dir):
-        transcript = tmp_path / "projects" / "-Users-jwmoore" / "uuid-K.jsonl"
+        transcript = tmp_path / "projects" / "-Users-dev" / "uuid-K.jsonl"
         _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
         _run_hook(transcript, "stop")
         with open(transcript, "a") as f:

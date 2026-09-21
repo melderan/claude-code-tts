@@ -81,9 +81,9 @@ class TestUnderscoreEncoding:
 
     def test_real_worktree_pattern(self, fake_home):
         """The actual bug that prompted get_session_id() rewrite."""
-        folder = "-Users-jwmoore-vault-code-repos-furiousengineering--worktrees-dbgorilla-dbgorilla-packages-shared-lib"
+        folder = "-Users-dev-vault-code-repos-acme--worktrees-widget-widget-packages-shared-lib"
         (fake_home / ".claude" / "projects" / folder).mkdir()
-        root = "/Users/jwmoore/vault/code/repos/furiousengineering/_worktrees/dbgorilla/dbgorilla/packages/shared-lib"
+        root = "/Users/dev/vault/code/repos/acme/_worktrees/widget/widget/packages/shared-lib"
         with patch.dict(os.environ, {"PROJECT_ROOT": root}, clear=False), \
              patch("claude_code_tts.session.Path.home", return_value=fake_home):
             from claude_code_tts.session import get_session_id
