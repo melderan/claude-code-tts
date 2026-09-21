@@ -1,6 +1,6 @@
 # Claude Code TTS - Instructions for Claude
 
-Welcome, fellow Claude! TTS for Claude Code using Piper and Kokoro. Version 9.9.2.
+Welcome, fellow Claude! TTS for Claude Code using Piper and Kokoro. Version 9.10.0.
 
 ## Ownership
 
@@ -153,7 +153,7 @@ When adding a new `/tts-*` command:
 ## Debugging
 
 ```bash
-tail -f /tmp/claude_tts_debug.log    # Hook debug log
+tail -f ~/.claude-tts/debug.log       # Hook debug log (shared with the daemon dir)
 claude-tts daemon logs --follow      # Daemon log
 claude-tts status                    # Quick status
 ```

@@ -26,16 +26,33 @@ VOICES_DIR = HOME / ".local" / "share" / "piper-voices"
 SHERPA_VENV_DIR = TTS_CONFIG_DIR / "venvs" / "sherpa"
 SHERPA_MODELS_DIR = TTS_CONFIG_DIR / "sherpa-models"
 PROJECTS_DIR = HOME / ".claude" / "projects"
-DEBUG_LOG = Path("/tmp/claude_tts_debug.log")
+# The hook-side log lives next to the daemon log so it survives a sandbox
+# rebuild and is visible from every machine that shares ~/.claude-tts.
+# Before v9.10.0 it was /tmp/claude_tts_debug.log, which vanished with the
+# sandbox that wrote it, taking the evidence of dropped speech with it.
+DEBUG_LOG = Path(os.environ.get("CLAUDE_TTS_DEBUG_LOG", str(TTS_CONFIG_DIR / "debug.log")))
+DEBUG_LOG_MAX_BYTES = 5 * 1024 * 1024
 
 # --- Debug logging ---
 
+_DEBUG_TAG = f"{os.uname().nodename.split('.')[0]}:{os.getpid()}"
+
 
 def debug(msg: str) -> None:
-    """Append a timestamped debug line to the TTS debug log."""
+    """Append a timestamped debug line to the TTS debug log.
+
+    Each line carries the writer's hostname and pid so that several sandboxes
+    (and several async hooks in one sandbox) sharing the file can be told apart.
+    """
     try:
+        try:
+            if DEBUG_LOG.stat().st_size > DEBUG_LOG_MAX_BYTES:
+                DEBUG_LOG.replace(DEBUG_LOG.with_suffix(".log.1"))
+        except OSError:
+            pass
+        DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
         with open(DEBUG_LOG, "a") as f:
-            f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+            f.write(f"[{time.strftime('%H:%M:%S')} {_DEBUG_TAG}] {msg}\n")
     except OSError:
         pass
 
