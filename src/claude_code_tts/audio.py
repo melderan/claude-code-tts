@@ -435,8 +435,11 @@ def write_queue_message(text: str, config: TTSConfig) -> Path:
         "pitch_filter": config.pitch_filter,
     }
 
-    with open(queue_file, "w") as f:
+    # Write-then-rename so the daemon never globs a half-written file.
+    tmp_file = queue_file.with_suffix(".tmp")
+    with open(tmp_file, "w") as f:
         json.dump(message, f)
+    tmp_file.rename(queue_file)
 
     debug(f"Wrote to queue: {queue_file} (speed={config.speed})")
     return queue_file
@@ -447,6 +450,15 @@ def daemon_healthy() -> bool:
     pid_file = Path.home() / ".claude-tts" / "daemon.pid"
     heartbeat_file = Path.home() / ".claude-tts" / "daemon.heartbeat"
 
+    # A fresh heartbeat is proof of life even where the daemon's pid is not
+    # visible (a container or sandbox sharing ~/.claude-tts with the host).
+    if heartbeat_file.exists():
+        try:
+            last_beat = float(heartbeat_file.read_text().strip())
+            return time.time() - last_beat <= 30
+        except (ValueError, OSError):
+            pass
+
     if not pid_file.exists():
         return False
 
@@ -455,14 +467,6 @@ def daemon_healthy() -> bool:
         os.kill(pid, 0)  # Check if process exists
     except (ValueError, OSError):
         return False
-
-    if heartbeat_file.exists():
-        try:
-            last_beat = float(heartbeat_file.read_text().strip())
-            if time.time() - last_beat > 30:
-                return False
-        except (ValueError, OSError):
-            pass
 
     return True
 
