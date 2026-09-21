@@ -411,10 +411,11 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
     # Check optional dependencies (warnings only)
     if not command_exists("jq"):
         preflight(f"{Colors.YELLOW}INFO{Colors.NC} jq not found (optional, used by legacy scripts)")
-    if not command_exists("pipx"):
-        preflight(f"{Colors.YELLOW}INFO{Colors.NC} pipx not found (will be installed)")
+    if not command_exists("uv") and not command_exists("pipx"):
+        preflight(f"{Colors.YELLOW}INFO{Colors.NC} pipx not found (will be installed; uv preferred)")
     if not command_exists("piper"):
-        preflight(f"{Colors.YELLOW}INFO{Colors.NC} piper not found (will be installed)")
+        via = "uv" if command_exists("uv") else "pipx"
+        preflight(f"{Colors.YELLOW}INFO{Colors.NC} piper not found (will be installed via {via})")
 
     # Check for audio player
     if PLATFORM == "macos":
@@ -551,7 +552,7 @@ def do_uninstall(dry_run: bool = False) -> None:
     if command_exists("piper"):
         print()
         warn("Piper TTS is still installed.")
-        warn("To remove it, run: pipx uninstall piper-tts")
+        warn("To remove it, run: uv tool uninstall piper-tts (or pipx uninstall piper-tts)")
 
     if command_exists("claude-tts"):
         print()
@@ -712,26 +713,30 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
             f"paplay {'will be installed' if dry_run and not command_exists('paplay') else 'ready'}"
         )
 
-    # Install pipx
-    install_pipx(dry_run=dry_run)
-    success(
-        f"pipx {'will be installed' if dry_run and not command_exists('pipx') else 'ready'}"
-    )
+    # Piper is a Python tool; uv installs it without pipx. pipx stays as the fallback.
+    if command_exists("uv"):
+        piper_cmd = ["uv", "tool", "install", "piper-tts"]
+    else:
+        install_pipx(dry_run=dry_run)
+        success(
+            f"pipx {'will be installed' if dry_run and not command_exists('pipx') else 'ready'}"
+        )
+        piper_cmd = ["pipx", "install", "piper-tts"]
 
     # --- Install Piper TTS ---
 
     print()
     if not command_exists("piper"):
         if dry_run:
-            dry("pipx install piper-tts")
+            dry(" ".join(piper_cmd))
         else:
-            info("Installing Piper TTS via pipx...")
-            run_cmd(["pipx", "install", "piper-tts"])
+            info(f"Installing Piper TTS via {piper_cmd[0]}...")
+            run_cmd(piper_cmd)
             # Update PATH for this session
             local_bin = HOME / ".local" / "bin"
             os.environ["PATH"] = f"{local_bin}:{os.environ['PATH']}"
             if not command_exists("piper"):
-                die("Piper installation failed. Try: pipx install piper-tts")
+                die(f"Piper installation failed. Try: {' '.join(piper_cmd)}")
     success(
         f"Piper TTS {'will be installed' if dry_run and not command_exists('piper') else 'ready'}"
     )
