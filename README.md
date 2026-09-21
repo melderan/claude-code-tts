@@ -336,7 +336,7 @@ When Claude runs tools (file reads, bash commands, etc.), the transcript contain
 
 ```bash
 # Hook debug log (what the hooks see)
-tail -f /tmp/claude_tts_debug.log
+tail -f ~/.claude-tts/debug.log
 
 # Daemon log (queue processing, mic watcher, playback)
 claude-tts daemon logs -f
