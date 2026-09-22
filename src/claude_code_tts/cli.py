@@ -1233,7 +1233,7 @@ def cmd_test(args: argparse.Namespace) -> None:
     if wav:
         play_audio(wav, speed=cfg.speed, speed_method=method, background=False)
     else:
-        print("Failed to generate speech")
+        print(_explain_speech_failure())
         return
 
     print("")
@@ -1243,6 +1243,26 @@ def cmd_test(args: argparse.Namespace) -> None:
     print(f"  /tts-speed <value>     Change speed (current: {cfg.speed}x)")
     print(f"  /tts-persona <name>    Switch persona")
     print(f"  /tts-random            Try a random voice")
+
+
+def _explain_speech_failure() -> str:
+    """Turn audio.last_error() into a message a user can act on.
+
+    Issue #1 reported a bare "Failed to generate speech"; the reason had been
+    recorded all along, just never shown outside the daemon log.
+    """
+    from claude_code_tts.audio import last_error
+
+    reason = last_error() or "no backend produced audio"
+    lines = ["Failed to generate speech: " + reason.split(" (")[0]]
+    if reason.startswith("piper not on PATH"):
+        lines.append("  Install Piper:  uv tool install piper-tts   (or: pipx install piper-tts)")
+        lines.append("  Then make sure ~/.local/bin is on your PATH, or run: claude-tts-install")
+    elif reason.startswith("voice model missing"):
+        name = Path(reason.split(": ", 1)[1]).stem if ": " in reason else ""
+        lines.append(f"  Download it:    claude-tts-install --voice {name}".rstrip())
+    lines.append("  Details:        ~/.claude-tts/debug.log")
+    return "\n".join(lines)
 
 
 def cmd_speak(args: argparse.Namespace) -> None:
@@ -1380,7 +1400,7 @@ def cmd_speak(args: argparse.Namespace) -> None:
     if wav:
         play_audio(wav, speed=speed, speed_method=speed_method, background=False)
     else:
-        print("Failed to generate speech")
+        print(_explain_speech_failure())
         sys.exit(1)
 
 

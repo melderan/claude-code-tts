@@ -313,3 +313,27 @@ class TestDefaultSpeed:
     def test_default_respects_range(self, tts_home, patched_env):
         with pytest.raises(SystemExit):
             main(["speed", "--default", "9"])
+
+
+class TestSpeechFailureExplained:
+    """Direct `claude-tts speak` says why synthesis failed (issue #1)."""
+
+    def test_piper_missing_gives_install_hint(self):
+        from claude_code_tts import audio, cli
+        with patch.object(audio, "_LAST_ERROR", "piper not on PATH (/usr/bin:/bin)"):
+            msg = cli._explain_speech_failure()
+        assert msg.startswith("Failed to generate speech: piper not on PATH")
+        assert "/usr/bin" not in msg.splitlines()[0]
+        assert "uv tool install piper-tts" in msg
+
+    def test_missing_voice_names_the_download(self):
+        from claude_code_tts import audio, cli
+        with patch.object(audio, "_LAST_ERROR", "voice model missing: /x/piper-voices/en_GB-alan-medium.onnx"):
+            msg = cli._explain_speech_failure()
+        assert "claude-tts-install --voice en_GB-alan-medium" in msg
+
+    def test_unknown_reason_still_points_at_the_log(self):
+        from claude_code_tts import audio, cli
+        with patch.object(audio, "_LAST_ERROR", ""):
+            msg = cli._explain_speech_failure()
+        assert "no backend produced audio" in msg and "debug.log" in msg
