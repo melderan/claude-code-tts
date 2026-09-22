@@ -19,7 +19,7 @@ WHEEL_ARGS=()
 if [ -n "${WHEEL:-}" ]; then
   # Stage the wheel under $HOME: some daemons (Docker Sandboxes) cannot bind-mount files from a
   # host-mounted tree, and do not see the caller's /tmp either. The home directory works.
-  STAGE="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/claude-tts-e2e.XXXXXX")"; cp "$WHEEL" "$STAGE/"; chmod 755 "$STAGE"; trap 'rm -rf "$STAGE"' EXIT   # container user is a different uid
+  mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"; STAGE="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/claude-tts-e2e.XXXXXX")"; cp "$WHEEL" "$STAGE/"; chmod 755 "$STAGE"; trap 'rm -rf "$STAGE"' EXIT   # container user is a different uid
   WHEEL_ARGS=(-v "$STAGE:/wheel:ro" -e WHEEL="/wheel/$(basename "$WHEEL")")
 fi
 docker run --rm "${CA_ARGS[@]}" "${WHEEL_ARGS[@]}" \
