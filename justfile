@@ -47,7 +47,7 @@ ci: lint typecheck version test build
 
 # Operator, on the daemon's machine: rebuild from this checkout, deploy hooks, restart, verify; logs in .logs/just/
 up:
-    scripts/up.py
+    @scripts/up.py
 
 # Operator: the timeline of `just up` runs, newest last
 timeline N="20":
