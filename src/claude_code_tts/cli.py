@@ -211,8 +211,45 @@ def cmd_speed(args: argparse.Namespace) -> None:
             print(f"Speed out of range: {value} (must be 0.5-4.0)")
             sys.exit(1)
 
+        if getattr(args, "default", False):
+            # Persona-level: the speed every session gets unless it overrides.
+            changed = set_default_speed(speed_val, all_personas=getattr(args, "all", False), session_id=sid)
+            if not changed:
+                print("No persona found to update")
+                sys.exit(1)
+            print(f"Default speed set to {value}x for: {', '.join(changed)}")
+            return
+
         session_set(sid, "speed", speed_val)
         print(f"Speed set to {value}x")
+
+
+def set_default_speed(speed: float, all_personas: bool = False, session_id: str = "") -> list[str]:
+    """Write `speed` onto personas in config.json and return the names changed.
+
+    With all_personas, every persona changes. Otherwise only the persona this
+    session would use: its session persona, else the project persona, else
+    the active persona. Persona speed is what a session inherits, so this is
+    the "default speed" knob; the installer's --default-speed uses it too.
+    """
+    config = load_raw_config()
+    personas = config.get("personas", {})
+    if not personas:
+        return []
+    if all_personas:
+        names = list(personas)
+    else:
+        session_persona = session_read(session_id).get("persona", "") if session_id else ""
+        name = session_persona or config.get("project_personas", {}).get(
+            session_id, config.get("active_persona", "")
+        )
+        if name not in personas:
+            return []
+        names = [name]
+    for name in names:
+        personas[name]["speed"] = speed
+    save_raw_config(config)
+    return names
 
 
 def cmd_persona(args: argparse.Namespace) -> None:
@@ -2594,6 +2631,9 @@ def main(argv: list[str] | None = None) -> None:
     # --- speed ---
     p = subparsers.add_parser("speed", help="Show or set speech speed")
     p.add_argument("value", nargs="?", help="Speed value (0.5-4.0) or 'reset'")
+    p.add_argument("--default", action="store_true",
+                   help="Set the persona's speed (what every session inherits) instead of this session's override")
+    p.add_argument("--all", action="store_true", help="With --default: every persona, not just this session's")
     p.set_defaults(func=cmd_speed)
 
     # --- persona ---
