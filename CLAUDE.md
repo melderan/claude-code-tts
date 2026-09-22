@@ -58,10 +58,12 @@ When writing documentation, comments, commit messages, or any public-facing cont
 uv tool install git+https://github.com/melderan/claude-code-tts
 claude-tts-install
 
-# Upgrade local install (rebuilds CLI + deploys hooks/commands)
-uv tool install . --force --build && claude-tts-install --upgrade
-# --build is needed where a uv config disables source builds (some company setups);
-# it is harmless elsewhere.
+# Upgrade the machine that owns the daemon from this checkout: rebuild CLI, deploy
+# hooks/commands, restart the daemon, verify, and log one line to ~/.claude-tts/up.log
+just up
+just timeline                 # the runs so far, with version and git ref
+# Without just: uv tool install . --force --build && claude-tts-install --upgrade
+# (--build is needed where a uv config disables source builds; harmless elsewhere)
 
 # Release workflow
 claude-tts release          # Interactive release
@@ -214,7 +216,10 @@ pyproject reads it at build time (hatch dynamic version) and the installer impor
 ## Testing Changes (IMPORTANT)
 
 `just ci` runs exactly what GitHub Actions runs: lint (ruff), type check (mypy), version check, tests,
-wheel build with a cold install. Run it before every push. `just --list` shows the rest (`test PY=3.14`,
+wheel build with a cold install. Run it before every push. `just up` is the operator side: it rebuilds, installs,
+restarts the daemon, verifies the heartbeat, and appends one line (time, version, git ref, branch,
+daemon, bridge and mic state) to `~/.claude-tts/up.log`, which `just timeline` prints. The log is on
+the shared mount, so a sandbox can read what the host is running without asking. `just --list` shows the rest (`test PY=3.14`,
 `cov`, `e2e`, `fmt`). Install just with `brew install just` or `uv tool install rust-just`.
 
 CI (`.github/workflows/ci.yml`) pins every action to a commit SHA, runs with a read-only token, and
