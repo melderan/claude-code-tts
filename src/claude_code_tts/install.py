@@ -776,7 +776,55 @@ def install_pipx(dry_run: bool = False) -> None:
 
 # --- Install ---
 
-def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: float | None = None) -> None:
+def restart_running_daemon(dry_run: bool = False) -> None:
+    """Restart the daemon if one is running, so it picks up new code.
+
+    Waits for the daemon to finish what it is saying; a long message makes this
+    take as long as the message. Callers that manage the daemon themselves
+    (scripts/up.py) pass --no-daemon-restart and do one restart of their own.
+    """
+    daemon_pid_file = TTS_CONFIG_DIR / "daemon.pid"
+    if daemon_pid_file.exists():
+        try:
+            pid = int(daemon_pid_file.read_text().strip())
+            os.kill(pid, 0)  # Check if running
+            if dry_run:
+                dry("Restart TTS daemon to pick up new code")
+            else:
+                if command_exists("claude-tts"):
+                    # Use the Python CLI to restart
+                    info("Restarting TTS daemon via claude-tts...")
+                    try:
+                        subprocess.run(
+                            ["claude-tts", "daemon", "restart"],
+                            capture_output=True, timeout=60,
+                        )
+                        success("Daemon restarted via claude-tts CLI")
+                    except subprocess.TimeoutExpired:
+                        # Restart likely succeeded — the startup announcement
+                        # can take longer than the timeout.
+                        success("Daemon restart initiated (still starting up)")
+                else:
+                    # Fallback: SIGTERM only (can't start new daemon without CLI)
+                    info("Stopping old daemon (claude-tts not on PATH)...")
+                    os.kill(pid, signal.SIGTERM)
+                    for _ in range(100):
+                        try:
+                            os.kill(pid, 0)
+                            time.sleep(0.1)
+                        except ProcessLookupError:
+                            break
+                    warn("Daemon stopped. Start manually: claude-tts daemon start")
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass  # Daemon not running, nothing to restart
+
+
+def do_install(
+    dry_run: bool = False,
+    upgrade: bool = False,
+    default_speed: float | None = None,
+    restart_daemon: bool = True,
+) -> None:
     platform_name = {"macos": "macOS", "linux": "Linux", "wsl": "WSL 2"}.get(PLATFORM, PLATFORM)
 
     print()
@@ -988,41 +1036,10 @@ def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: floa
     if shims_deployed > 0:
         success(f"Deployed {shims_deployed} compatibility shim(s) to {TTS_CONFIG_DIR}")
 
-    # --- Restart daemon if running (picks up new code) ---
-    daemon_pid_file = TTS_CONFIG_DIR / "daemon.pid"
-    if daemon_pid_file.exists():
-        try:
-            pid = int(daemon_pid_file.read_text().strip())
-            os.kill(pid, 0)  # Check if running
-            if dry_run:
-                dry("Restart TTS daemon to pick up new code")
-            else:
-                if command_exists("claude-tts"):
-                    # Use the Python CLI to restart
-                    info("Restarting TTS daemon via claude-tts...")
-                    try:
-                        subprocess.run(
-                            ["claude-tts", "daemon", "restart"],
-                            capture_output=True, timeout=60,
-                        )
-                        success("Daemon restarted via claude-tts CLI")
-                    except subprocess.TimeoutExpired:
-                        # Restart likely succeeded — the startup announcement
-                        # can take longer than the timeout.
-                        success("Daemon restart initiated (still starting up)")
-                else:
-                    # Fallback: SIGTERM only (can't start new daemon without CLI)
-                    info("Stopping old daemon (claude-tts not on PATH)...")
-                    os.kill(pid, signal.SIGTERM)
-                    for _ in range(100):
-                        try:
-                            os.kill(pid, 0)
-                            time.sleep(0.1)
-                        except ProcessLookupError:
-                            break
-                    warn("Daemon stopped. Start manually: claude-tts daemon start")
-        except (ValueError, ProcessLookupError, PermissionError):
-            pass  # Daemon not running, nothing to restart
+    if restart_daemon:
+        restart_running_daemon(dry_run=dry_run)
+    else:
+        info("Daemon restart left to the caller (--no-daemon-restart)")
 
     # --- Install service files ---
 
@@ -2420,6 +2437,11 @@ Examples:
         help="Bootstrap the sherpa-onnx TTS backend in an isolated venv (additive, opt-in)",
     )
     parser.add_argument(
+        "--no-daemon-restart",
+        action="store_true",
+        help="Leave the running daemon alone; the caller restarts it (used by `just up`)",
+    )
+    parser.add_argument(
         "--yes", "-y",
         action="store_true",
         help="Assume yes to interactive prompts (for scripted / non-interactive use)",
@@ -2445,9 +2467,15 @@ Examples:
     elif args.bootstrap:
         do_bootstrap_from_config(Path(args.bootstrap))
     elif args.upgrade:
-        do_install(dry_run=args.dry_run, upgrade=True, default_speed=args.default_speed)
+        do_install(
+            dry_run=args.dry_run, upgrade=True, default_speed=args.default_speed,
+            restart_daemon=not args.no_daemon_restart,
+        )
     elif args.install:
-        do_install(dry_run=args.dry_run, upgrade=False, default_speed=args.default_speed)
+        do_install(
+            dry_run=args.dry_run, upgrade=False, default_speed=args.default_speed,
+            restart_daemon=not args.no_daemon_restart,
+        )
     elif args.personas:
         do_manage_personas()
     elif args.voice:

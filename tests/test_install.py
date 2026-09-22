@@ -1,6 +1,7 @@
 """Tests for the installer module."""
 
 import json
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -330,3 +331,41 @@ class TestDownloadValidation:
         with pytest.raises(SystemExit):
             install.download_file("https://example.invalid/voice.onnx", dest, min_bytes=1_000_000)
         assert not dest.exists()
+
+
+class TestRestartRunningDaemon:
+    """`just up` owns the single restart; the installer must be able to stand down."""
+
+    def test_restarts_when_a_daemon_is_running(self, tmp_path, monkeypatch):
+        import claude_code_tts.install as inst
+
+        tts_dir = tmp_path / ".claude-tts"
+        tts_dir.mkdir()
+        (tts_dir / "daemon.pid").write_text(str(os.getpid()))
+        monkeypatch.setattr(inst, "TTS_CONFIG_DIR", tts_dir)
+        monkeypatch.setattr(inst, "command_exists", lambda name: True)
+        calls = []
+        monkeypatch.setattr(inst.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+        inst.restart_running_daemon()
+        assert calls == [["claude-tts", "daemon", "restart"]]
+
+    def test_no_daemon_restart_flag_reaches_do_install(self, monkeypatch):
+        import claude_code_tts.install as inst
+
+        seen = {}
+        monkeypatch.setattr(inst, "do_install", lambda **kw: seen.update(kw))
+        monkeypatch.setattr(inst.sys, "argv", ["claude-tts-install", "--upgrade", "--no-daemon-restart"])
+        inst.main()
+        assert seen["upgrade"] is True
+        assert seen["restart_daemon"] is False
+
+    def test_do_install_skips_restart_when_told(self, monkeypatch):
+        import claude_code_tts.install as inst
+
+        called = []
+        monkeypatch.setattr(inst, "restart_running_daemon", lambda **kw: called.append(kw))
+        # Stop do_install right after the restart decision by failing preflight loudly.
+        monkeypatch.setattr(inst, "run_preflight_checks", lambda dry_run=False: (False, ["stop"]))
+        with pytest.raises(SystemExit):
+            inst.do_install(upgrade=True, restart_daemon=False)
+        assert called == []

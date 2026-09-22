@@ -101,7 +101,9 @@ def main() -> int:
     print(f"up: v{ver} {ref} ({branch}) -> {run}")
     # --build: some uv configs refuse to build source distributions; harmless elsewhere.
     step("install", ["uv", "tool", "install", ".", "--force", "--build"])
-    step("hooks", ["claude-tts-install", "--upgrade"])
+    # The installer would restart the daemon itself; we do the one restart below instead,
+    # so the daemon finishes its current sentence once, not twice.
+    step("hooks", ["claude-tts-install", "--upgrade", "--no-daemon-restart"])
     step("restart", ["claude-tts", "daemon", "restart"], ["claude-tts", "daemon", "start"])
     time.sleep(2)
 
