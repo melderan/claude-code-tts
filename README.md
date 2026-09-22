@@ -138,6 +138,15 @@ Add to `~/.claude-tts/config.json`:
 
 Then restart the daemon: `claude-tts daemon restart`
 
+**Handy must log at Debug.** Every recording event Handy writes is at debug level and its file
+log defaults to info, so with the default setting the watcher tails a file that never mentions a
+recording. In Handy: Settings > Debug > Log Level > Debug. It applies at once. The daemon warns in
+`daemon.log` at start if the level is still hiding recordings.
+
+If Handy's own "mute while recording" is on, you will hear the Mac's output mute while you hold
+the key regardless of this feature; the two do not conflict, but only the daemon's pause rewinds
+and resumes the sentence.
+
 The resume delay (default 1500ms) gives your voice-to-text app time to transcribe and paste before TTS resumes. Adjust to taste.
 
 Currently supports [Handy](https://handy.computer) on macOS. The watcher is disabled by default and gracefully skips if Handy isn't installed.
