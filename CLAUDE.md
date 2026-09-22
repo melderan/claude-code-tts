@@ -59,7 +59,7 @@ uv tool install git+https://github.com/melderan/claude-code-tts
 claude-tts-install
 
 # Upgrade the machine that owns the daemon from this checkout: rebuild CLI, deploy
-# hooks/commands, restart the daemon, verify, and log one line to ~/.claude-tts/up.log
+# hooks/commands, restart the daemon, verify; full log per run in .logs/just/ (gitignored)
 just up
 just timeline                 # the runs so far, with version and git ref
 # Without just: uv tool install . --force --build && claude-tts-install --upgrade
@@ -136,6 +136,8 @@ commands/tts-*.md          # Slash command definitions (call claude-tts CLI)
 scripts/
   commit-feature.sh        # Commit helper (version bump + feature in one)
   check-version.sh         # Version consistency checker
+  up.py                    # `just up`: rebuild, install, restart, verify, log to .logs/just/
+  build-check.sh           # `just build`: wheel + cold-install proof
   tts-builder.py           # Voice builder TUI (Textual, standalone)
 docs/
   voice-notes.md           # Voice compatibility knowledge base
@@ -217,9 +219,11 @@ pyproject reads it at build time (hatch dynamic version) and the installer impor
 
 `just ci` runs exactly what GitHub Actions runs: lint (ruff), type check (mypy), version check, tests,
 wheel build with a cold install. Run it before every push. `just up` is the operator side: it rebuilds, installs,
-restarts the daemon, verifies the heartbeat, and appends one line (time, version, git ref, branch,
-daemon, bridge and mic state) to `~/.claude-tts/up.log`, which `just timeline` prints. The log is on
-the shared mount, so a sandbox can read what the host is running without asking. `just --list` shows the rest (`test PY=3.14`,
+restarts the daemon, verifies the heartbeat, writes the full output of the run to
+`.logs/just/up-<time>-<git ref>.log`, and appends one line (time, version, git ref, branch, daemon,
+bridge and mic state, run file) to `.logs/just/timeline.log`, which `just timeline` prints. The
+directory is gitignored and lives in the checkout, so a sandbox sharing the working tree can read
+what the host is running without asking. `just --list` shows the rest (`test PY=3.14`,
 `cov`, `e2e`, `fmt`). Install just with `brew install just` or `uv tool install rust-just`.
 
 CI (`.github/workflows/ci.yml`) pins every action to a commit SHA, runs with a read-only token, and
