@@ -433,25 +433,33 @@ class TestHandy097Patterns:
         monkeypatch.setattr(mw, "HANDY_SETTINGS", tmp_path / "missing.json")
         state = {"paused": False}
         writes = []
+        logs = []
 
         def write_state(**kw):
             writes.append(kw)
             state.update({k: v for k, v in kw.items() if k in ("paused", "paused_by")})
 
         w = mw.MicWatcher(
-            log_fn=lambda *a, **k: None,
+            log_fn=lambda msg, *a, **k: logs.append(msg),
             read_playback_state=lambda: dict(state),
             write_playback_state=write_state,
             resume_delay_ms=50,
         )
         assert w.start()
         try:
+            import time
+
+            # The tail seeks to the end when its thread opens the file; lines written
+            # before that would be skipped. Wait for the watcher to say it is tailing.
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not any("tailing" in m for m in logs):
+                time.sleep(0.01)
+            assert any("tailing" in m for m in logs)
             with log_file.open("a") as f:
                 f.write("[DEBUG] TranscribeAction::start called for binding: transcribe\n")
                 f.write("[DEBUG] TranscribeAction::stop called for binding: transcribe\n")
                 f.write("[DEBUG] Recording stopped and samples retrieved in 30ms, sample count: 1\n")
                 f.write("[DEBUG] No samples retrieved from recording stop\n")
-            import time
 
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline and len(writes) < 2:
