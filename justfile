@@ -13,14 +13,16 @@ default:
 check: lint typecheck
 
 lint:
-    uv tool run ruff check src tests
+    uv tool run ruff check src tests scripts
 
 fmt:
-    uv tool run ruff check --fix src tests
-    uv tool run ruff format src tests
+    uv tool run ruff check --fix src tests scripts
+    uv tool run ruff format src tests scripts
 
+# mypy is the long-standing checker; ty (Astral) catches what it misses. Both must pass.
 typecheck:
     uv tool run mypy src
+    uv tool run ty check src
 
 # Unit tests; PY selects an interpreter, e.g. `just test PY=3.14`
 test PY="3.12":
@@ -44,6 +46,15 @@ e2e TAG="main":
 
 # Everything CI runs, in order
 ci: lint typecheck version test build
+
+# The local gate: same checks as ci, real exit codes, stops at the first failure. FULL=1 adds build.
+gate FULL="":
+    @scripts/gate.py {{ if FULL != "" { "--full" } else { "" } }}
+
+# Point git at .githooks: pre-commit runs the fast gate, pre-push the full one
+hooks:
+    git config core.hooksPath .githooks
+    @echo "hooks installed: pre-commit -> gate, pre-push -> gate --full"
 
 # Operator, on the daemon's machine: rebuild from this checkout, deploy hooks, restart, verify; logs in .logs/just/
 up:

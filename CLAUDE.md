@@ -137,6 +137,7 @@ scripts/
   commit-feature.sh        # Commit helper (version bump + feature in one)
   check-version.sh         # Version consistency checker
   up.py                    # `just up`: rebuild, install, restart, verify, log to .logs/just/
+  gate.py                  # `just gate` and the git hooks: lint, mypy, ty, version, tests [, build]
   build-check.sh           # `just build`: wheel + cold-install proof
   tts-builder.py           # Voice builder TUI (Textual, standalone)
 docs/
@@ -217,8 +218,11 @@ pyproject reads it at build time (hatch dynamic version) and the installer impor
 
 ## Testing Changes (IMPORTANT)
 
-`just ci` runs exactly what GitHub Actions runs: lint (ruff), type check (mypy), version check, tests,
-wheel build with a cold install. Run it before every push. `just up` is the operator side: it rebuilds, installs,
+`just ci` runs exactly what GitHub Actions runs: lint (ruff), type checks (mypy and ty), version
+check, tests, wheel build with a cold install. `just gate` runs the same through `scripts/gate.py` with
+real exit codes, and `just hooks` installs it as the pre-commit (fast) and pre-push (full) hook. Run
+`just hooks` once per clone. Never judge a check through a pipe (`pytest | tail`): the pipe's exit
+code wins and a failure disappears, which is how a flaky test once reached a signed commit. `just up` is the operator side: it rebuilds, installs,
 restarts the daemon, verifies the heartbeat, writes the full output of the run to
 `.logs/just/up-<time>-<git ref>.log`, and appends one line (time, version, git ref, branch, daemon,
 bridge and mic state, run file) to `.logs/just/timeline.log`, which `just timeline` prints. The

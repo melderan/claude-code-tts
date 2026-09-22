@@ -1,14 +1,18 @@
 """Tests for mic-aware pause (Handy log watcher)."""
 
+import json
 import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import claude_code_tts.mic_watcher as mw
 from claude_code_tts.mic_watcher import (
     _RE_RECORDING_START,
     _RE_RECORDING_STOP,
     RESUME_DELAY_MS,
     MicWatcher,
+    handy_file_log_level,
+    handy_log_level_hides_recording,
 )
 
 # --- Regex tests ---
@@ -425,8 +429,6 @@ class TestHandy097Patterns:
 
     def test_duplicate_stop_lines_do_not_block_the_tail(self, tmp_path, monkeypatch):
         """After the first stop line resumed us, later stop lines must not wait again."""
-        import claude_code_tts.mic_watcher as mw
-
         log_file = tmp_path / "handy.log"
         log_file.write_text("")
         monkeypatch.setattr(mw, "HANDY_LOG", log_file)
@@ -447,8 +449,6 @@ class TestHandy097Patterns:
         )
         assert w.start()
         try:
-            import time
-
             # The tail seeks to the end when its thread opens the file; lines written
             # before that would be skipped. Wait for the watcher to say it is tailing.
             deadline = time.monotonic() + 3
@@ -475,7 +475,6 @@ class TestHandyLogLevel:
     def test_string_levels(self):
         from claude_code_tts.mic_watcher import (
             handy_file_log_level,
-            handy_log_level_hides_recording,
         )
 
         assert handy_file_log_level({"log_level": "Info"}) == "info"
@@ -484,18 +483,12 @@ class TestHandyLogLevel:
         assert handy_log_level_hides_recording("trace") is False
 
     def test_legacy_numeric_levels(self):
-        from claude_code_tts.mic_watcher import handy_file_log_level
-
         assert handy_file_log_level({"log_level": 2}) == "debug"
         assert handy_file_log_level({"log_level": 3}) == "info"
         assert handy_file_log_level({"log_level": 9}) is None
         assert handy_file_log_level({}) is None
 
     def test_reads_tauri_store_shape(self, tmp_path, monkeypatch):
-        import json
-
-        import claude_code_tts.mic_watcher as mw
-
         store = tmp_path / "settings_store.json"
         store.write_text(json.dumps({"settings": {"log_level": "info", "mute_while_recording": True}}))
         monkeypatch.setattr(mw, "HANDY_SETTINGS", store)
@@ -503,10 +496,6 @@ class TestHandyLogLevel:
         assert mw.handy_settings()["mute_while_recording"] is True
 
     def test_start_warns_when_level_hides_recording(self, tmp_path, monkeypatch):
-        import json
-
-        import claude_code_tts.mic_watcher as mw
-
         log_file = tmp_path / "handy.log"
         log_file.write_text("")
         store = tmp_path / "settings_store.json"
