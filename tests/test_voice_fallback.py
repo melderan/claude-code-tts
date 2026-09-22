@@ -7,6 +7,7 @@ persona, and the installer can fetch a named voice without prompting.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -74,3 +75,19 @@ class TestNamedVoiceDownload:
              patch.object(install_mod, "download_voice") as dl:
             assert install_mod.do_download_named_voices(["en_GB-alan-medium"]) == 0
         dl.assert_not_called()
+
+
+class TestInstallerDefaultSpeed:
+    def test_apply_default_speed_touches_every_persona(self, tmp_path):
+        cfg_dir = tmp_path / ".claude-tts"
+        cfg_dir.mkdir()
+        cfg = {"personas": {"a": {"speed": 2.0, "voice": "x"}, "b": {"speed": 1.5, "voice": "y"}}, "mode": "queue"}
+        (cfg_dir / "config.json").write_text(json.dumps(cfg))
+        with patch.object(install_mod, "TTS_CONFIG_DIR", cfg_dir), \
+             patch.object(install_mod, "TTS_CONFIG_FILE", cfg_dir / "config.json"), \
+             patch.object(install_mod, "TTS_SESSIONS_DIR", cfg_dir / "sessions.d"):
+            names = install_mod.apply_default_speed(1.0)
+        after = json.loads((cfg_dir / "config.json").read_text())
+        assert sorted(names) == ["a", "b"]
+        assert {p["speed"] for p in after["personas"].values()} == {1.0}
+        assert after["mode"] == "queue"
