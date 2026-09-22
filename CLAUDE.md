@@ -144,6 +144,7 @@ docs/
   voice-notes.md           # Voice compatibility knowledge base
   hotkey-setup.md          # Pause/resume hotkey setup guide
   http-bridge.md           # HTTP bridge contract (routes, marks, threat model)
+  what-and-why.md          # What the system does and why, with no how; the fixed points for any redesign
 ```
 
 ## Config Files
