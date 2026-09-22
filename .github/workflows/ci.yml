@@ -68,7 +68,7 @@ jobs:
       - name: install just
         run: uv tool install rust-just
       - name: pytest
-        run: just test PY=${{ matrix.python }}
+        run: just PY=${{ matrix.python }} test
 
   package:
     name: build wheel, cold install, preflight
