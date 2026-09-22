@@ -360,12 +360,43 @@ def run_cmd(
     return subprocess.run(cmd, check=check, capture_output=capture, text=True)
 
 
-def download_file(url: str, dest: Path) -> None:
+def download_file(url: str, dest: Path, min_bytes: int = 0) -> None:
+    """Download url to dest, or die saying why.
+
+    `curl -L` without --fail used to save an HTTP error page as the file, and a 95-byte
+    "forbidden" page then went on to be loaded as a 60 MB voice model. Now: fail on HTTP errors,
+    require a plausible size, and reject anything that looks like text where a model belongs.
+    """
     info(f"Downloading {dest.name}...")
+    dest.parent.mkdir(parents=True, exist_ok=True)
     try:
-        run_cmd(["curl", "-L", "--progress-bar", "-o", str(dest), url])
-    except subprocess.CalledProcessError:
-        die(f"Failed to download {url}")
+        run_cmd(["curl", "-fL", "--progress-bar", "-o", str(dest), url])
+    except subprocess.CalledProcessError as e:
+        dest.unlink(missing_ok=True)
+        die(f"Failed to download {url} (curl exit {e.returncode}). "
+            f"If you are behind a filtering proxy, the redirect target may need allowing too.")
+    problem = _download_problem(dest, min_bytes)
+    if problem:
+        dest.unlink(missing_ok=True)
+        die(f"Download of {dest.name} is not usable: {problem}. Source: {url}")
+
+
+def _download_problem(dest: Path, min_bytes: int) -> str:
+    """Return why a downloaded file is not what we asked for, or '' if it looks right."""
+    if not dest.exists():
+        return "no file was written"
+    size = dest.stat().st_size
+    if size < min_bytes:
+        return f"only {size} bytes (expected at least {min_bytes})"
+    head = dest.read_bytes()[:64]
+    if dest.suffix == ".json":
+        try:
+            json.loads(dest.read_text())
+        except (ValueError, UnicodeDecodeError):
+            return "not valid JSON"
+    elif dest.suffix == ".onnx" and (head.lstrip().startswith(b"<") or head.startswith(b"Approval") or head.startswith(b"Blocked")):
+        return "the server returned a text page instead of a model"
+    return ""
 
 
 # --- Backup Manager ---
@@ -522,8 +553,6 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
         preflight(f"{Colors.YELLOW}INFO{Colors.NC} claude-tts CLI not found (will be installed via uv tool)")
 
     # Check optional dependencies (warnings only)
-    if not command_exists("jq"):
-        preflight(f"{Colors.YELLOW}INFO{Colors.NC} jq not found (optional, used by legacy scripts)")
     if not command_exists("uv") and not command_exists("pipx"):
         preflight(f"{Colors.YELLOW}INFO{Colors.NC} pipx not found (will be installed; uv preferred)")
     if not command_exists("piper"):
@@ -673,32 +702,38 @@ def do_uninstall(dry_run: bool = False) -> None:
 
 # --- Package Installation Helpers ---
 
-def install_package(package: str, dry_run: bool = False) -> None:
-    """Install a package using the detected package manager."""
+def install_package(package: str, dry_run: bool = False) -> bool:
+    """Install a system package with the detected package manager. Returns True on success.
+
+    Never fatal: a package manager that is missing, offline, or refuses is reported and the
+    caller decides what the missing package means. On apt the package lists are refreshed
+    first; a fresh machine has none, and `apt-get install` without them fails outright.
+    """
     if dry_run:
         dry(f"{PKG_MANAGER} install {package}")
-        return
+        return True
 
     info(f"Installing {package}...")
-
+    sudo = [] if os.geteuid() == 0 or PKG_MANAGER == "brew" else ["sudo"]
+    commands: list[list[str]]
     if PKG_MANAGER == "brew":
-        run_cmd(["brew", "install", package])
+        commands = [["brew", "install", package]]
     elif PKG_MANAGER == "apt":
-        # Check if we need sudo
-        if os.geteuid() != 0:
-            run_cmd(["sudo", "apt", "install", "-y", package])
-        else:
-            run_cmd(["apt", "install", "-y", package])
+        commands = [sudo + ["apt-get", "update", "-qq"], sudo + ["apt-get", "install", "-y", "-qq", package]]
     elif PKG_MANAGER == "dnf":
-        if os.geteuid() != 0:
-            run_cmd(["sudo", "dnf", "install", "-y", package])
-        else:
-            run_cmd(["dnf", "install", "-y", package])
+        commands = [sudo + ["dnf", "install", "-y", package]]
     elif PKG_MANAGER == "pacman":
-        if os.geteuid() != 0:
-            run_cmd(["sudo", "pacman", "-S", "--noconfirm", package])
-        else:
-            run_cmd(["pacman", "-S", "--noconfirm", package])
+        commands = [sudo + ["pacman", "-S", "--noconfirm", package]]
+    else:
+        warn(f"No supported package manager found; install {package} yourself")
+        return False
+    try:
+        for cmd in commands:
+            run_cmd(cmd)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        warn(f"Could not install {package} with {PKG_MANAGER}: {e}")
+        return False
+    return True
 
 
 def install_pipx(dry_run: bool = False) -> None:
@@ -796,17 +831,12 @@ def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: floa
     print()
     info("Checking dependencies...")
 
-    # Install jq (optional, used by legacy scripts only)
-    if not command_exists("jq"):
-        install_package("jq", dry_run=dry_run)
-    success(
-        f"jq {'will be installed' if dry_run and not command_exists('jq') else 'ready'}"
-    )
 
     # Install audio player on Linux/WSL
     if PLATFORM in ("linux", "wsl") and not command_exists("paplay"):
         pkg_name = "pulseaudio-utils" if PKG_MANAGER in ("apt", "dnf") else "pulseaudio"
-        install_package(pkg_name, dry_run=dry_run)
+        if not install_package(pkg_name, dry_run=dry_run):
+            warn(f"No audio player installed; speech will synthesize but not play until you install {pkg_name}")
     if PLATFORM in ("linux", "wsl"):
         success(
             f"paplay {'will be installed' if dry_run and not command_exists('paplay') else 'ready'}"
@@ -881,7 +911,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: floa
             dry(f"  -> {VOICE_FILE}")
         else:
             VOICES_DIR.mkdir(parents=True, exist_ok=True)
-            download_file(VOICE_URL, VOICE_FILE)
+            download_file(VOICE_URL, VOICE_FILE, min_bytes=1_000_000)
             download_file(VOICE_JSON_URL, VOICE_JSON)
         success(f"Voice model {'will be downloaded' if dry_run else 'downloaded'}")
     else:
@@ -939,7 +969,10 @@ def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: floa
         success(f"Removed {legacy_removed} legacy bash script(s) from {TTS_CONFIG_DIR}")
 
     # --- Deploy compatibility shims for externally-referenced scripts ---
-
+    # On a first install ~/.claude-tts does not exist yet; the shim write was the first thing to
+    # touch it and crashed the installer after the hooks were deployed and before settings were.
+    if not dry_run:
+        TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     shims_deployed = 0
     for shim_name, cli_cmd in COMPAT_SHIMS.items():
         shim_path = TTS_CONFIG_DIR / shim_name
@@ -1622,7 +1655,7 @@ def download_voice(voice_name: str, path_segment: str, dry_run: bool = False) ->
     VOICES_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
-        download_file(onnx_url, onnx_file)
+        download_file(onnx_url, onnx_file, min_bytes=1_000_000)
         download_file(json_url, json_file)
         return True
     except Exception as e:

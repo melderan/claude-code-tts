@@ -17,10 +17,13 @@ if [ -n "${HTTPS_PROXY:-${https_proxy:-}}" ] && [ -f /etc/ssl/certs/ca-certifica
 fi
 WHEEL_ARGS=()
 if [ -n "${WHEEL:-}" ]; then
-  WHEEL_ARGS=(-v "$(cd "$(dirname "$WHEEL")" && pwd)/$(basename "$WHEEL"):/wheel/$(basename "$WHEEL"):ro" -e WHEEL="/wheel/$(basename "$WHEEL")")
+  # Stage the wheel under $HOME: some daemons (Docker Sandboxes) cannot bind-mount files from a
+  # host-mounted tree, and do not see the caller's /tmp either. The home directory works.
+  STAGE="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/claude-tts-e2e.XXXXXX")"; cp "$WHEEL" "$STAGE/"; chmod 755 "$STAGE"; trap 'rm -rf "$STAGE"' EXIT   # container user is a different uid
+  WHEEL_ARGS=(-v "$STAGE:/wheel:ro" -e WHEEL="/wheel/$(basename "$WHEEL")")
 fi
 docker run --rm "${CA_ARGS[@]}" "${WHEEL_ARGS[@]}" \
-  -v "$UV_BIN:/home/tester/.local/bin/uv:ro" \
+  -v "$UV_BIN:/usr/local/bin/uv:ro" \
   -e TAG="$TAG" -e REPO="$REPO" \
   ${HTTP_PROXY:+-e HTTP_PROXY=$HTTP_PROXY} ${HTTPS_PROXY:+-e HTTPS_PROXY=$HTTPS_PROXY} ${NO_PROXY:+-e NO_PROXY=$NO_PROXY} \
   ${http_proxy:+-e http_proxy=$http_proxy} ${https_proxy:+-e https_proxy=$https_proxy} ${no_proxy:+-e no_proxy=$no_proxy} \

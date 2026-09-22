@@ -5,6 +5,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 # Import the module under test
 from claude_code_tts import install
 
@@ -271,3 +273,60 @@ class TestFindRepoDirPrefersPackage:
         monkeypatch.chdir(elsewhere)
         monkeypatch.setattr(install, "SCRIPT_DIR", pkg)
         assert install._find_repo_dir() == pkg
+
+
+
+class TestInstallPackageIsNotFatal:
+    """A fresh machine has no apt lists and may have no sudo; the installer must not die on a helper package."""
+
+    def test_apt_refreshes_lists_then_installs(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(install, "PKG_MANAGER", "apt")
+        monkeypatch.setattr(install.os, "geteuid", lambda: 1000)
+        monkeypatch.setattr(install, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+        assert install.install_package("pulseaudio-utils") is True
+        assert calls[0][:3] == ["sudo", "apt-get", "update"]
+        assert calls[1][:3] == ["sudo", "apt-get", "install"] and "pulseaudio-utils" in calls[1]
+
+    def test_failure_is_reported_not_raised(self, monkeypatch):
+        import subprocess
+        monkeypatch.setattr(install, "PKG_MANAGER", "apt")
+        monkeypatch.setattr(install.os, "geteuid", lambda: 0)
+        def boom(cmd, **kw):
+            raise subprocess.CalledProcessError(100, cmd)
+        monkeypatch.setattr(install, "run_cmd", boom)
+        assert install.install_package("pulseaudio-utils") is False
+
+    def test_unknown_manager_returns_false(self, monkeypatch):
+        monkeypatch.setattr(install, "PKG_MANAGER", None)
+        assert install.install_package("anything") is False
+
+
+
+class TestDownloadValidation:
+    """A blocked or redirected download must not be accepted as a voice model."""
+
+    def test_error_page_saved_as_model_is_rejected(self, tmp_path):
+        dest = tmp_path / "voice.onnx"
+        dest.write_bytes(b"Approval required for cdn.hf.co\n")
+        assert "text page" in install._download_problem(dest, 0)
+        assert "only" in install._download_problem(dest, 1_000_000)
+
+    def test_real_looking_model_passes(self, tmp_path):
+        dest = tmp_path / "voice.onnx"
+        dest.write_bytes(b"\x08\x07\x12\x00" + b"\x00" * 2_000_000)
+        assert install._download_problem(dest, 1_000_000) == ""
+
+    def test_json_sidecar_must_parse(self, tmp_path):
+        dest = tmp_path / "voice.onnx.json"
+        dest.write_text("<html>nope</html>")
+        assert "JSON" in install._download_problem(dest, 0)
+        dest.write_text('{"sample_rate": 22050}')
+        assert install._download_problem(dest, 0) == ""
+
+    def test_download_file_dies_on_bad_content(self, tmp_path, monkeypatch):
+        dest = tmp_path / "voice.onnx"
+        monkeypatch.setattr(install, "run_cmd", lambda cmd, **kw: dest.write_bytes(b"Blocked by network policy"))
+        with pytest.raises(SystemExit):
+            install.download_file("https://example.invalid/voice.onnx", dest, min_bytes=1_000_000)
+        assert not dest.exists()

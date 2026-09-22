@@ -14,7 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd -m -s /bin/bash tester && echo "tester ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 USER tester
 WORKDIR /home/tester
-# uv is copied in by the runner (a static binary), so the build needs no astral.sh access.
+# uv is mounted in by the runner at /usr/local/bin/uv (a static binary), so the build needs no
+# astral.sh access and nothing under the user's home is created by the daemon.
 ENV PATH="/home/tester/.local/bin:${PATH}"
 COPY --chmod=0755 tests/docker/clean_install_e2e.sh /home/tester/clean_install_e2e.sh
 ENTRYPOINT ["/home/tester/clean_install_e2e.sh"]

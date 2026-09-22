@@ -6,7 +6,7 @@ TAG="${TAG:-main}"
 REPO="${REPO:-https://github.com/melderan/claude-code-tts}"
 PASS=0; FAIL=0
 ok()   { echo "  PASS: $1"; PASS=$((PASS+1)); }
-bad()  { echo "  FAIL: $1"; echo "        $2" | head -20; FAIL=$((FAIL+1)); }
+bad()  { echo "  FAIL: $1"; echo "$2" | tail -25 | sed "s/^/        /"; FAIL=$((FAIL+1)); }
 
 if [ -n "${WHEEL:-}" ]; then
   echo "== 1. uv tool install from wheel $WHEEL"
@@ -21,8 +21,11 @@ command -v claude-tts-install >/dev/null && ok "claude-tts-install on PATH" || b
 echo "   version: $(claude-tts --version 2>&1)"
 
 echo "== 2. installer preflight sees its own hooks and commands (the failure in issue #1)"
-out=$(claude-tts-install --dry-run 2>&1)
-if echo "$out" | grep -q "Source .* missing"; then bad "preflight reports missing sources" "$(echo "$out" | grep missing)"; else ok "preflight finds every hook and command"; fi
+out=$(claude-tts-install --dry-run 2>&1); rc=$?
+if ! command -v claude-tts-install >/dev/null; then bad "preflight not run: claude-tts-install missing" "";
+elif echo "$out" | grep -q "Source .* missing"; then bad "preflight reports missing sources" "$(echo "$out" | grep missing)";
+elif ! echo "$out" | grep -q "PREFLIGHT"; then bad "preflight produced no checks (rc=$rc)" "$out";
+else ok "preflight finds every hook and command"; fi
 
 echo "== 3. real install (Piper via uv, voice download, hooks, settings.json)"
 mkdir -p ~/.claude && echo '{}' > ~/.claude/settings.json
@@ -41,18 +44,22 @@ PY
 
 echo "== 4. speech: the second failure in issue #1"
 out=$(claude-tts speak 'hello from a clean machine' 2>&1); rc=$?
-if echo "$out" | grep -q "Failed to generate speech"; then bad "speak could not synthesize" "$out"; else ok "speak synthesized (playback may be silent: no audio device here)"; fi
+if ! command -v claude-tts >/dev/null; then bad "speak not run: claude-tts missing" "";
+elif [ $rc -ne 0 ] || echo "$out" | grep -q "Failed to generate speech"; then bad "speak could not synthesize (rc=$rc)" "$out";
+else ok "speak synthesized (playback may be silent: no audio device here)"; fi
 echo "   speak said: $(echo "$out" | head -3 | tr '\n' '|')"
 out=$(echo "direct synthesis check" | piper --model ~/.local/share/piper-voices/en_US-hfc_male-medium.onnx --output_file /tmp/check.wav 2>&1); 
 [ -s /tmp/check.wav ] && ok "piper produced a WAV ($(stat -c %s /tmp/check.wav) bytes)" || bad "piper produced no WAV" "$out"
 
 echo "== 5. uninstall leaves settings.json without our hooks and valid"
-out=$(claude-tts-install --uninstall 2>&1)
+if [ ! -x ~/.claude/hooks/speak-response.sh ]; then bad "uninstall not tested: install did not deploy hooks" ""; else
+out=$(claude-tts-install --uninstall 2>&1) || true
 python3 - <<'PY' && ok "uninstall removed all TTS hooks, settings still valid JSON" || bad "uninstall left hooks or broke settings" "$(cat ~/.claude/settings.json)"
 import json, os
 s = json.load(open(os.path.expanduser("~/.claude/settings.json")))
 txt = json.dumps(s)
 assert "speak-response.sh" not in txt and "speak-intermediate.sh" not in txt and "voice-context.sh" not in txt
 PY
+fi
 
 echo; echo "== $PASS passed, $FAIL failed"; [ $FAIL -eq 0 ]
