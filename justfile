@@ -24,8 +24,11 @@ typecheck:
     uv tool run mypy src
     uv tool run ty check src
 
-# Unit tests; PY selects an interpreter, e.g. `just test PY=3.14`
-test PY="3.12":
+# Interpreter for `just test`; override on the command line: `just test PY=3.14`
+PY := "3.12"
+
+# Unit tests on the PY interpreter
+test:
     uv run --python {{PY}} --with pytest pytest -q --ignore=tests/docker
 
 # Coverage report
