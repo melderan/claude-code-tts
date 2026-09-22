@@ -13,7 +13,6 @@ in tests/test_session_pin.py.)
 
 import os
 import re
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest

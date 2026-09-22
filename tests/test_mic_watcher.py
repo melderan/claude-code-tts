@@ -1,16 +1,19 @@
 """Tests for mic-aware pause (Handy log watcher)."""
 
+import json
 import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import claude_code_tts.mic_watcher as mw
 from claude_code_tts.mic_watcher import (
-    MicWatcher,
-    RESUME_DELAY_MS,
     _RE_RECORDING_START,
     _RE_RECORDING_STOP,
+    RESUME_DELAY_MS,
+    MicWatcher,
+    handy_file_log_level,
+    handy_log_level_hides_recording,
 )
-
 
 # --- Regex tests ---
 
@@ -402,3 +405,110 @@ class TestMicWatcherIntegration:
         assert state["paused_by"] == "user"
 
         w.stop()
+
+
+
+class TestHandy097Patterns:
+    """Handy 0.9.7 logs recording events from TranscribeAction at DEBUG level."""
+
+    def test_new_start_line_matches(self):
+        line = "[2026-09-22][11:36:02][handy_app_lib::actions][DEBUG] TranscribeAction::start called for binding: transcribe"
+        assert _RE_RECORDING_START.search(line)
+
+    def test_new_stop_line_matches(self):
+        line = "[2026-09-22][11:36:05][handy_app_lib::actions][DEBUG] TranscribeAction::stop called for binding: transcribe"
+        assert _RE_RECORDING_STOP.search(line)
+
+    def test_empty_recording_counts_as_stop(self):
+        assert _RE_RECORDING_STOP.search("[DEBUG] Recording produced no audio samples; skipping persistence")
+        assert _RE_RECORDING_STOP.search("[DEBUG] No samples retrieved from recording stop")
+
+    def test_post_process_binding_also_pauses(self):
+        line = "[DEBUG] TranscribeAction::start called for binding: transcribe_with_post_process"
+        assert _RE_RECORDING_START.search(line)
+
+    def test_duplicate_stop_lines_do_not_block_the_tail(self, tmp_path, monkeypatch):
+        """After the first stop line resumed us, later stop lines must not wait again."""
+        log_file = tmp_path / "handy.log"
+        log_file.write_text("")
+        monkeypatch.setattr(mw, "HANDY_LOG", log_file)
+        monkeypatch.setattr(mw, "HANDY_SETTINGS", tmp_path / "missing.json")
+        state = {"paused": False}
+        writes = []
+        logs = []
+
+        def write_state(**kw):
+            writes.append(kw)
+            state.update({k: v for k, v in kw.items() if k in ("paused", "paused_by")})
+
+        w = mw.MicWatcher(
+            log_fn=lambda msg, *a, **k: logs.append(msg),
+            read_playback_state=lambda: dict(state),
+            write_playback_state=write_state,
+            resume_delay_ms=50,
+        )
+        assert w.start()
+        try:
+            # The tail seeks to the end when its thread opens the file; lines written
+            # before that would be skipped. Wait for the watcher to say it is tailing.
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not any("tailing" in m for m in logs):
+                time.sleep(0.01)
+            assert any("tailing" in m for m in logs)
+            with log_file.open("a") as f:
+                f.write("[DEBUG] TranscribeAction::start called for binding: transcribe\n")
+                f.write("[DEBUG] TranscribeAction::stop called for binding: transcribe\n")
+                f.write("[DEBUG] Recording stopped and samples retrieved in 30ms, sample count: 1\n")
+                f.write("[DEBUG] No samples retrieved from recording stop\n")
+
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and len(writes) < 2:
+                time.sleep(0.02)
+        finally:
+            w.stop()
+        assert writes[0] == {"paused": True, "paused_by": "mic"}
+        assert writes[1] == {"paused": False, "paused_by": None}
+        assert len(writes) == 2
+
+
+class TestHandyLogLevel:
+    def test_string_levels(self):
+        from claude_code_tts.mic_watcher import (
+            handy_file_log_level,
+        )
+
+        assert handy_file_log_level({"log_level": "Info"}) == "info"
+        assert handy_log_level_hides_recording("info") is True
+        assert handy_log_level_hides_recording("debug") is False
+        assert handy_log_level_hides_recording("trace") is False
+
+    def test_legacy_numeric_levels(self):
+        assert handy_file_log_level({"log_level": 2}) == "debug"
+        assert handy_file_log_level({"log_level": 3}) == "info"
+        assert handy_file_log_level({"log_level": 9}) is None
+        assert handy_file_log_level({}) is None
+
+    def test_reads_tauri_store_shape(self, tmp_path, monkeypatch):
+        store = tmp_path / "settings_store.json"
+        store.write_text(json.dumps({"settings": {"log_level": "info", "mute_while_recording": True}}))
+        monkeypatch.setattr(mw, "HANDY_SETTINGS", store)
+        assert mw.handy_file_log_level() == "info"
+        assert mw.handy_settings()["mute_while_recording"] is True
+
+    def test_start_warns_when_level_hides_recording(self, tmp_path, monkeypatch):
+        log_file = tmp_path / "handy.log"
+        log_file.write_text("")
+        store = tmp_path / "settings_store.json"
+        store.write_text(json.dumps({"settings": {"log_level": "info"}}))
+        monkeypatch.setattr(mw, "HANDY_LOG", log_file)
+        monkeypatch.setattr(mw, "HANDY_SETTINGS", store)
+        logs = []
+        w = mw.MicWatcher(
+            log_fn=lambda msg, level="INFO": logs.append((level, msg)),
+            read_playback_state=lambda: {"paused": False},
+            write_playback_state=lambda **kw: None,
+        )
+        assert w.start()
+        w.stop()
+        warns = [m for lvl, m in logs if lvl == "WARN"]
+        assert any("Log Level > Debug" in m for m in warns)

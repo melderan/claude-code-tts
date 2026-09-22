@@ -10,13 +10,10 @@ The two operator-facing surfaces added in v9.3.0:
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from claude_code_tts import cli
-
 
 # --- Layout detection ----------------------------------------------------
 

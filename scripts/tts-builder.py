@@ -20,26 +20,21 @@ Note: Uses uv's inline script metadata - dependencies auto-installed on first ru
 import argparse
 import asyncio
 import json
-import os
 import random
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
 
 try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
-    from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+    from textual.containers import Container, Horizontal, Vertical
     from textual.reactive import reactive
     from textual.widgets import (
         Button,
         Footer,
-        Header,
         Input,
         Label,
-        ListItem,
-        ListView,
         OptionList,
         Select,
         Static,
@@ -89,7 +84,7 @@ def get_installed_voices() -> list[tuple[str, int]]:
                 with open(json_file) as jf:
                     data = json.load(jf)
                     num_speakers = data.get("num_speakers", 1)
-            except (json.JSONDecodeError, IOError):
+            except (OSError, json.JSONDecodeError):
                 pass
 
         voices.append((voice_name, num_speakers))
@@ -121,7 +116,7 @@ class VoiceInfo(Static):
         self.speaker = None
         self.num_speakers = 1
 
-    def update_voice(self, voice: str, speaker: Optional[int], num_speakers: int):
+    def update_voice(self, voice: str, speaker: int | None, num_speakers: int):
         self.voice = voice
         self.speaker = speaker
         self.num_speakers = num_speakers
@@ -262,7 +257,7 @@ class PersonaBuilder(App):
 
     # Reactive state
     current_voice: reactive[str] = reactive("")
-    current_speaker: reactive[Optional[int]] = reactive(None)
+    current_speaker: reactive[int | None] = reactive(None)
     current_speed: reactive[str] = reactive("1.8")
     current_method: reactive[str] = reactive("playback")
     num_speakers: reactive[int] = reactive(1)
@@ -274,7 +269,7 @@ class PersonaBuilder(App):
         self.multi_only = multi_only
         self.voices = get_installed_voices()
         self.test_text = random.choice(TEST_PHRASES)
-        self.play_process: Optional[subprocess.Popen] = None
+        self.play_process: subprocess.Popen | None = None
 
         # Filter to multi-speaker only if requested
         if multi_only:
@@ -589,7 +584,7 @@ class SavePersonaScreen(App):
     }
     """
 
-    def __init__(self, voice: str, speaker: Optional[int], speed: str, method: str):
+    def __init__(self, voice: str, speaker: int | None, speed: str, method: str):
         super().__init__()
         self.voice = voice
         self.speaker = speaker

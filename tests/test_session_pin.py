@@ -143,7 +143,7 @@ class TestGetSessionIdPriority:
 
     def test_pinned_beats_project_root(self, fake_active_dir):
         with patch("claude_code_tts.session.find_claude_ancestor_pid", return_value=12345):
-            from claude_code_tts.session import pin_session, get_session_id
+            from claude_code_tts.session import get_session_id, pin_session
             pin_session("-canonical-from-hook")
 
             env = {"PROJECT_ROOT": "/Users/foo/different"}
@@ -158,7 +158,7 @@ class TestGetSessionIdPriority:
 
     def test_override_beats_pinned(self, fake_active_dir):
         with patch("claude_code_tts.session.find_claude_ancestor_pid", return_value=12345):
-            from claude_code_tts.session import pin_session, get_session_id
+            from claude_code_tts.session import get_session_id, pin_session
             pin_session("-canonical-from-hook")
             with patch.dict(os.environ, {"CLAUDE_TTS_SESSION": "override-wins"}, clear=False):
                 assert get_session_id() == "override-wins"
@@ -176,7 +176,7 @@ class TestGetSessionIdPriority:
     def test_pinned_beats_latest_session(self, fake_active_dir):
         """Process-tree pinned session still wins over latest.session."""
         with patch("claude_code_tts.session.find_claude_ancestor_pid", return_value=12345):
-            from claude_code_tts.session import pin_session, get_session_id
+            from claude_code_tts.session import get_session_id, pin_session
             pin_session("-correct-pinned-session")
         # Manually write a stale latest.session that should NOT win
         (fake_active_dir / "latest.session").write_text("-stale-latest\n")

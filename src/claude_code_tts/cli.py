@@ -15,7 +15,9 @@ import re
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from claude_code_tts import __version__
 from claude_code_tts.config import (
@@ -32,7 +34,6 @@ from claude_code_tts.config import (
     session_set,
 )
 from claude_code_tts.session import get_session_id
-
 
 # ---------------------------------------------------------------------------
 # Command handlers
@@ -904,11 +905,12 @@ def _sha256_file(path: Path, chunk_size: int = 65536) -> str:
 
 def _format_bytes(n: int) -> str:
     """Render a byte count as human-readable."""
+    size = float(n)
     for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-        n /= 1024  # type: ignore[assignment]
-    return f"{n:.1f} TB"
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
 
 
 def _download_with_progress(url: str, dest: Path, expected_bytes: int) -> bool:
@@ -918,8 +920,8 @@ def _download_with_progress(url: str, dest: Path, expected_bytes: int) -> bool:
     .part file and renames on success so a partial download isn't mistaken
     for a complete one.
     """
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     part = dest.with_suffix(dest.suffix + ".part")
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1025,7 +1027,7 @@ def _sherpa_install(model_id: str, *, assume_yes: bool = False) -> int:
     print(f"Model: {entry['id']}")
     print(f"Layout: {entry['layout']} ({entry['voices']} voices, {entry['language']})")
     print(f"License: {entry['license_weights']} (weights)")
-    print(f"License notes:")
+    print("License notes:")
     # Wrap the long notes string at ~70 cols for readability
     notes = entry['license_notes']
     line = ""
@@ -1063,7 +1065,7 @@ def _sherpa_install(model_id: str, *, assume_yes: bool = False) -> int:
         return 3
 
     # Verify
-    print(f"Verifying SHA256 ...", end=" ", flush=True)
+    print("Verifying SHA256 ...", end=" ", flush=True)
     digest = _sha256_file(archive)
     if digest != entry["sha256"]:
         print("MISMATCH")
@@ -1106,13 +1108,13 @@ def _sherpa_install(model_id: str, *, assume_yes: bool = False) -> int:
     print(f'  claude-tts speak --voice-sherpa {model_id} "hello there, this is a test"')
     print()
     print("Configure as a persona — add to ~/.claude-tts/config.json:")
-    print(f'  "personas": {{')
+    print('  "personas": {')
     print(f'    "claude-{model_id}": {{')
     print(f'      "voice_sherpa": "{model_id}",')
-    print(f'      "speaker_sherpa": 0,')
-    print(f'      "speed": 1.0')
-    print(f'    }}')
-    print(f'  }}')
+    print('      "speaker_sherpa": 0,')
+    print('      "speed": 1.0')
+    print('    }')
+    print('  }')
     return 0
 
 
@@ -1136,7 +1138,7 @@ def cmd_pause(args: argparse.Namespace) -> None:
     """Toggle TTS playback pause/resume."""
     playback_file = Path.home() / ".claude-tts" / "playback.json"
 
-    state = {"paused": False, "audio_pid": None}
+    state: dict[str, Any] = {"paused": False, "audio_pid": None}
     if playback_file.exists():
         try:
             state = json.loads(playback_file.read_text())
@@ -1239,10 +1241,10 @@ def cmd_test(args: argparse.Namespace) -> None:
     print("")
     print("Test complete. How did that sound?")
     print("")
-    print(f"Adjust settings with:")
+    print("Adjust settings with:")
     print(f"  /tts-speed <value>     Change speed (current: {cfg.speed}x)")
-    print(f"  /tts-persona <name>    Switch persona")
-    print(f"  /tts-random            Try a random voice")
+    print("  /tts-persona <name>    Switch persona")
+    print("  /tts-random            Try a random voice")
 
 
 def _explain_speech_failure() -> str:
@@ -1263,6 +1265,56 @@ def _explain_speech_failure() -> str:
         lines.append(f"  Download it:    claude-tts-install --voice {name}".rstrip())
     lines.append("  Details:        ~/.claude-tts/debug.log")
     return "\n".join(lines)
+
+
+def cmd_bridge(args: argparse.Namespace) -> None:
+    """Manage the loopback HTTP bridge (browser pages -> daemon)."""
+    from claude_code_tts.bridge import TOKEN_FILE, ensure_token, get_http_config, read_token
+    from claude_code_tts.config import load_raw_config, save_raw_config
+
+    sub = getattr(args, "bridge_command", None)
+    http = get_http_config()
+
+    if sub == "status":
+        print(f"Bridge: {'enabled' if http['enabled'] else 'disabled'}")
+        print(f"Listen: http://{http['bind']}:{http['port']}")
+        print(f"Token:  {TOKEN_FILE} ({'present' if read_token() else 'not created yet'})")
+        origins = http.get("allowed_origins") or []
+        print(f"Allowed origins: {', '.join(origins) if origins else '(none; userscripts only)'}")
+        if http["enabled"]:
+            print("Restart the daemon after changing any of this: claude-tts daemon restart")
+    elif sub == "token":
+        print(ensure_token())
+    elif sub in ("enable", "disable"):
+        config = load_raw_config()
+        block = {**http, **config.get("http", {})}
+        block["enabled"] = sub == "enable"
+        port = getattr(args, "port", None)
+        if port:
+            block["port"] = int(port)
+        config["http"] = block
+        save_raw_config(config)
+        if sub == "enable":
+            ensure_token()
+            print(f"Bridge enabled on http://{block['bind']}:{block['port']}")
+            print(f"Bearer token: {TOKEN_FILE}  (claude-tts bridge token prints it)")
+        else:
+            print("Bridge disabled")
+        print("Restart the daemon to apply: claude-tts daemon restart")
+    elif sub == "allow-origin":
+        config = load_raw_config()
+        block = {**http, **config.get("http", {})}
+        origins = list(block.get("allowed_origins", []))
+        origin = args.origin.rstrip("/")
+        if origin not in origins:
+            origins.append(origin)
+        block["allowed_origins"] = origins
+        config["http"] = block
+        save_raw_config(config)
+        print(f"Allowed origins: {', '.join(origins)}")
+        print("Restart the daemon to apply: claude-tts daemon restart")
+    else:
+        print("Usage: claude-tts bridge <status|token|enable|disable|allow-origin ORIGIN>")
 
 
 def cmd_speak(args: argparse.Namespace) -> None:
@@ -1330,12 +1382,13 @@ def cmd_speak(args: argparse.Namespace) -> None:
         or getattr(args, "random", False)
     )
     if cfg.mode == "queue" and not _has_overrides:
-        from claude_code_tts.audio import daemon_healthy, speak as _queue_speak
+        from claude_code_tts.audio import daemon_healthy
+        from claude_code_tts.audio import speak as _queue_speak
         if daemon_healthy():
             _queue_speak(text, cfg)
             return
 
-    voice_path = cfg.voice_path
+    voice_path: Path | None = cfg.voice_path
     voice_kokoro = cfg.voice_kokoro
     voice_kokoro_blend = cfg.voice_kokoro_blend
     voice_sherpa = cfg.voice_sherpa
@@ -1362,7 +1415,7 @@ def cmd_speak(args: argparse.Namespace) -> None:
         speed = args.speed
     if args.speaker is not None:
         speaker = args.speaker
-    if getattr(args, "random", False):
+    if getattr(args, "random", False) and voice_path is not None:
         # Random speaker from multi-speaker model
         voice_json = voice_path.with_suffix(".onnx.json")
         if voice_json.exists():
@@ -1488,7 +1541,7 @@ def _print_reader(original: str, filtered: str) -> None:
         left_lines.extend([""] * (height - len(left_lines)))
         right_lines.extend([""] * (height - len(right_lines)))
 
-        for left, right in zip(left_lines, right_lines):
+        for left, right in zip(left_lines, right_lines, strict=False):
             print(f"{left:<{col_width}} | {right:<{col_width}}")
 
         # Separator between paragraph groups
@@ -1812,6 +1865,16 @@ def _watermark_unlock(lock_dir: Path) -> None:
     shutil.rmtree(lock_dir, ignore_errors=True)
 
 
+@dataclass
+class _MessageGroup:
+    """One assistant message as it appears across transcript lines."""
+
+    line: int
+    texts: list[str] = field(default_factory=list)
+    summaries: list[str] = field(default_factory=list)
+    redacted: bool = False
+
+
 def _speakable_messages(transcript: Path, watermark: int, hook_type: str) -> list[tuple[int, str, str]]:
     """Return (line_no, source, text) for each assistant message worth speaking.
 
@@ -1841,7 +1904,7 @@ def _speakable_messages(transcript: Path, watermark: int, hook_type: str) -> lis
         return []
 
     order: list[str] = []
-    groups: dict[str, dict] = {}
+    groups: dict[str, _MessageGroup] = {}
     for idx in range(watermark, len(all_lines)):
         try:
             data = json.loads(all_lines[idx])
@@ -1854,12 +1917,12 @@ def _speakable_messages(transcript: Path, watermark: int, hook_type: str) -> lis
         key = message.get("id") or data.get("uuid") or f"line-{idx}"
         group = groups.get(key)
         if group is None:
-            group = groups[key] = {"texts": [], "summaries": [], "redacted": False, "line": idx}
+            group = groups[key] = _MessageGroup(line=idx)
             order.append(key)
         if isinstance(content, str):
             if content.strip():
-                group["texts"].append(content)
-                group["line"] = idx
+                group.texts.append(content)
+                group.line = idx
             continue
         if not isinstance(content, list):
             continue
@@ -1868,24 +1931,24 @@ def _speakable_messages(transcript: Path, watermark: int, hook_type: str) -> lis
                 continue
             kind = item.get("type")
             if kind == "text" and item.get("text", "").strip():
-                group["texts"].append(item["text"])
-                group["line"] = idx
+                group.texts.append(item["text"])
+                group.line = idx
             elif kind == "thinking":
                 body = (item.get("thinking") or "").strip()
                 if body and item.get("signature"):
-                    group["summaries"].append(body)
-                    if not group["texts"]:
-                        group["line"] = idx
+                    group.summaries.append(body)
+                    if not group.texts:
+                        group.line = idx
                 elif not body:
-                    group["redacted"] = True
+                    group.redacted = True
 
     result: list[tuple[int, str, str]] = []
     for key in order:
         group = groups[key]
-        if group["texts"]:
-            result.append((group["line"], "text", " ".join(group["texts"])))
-        elif group["redacted"] and group["summaries"]:
-            result.append((group["line"], "thinking-summary", " ".join(group["summaries"])))
+        if group.texts:
+            result.append((group.line, "text", " ".join(group.texts)))
+        elif group.redacted and group.summaries:
+            result.append((group.line, "thinking-summary", " ".join(group.summaries)))
     return result
 
 
@@ -1926,10 +1989,15 @@ def _parse_assistant_text(line: str) -> str:
 def cmd_audition(args: argparse.Namespace) -> None:
     """Interactive voice audition tool."""
     import shutil
-    import tty
     import termios
+    import tty
 
-    from claude_code_tts.audio import generate_speech, detect_player, write_queue_message, daemon_healthy
+    from claude_code_tts.audio import (
+        daemon_healthy,
+        detect_player,
+        generate_speech,
+        write_queue_message,
+    )
 
     temp_file = Path(f"/tmp/tts_audition_{os.getpid()}.wav")
     use_queue = getattr(args, "queue", False)
@@ -2141,7 +2209,7 @@ def cmd_audition(args: argparse.Namespace) -> None:
         # Play each voice solo first
         for label, voice in [("Solo: " + name1, v1), ("Solo: " + name2, v2)]:
             print(f"--- {label} ---")
-            print(f"  [Enter] Play  [s] Skip")
+            print("  [Enter] Play  [s] Skip")
             key = read_key()
             if key in ("s", "S"):
                 print("  Skipped")
@@ -2437,13 +2505,15 @@ def cmd_daemon(args: argparse.Namespace) -> None:
     """Manage the TTS daemon."""
     from claude_code_tts.daemon import (
         daemon_restart,
-        daemon_status as _daemon_status,
         install_service,
         run_foreground,
         show_logs,
         start_daemon,
         stop_daemon,
         write_control_message,
+    )
+    from claude_code_tts.daemon import (
+        daemon_status as _daemon_status,
     )
 
     dc = getattr(args, "daemon_command", None)
@@ -2562,8 +2632,8 @@ def cmd_handy(args: argparse.Namespace) -> None:
         # Works like a mutating webhook: matches Handy transcripts to segments
         # in the user's message and injects per-segment tone metadata.
         # Falls back to aggregated tone if no message text available.
-        from claude_code_tts.voice_context import enrich_message
         from claude_code_tts.handy import get_aggregated_tone
+        from claude_code_tts.voice_context import enrich_message
         max_age = getattr(args, "age", 120.0)
 
         # Try to read the user's message from stdin (hook passes it)
@@ -2578,14 +2648,14 @@ def cmd_handy(args: argparse.Namespace) -> None:
                 pass
 
         if message:
-            result = enrich_message(message, max_age_seconds=max_age)
-            if result:
-                print(result)
+            context = enrich_message(message, max_age_seconds=max_age)
+            if context:
+                print(context)
         else:
             # Fallback: no message text, use aggregated tone
-            tone = get_aggregated_tone(max_age_seconds=max_age)
-            if tone:
-                print(f"[Voice context: JMO is {tone}]")
+            agg_tone = get_aggregated_tone(max_age_seconds=max_age)
+            if agg_tone:
+                print(f"[Voice context: JMO is {agg_tone}]")
 
     elif subcmd == "status":
         print(f"Recordings dir: {HANDY_RECORDINGS_DIR}")
@@ -2694,6 +2764,19 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=cmd_daemon)
 
     # --- speak ---
+    p = subparsers.add_parser("bridge", help="Loopback HTTP bridge for browser pages")
+    bridge_sub = p.add_subparsers(dest="bridge_command")
+    bridge_sub.add_parser("status", help="Show bridge settings").set_defaults(func=cmd_bridge)
+    bridge_sub.add_parser("token", help="Print the bearer token").set_defaults(func=cmd_bridge)
+    bs = bridge_sub.add_parser("enable", help="Enable the bridge (daemon restart applies it)")
+    bs.add_argument("--port", type=int, help="Listen port (default 7457)")
+    bs.set_defaults(func=cmd_bridge)
+    bridge_sub.add_parser("disable", help="Disable the bridge").set_defaults(func=cmd_bridge)
+    bs = bridge_sub.add_parser("allow-origin", help="Allow a browser origin (CORS)")
+    bs.add_argument("origin", help="e.g. https://example.com")
+    bs.set_defaults(func=cmd_bridge)
+    p.set_defaults(func=cmd_bridge)
+
     p = subparsers.add_parser("speak", help="Speak text (standalone or from hook)")
     p.add_argument("text", nargs="?", help="Text to speak")
     p.add_argument("--voice", help="Piper voice model name")

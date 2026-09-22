@@ -13,7 +13,6 @@ Verifies that the installer correctly handles:
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from pathlib import Path
 
@@ -21,7 +20,6 @@ import pytest
 
 # Import the installer module so we can monkeypatch its constants
 import claude_code_tts.install as inst
-
 
 # The exact set of scripts that existed in v6.x MANIFEST["scripts"].
 # If this changes, the test should break — it means LEGACY_SCRIPTS needs updating.
@@ -79,7 +77,7 @@ class TestManifest:
 
     def test_manifest_entries_yields_only_hooks_and_commands(self):
         categories = set()
-        for name, src, dst in inst._manifest_entries():
+        for _name, src, _dst in inst._manifest_entries():
             # Determine category from source path
             if "hooks" in str(src):
                 categories.add("hooks")
@@ -478,8 +476,7 @@ class TestPreflight:
 
     def test_manifest_sources_all_exist(self):
         """Every file in MANIFEST has a corresponding source in the repo."""
-        repo = _repo_dir()
-        for name, src, dst in inst._manifest_entries():
+        for name, src, _dst in inst._manifest_entries():
             assert src.exists(), f"Preflight would fail: {name} source missing at {src}"
 
     def test_no_legacy_sources_needed(self):
@@ -487,8 +484,7 @@ class TestPreflight:
         # The old MANIFEST["scripts"] entries no longer exist in the repo.
         # Preflight only iterates _manifest_entries() which only covers
         # hooks and commands now.
-        repo = _repo_dir()
-        for name, src, dst in inst._manifest_entries():
+        for name, _src, _dst in inst._manifest_entries():
             # None of these should be legacy scripts
             assert name not in V6_SCRIPTS, (
                 f"Preflight still checks for legacy script: {name}"

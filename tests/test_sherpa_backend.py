@@ -95,18 +95,24 @@ class TestSherpaRouting:
     """When voice_sherpa is set, sherpa is invoked correctly."""
 
     def test_sherpa_invoked_when_voice_sherpa_set(self, tmp_path, fake_sherpa_layout):
+        """Since v9.8.5 sherpa runs through a persistent worker; the routing hands it the
+        persona's model, speaker, speed and output path and returns the path it produced."""
         captured = {}
 
-        def fake_run(cmd, **kwargs):
-            captured["cmd"] = cmd
-            captured["text"] = kwargs.get("input")
-            # Touch the output to mimic successful generation.
-            out_idx = cmd.index("--output") + 1
-            Path(cmd[out_idx]).write_bytes(b"RIFFfake")
-            return MagicMock(returncode=0, stdout="", stderr="")
+        class FakeWorker:
+            def generate(self, text, *, speaker, speed, output_path):
+                captured.update(text=text, speaker=speaker, speed=speed, output_path=output_path)
+                Path(output_path).write_bytes(b"RIFFfake")
+                return True
+
+        requested = []
+
+        def fake_get_worker(model_id):
+            requested.append(model_id)
+            return FakeWorker()
 
         out = tmp_path / "out.wav"
-        with patch("claude_code_tts.audio.subprocess.run", side_effect=fake_run):
+        with patch("claude_code_tts.audio._get_sherpa_worker", side_effect=fake_get_worker):
             result = generate_speech(
                 "hello there",
                 voice_sherpa="vctk-vits",
@@ -116,14 +122,8 @@ class TestSherpaRouting:
             )
 
         assert result == out
-        assert captured["text"] == "hello there"
-        cmd = captured["cmd"]
-        assert cmd[0] == str(fake_sherpa_layout["py"])
-        assert "-m" in cmd and "claude_code_tts.sherpa_speak" in cmd
-        assert "--model-dir" in cmd
-        assert str(fake_sherpa_layout["models"] / "vctk-vits") in cmd
-        assert "--speaker" in cmd and "42" in cmd
-        assert "--speed" in cmd and "1.500" in cmd
+        assert requested == ["vctk-vits"]
+        assert captured == {"text": "hello there", "speaker": 42, "speed": 1.5, "output_path": out}
 
     def test_sherpa_returns_none_if_venv_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr(audio, "SHERPA_VENV_DIR", tmp_path / "no-venv")
@@ -176,7 +176,7 @@ class TestSherpaConfigPlumbing:
     """voice_sherpa flows from persona dict → TTSConfig → generate_speech."""
 
     def test_voice_sherpa_loaded_from_persona(self, tmp_path, monkeypatch):
-        from claude_code_tts.config import TTSConfig, load_config
+        from claude_code_tts.config import load_config
 
         # Redirect HOME so we don't touch the real config.
         monkeypatch.setattr("claude_code_tts.config.HOME", tmp_path)
@@ -220,9 +220,10 @@ class TestSherpaQueueMessage:
     """Queue mode (write_queue_message) carries voice_sherpa and pitch_filter fields."""
 
     def test_queue_message_includes_sherpa_fields(self, tmp_path, monkeypatch):
+        import json
+
         from claude_code_tts.audio import write_queue_message
         from claude_code_tts.config import TTSConfig
-        import json
 
         monkeypatch.setattr(audio, "TTS_QUEUE_DIR", tmp_path / "queue")
 
@@ -238,9 +239,10 @@ class TestSherpaQueueMessage:
         assert msg["speaker_sherpa"] == 3
 
     def test_queue_message_includes_pitch_filter(self, tmp_path, monkeypatch):
+        import json
+
         from claude_code_tts.audio import write_queue_message
         from claude_code_tts.config import TTSConfig
-        import json
 
         monkeypatch.setattr(audio, "TTS_QUEUE_DIR", tmp_path / "queue")
 
@@ -254,9 +256,10 @@ class TestSherpaQueueMessage:
         assert msg["pitch_filter"] == "asetrate=24000*0.86,aresample=24000*1.0,atempo=1.0"
 
     def test_queue_message_pitch_filter_empty_by_default(self, tmp_path, monkeypatch):
+        import json
+
         from claude_code_tts.audio import write_queue_message
         from claude_code_tts.config import TTSConfig
-        import json
 
         monkeypatch.setattr(audio, "TTS_QUEUE_DIR", tmp_path / "queue")
 
@@ -333,6 +336,7 @@ class TestPitchFilter:
     def test_pitch_filter_loaded_from_persona(self, tmp_path, monkeypatch):
         """load_config reads pitch_filter from the persona block."""
         import json
+
         from claude_code_tts.config import load_config
 
         monkeypatch.setattr("claude_code_tts.config.HOME", tmp_path)

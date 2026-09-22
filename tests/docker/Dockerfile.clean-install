@@ -1,0 +1,21 @@
+# Clean-machine install test: a stranger on Ubuntu with nothing but uv.
+# Proves the path from issue #1: `uv tool install` a tag, run the real installer, get speech.
+#
+# Build:  docker build -t claude-tts-clean-install -f tests/docker/Dockerfile.clean-install .
+# Run:    tests/docker/run-clean-install-test.sh v9.11.1
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates git sudo python3 procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# A normal user with sudo, like a laptop. Not root: the installer must cope with ~/.local/bin.
+RUN useradd -m -s /bin/bash tester && echo "tester ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+USER tester
+WORKDIR /home/tester
+# uv is mounted in by the runner at /usr/local/bin/uv (a static binary), so the build needs no
+# astral.sh access and nothing under the user's home is created by the daemon.
+ENV PATH="/home/tester/.local/bin:${PATH}"
+COPY --chmod=0755 tests/docker/clean_install_e2e.sh /home/tester/clean_install_e2e.sh
+ENTRYPOINT ["/home/tester/clean_install_e2e.sh"]

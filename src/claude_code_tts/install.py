@@ -27,11 +27,10 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 # Version of this installer/package
 from claude_code_tts import __version__
-
 
 # --- Platform Detection ---
 
@@ -43,7 +42,7 @@ def detect_platform() -> str:
     elif system == "Linux":
         # Check for WSL
         try:
-            with open("/proc/version", "r") as f:
+            with open("/proc/version") as f:
                 if "microsoft" in f.read().lower():
                     return "wsl"
         except (FileNotFoundError, PermissionError):
@@ -53,7 +52,7 @@ def detect_platform() -> str:
         return "unsupported"
 
 
-def detect_package_manager() -> Optional[str]:
+def detect_package_manager() -> str | None:
     """Detect available package manager."""
     if shutil.which("brew"):
         return "brew"
@@ -361,12 +360,43 @@ def run_cmd(
     return subprocess.run(cmd, check=check, capture_output=capture, text=True)
 
 
-def download_file(url: str, dest: Path) -> None:
+def download_file(url: str, dest: Path, min_bytes: int = 0) -> None:
+    """Download url to dest, or die saying why.
+
+    `curl -L` without --fail used to save an HTTP error page as the file, and a 95-byte
+    "forbidden" page then went on to be loaded as a 60 MB voice model. Now: fail on HTTP errors,
+    require a plausible size, and reject anything that looks like text where a model belongs.
+    """
     info(f"Downloading {dest.name}...")
+    dest.parent.mkdir(parents=True, exist_ok=True)
     try:
-        run_cmd(["curl", "-L", "--progress-bar", "-o", str(dest), url])
-    except subprocess.CalledProcessError:
-        die(f"Failed to download {url}")
+        run_cmd(["curl", "-fL", "--progress-bar", "-o", str(dest), url])
+    except subprocess.CalledProcessError as e:
+        dest.unlink(missing_ok=True)
+        die(f"Failed to download {url} (curl exit {e.returncode}). "
+            f"If you are behind a filtering proxy, the redirect target may need allowing too.")
+    problem = _download_problem(dest, min_bytes)
+    if problem:
+        dest.unlink(missing_ok=True)
+        die(f"Download of {dest.name} is not usable: {problem}. Source: {url}")
+
+
+def _download_problem(dest: Path, min_bytes: int) -> str:
+    """Return why a downloaded file is not what we asked for, or '' if it looks right."""
+    if not dest.exists():
+        return "no file was written"
+    size = dest.stat().st_size
+    if size < min_bytes:
+        return f"only {size} bytes (expected at least {min_bytes})"
+    head = dest.read_bytes()[:64]
+    if dest.suffix == ".json":
+        try:
+            json.loads(dest.read_text())
+        except (ValueError, UnicodeDecodeError):
+            return "not valid JSON"
+    elif dest.suffix == ".onnx" and (head.lstrip().startswith(b"<") or head.startswith(b"Approval") or head.startswith(b"Blocked")):
+        return "the server returned a text page instead of a model"
+    return ""
 
 
 # --- Backup Manager ---
@@ -377,7 +407,7 @@ class BackupManager:
     def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.backup_path: Optional[Path] = None
+        self.backup_path: Path | None = None
         self.backed_up_files: list[tuple[Path, Path]] = []
 
     def create_backup_dir(self) -> Path:
@@ -387,13 +417,14 @@ class BackupManager:
             self.backup_path.mkdir(parents=True, exist_ok=True)
         return self.backup_path
 
-    def backup_file(self, file_path: Path) -> Optional[Path]:
+    def backup_file(self, file_path: Path) -> Path | None:
         """Backup a single file if it exists."""
         if not file_path.exists():
             return None
 
         if self.backup_path is None:
             self.create_backup_dir()
+        assert self.backup_path is not None
 
         # Preserve directory structure in backup
         relative = file_path.relative_to(HOME)
@@ -422,7 +453,7 @@ class BackupManager:
             for original, backup in self.backed_up_files:
                 print(f"  cp {backup} {original}")
             print()
-            print(f"Or restore everything:")
+            print("Or restore everything:")
             print(f"  cp -r {self.backup_path}/.claude/* ~/.claude/")
         print(f"{Colors.YELLOW}--------------------------{Colors.NC}")
 
@@ -468,7 +499,7 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
         preflight(f"{Colors.GREEN}PASS{Colors.NC} curl found")
 
     # Check source files exist
-    for name, src_path, dst_path in _manifest_entries():
+    for name, src_path, _dst_path in _manifest_entries():
         if not src_path.exists():
             issues.append(f"Source file not found: {src_path}")
             preflight(f"{Colors.RED}FAIL{Colors.NC} Source {name} missing")
@@ -522,8 +553,6 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
         preflight(f"{Colors.YELLOW}INFO{Colors.NC} claude-tts CLI not found (will be installed via uv tool)")
 
     # Check optional dependencies (warnings only)
-    if not command_exists("jq"):
-        preflight(f"{Colors.YELLOW}INFO{Colors.NC} jq not found (optional, used by legacy scripts)")
     if not command_exists("uv") and not command_exists("pipx"):
         preflight(f"{Colors.YELLOW}INFO{Colors.NC} pipx not found (will be installed; uv preferred)")
     if not command_exists("piper"):
@@ -606,8 +635,8 @@ def do_uninstall(dry_run: bool = False) -> None:
 
     # Remove our hooks from settings.json: all three events, only our entries
     if SETTINGS_FILE.exists():
-        with open(SETTINGS_FILE) as f:
-            settings = json.load(f)
+        with open(SETTINGS_FILE) as fh:
+            settings = json.load(fh)
 
         removed = remove_tts_hooks(settings)
         if removed:
@@ -673,32 +702,38 @@ def do_uninstall(dry_run: bool = False) -> None:
 
 # --- Package Installation Helpers ---
 
-def install_package(package: str, dry_run: bool = False) -> None:
-    """Install a package using the detected package manager."""
+def install_package(package: str, dry_run: bool = False) -> bool:
+    """Install a system package with the detected package manager. Returns True on success.
+
+    Never fatal: a package manager that is missing, offline, or refuses is reported and the
+    caller decides what the missing package means. On apt the package lists are refreshed
+    first; a fresh machine has none, and `apt-get install` without them fails outright.
+    """
     if dry_run:
         dry(f"{PKG_MANAGER} install {package}")
-        return
+        return True
 
     info(f"Installing {package}...")
-
+    sudo = [] if os.geteuid() == 0 or PKG_MANAGER == "brew" else ["sudo"]
+    commands: list[list[str]]
     if PKG_MANAGER == "brew":
-        run_cmd(["brew", "install", package])
+        commands = [["brew", "install", package]]
     elif PKG_MANAGER == "apt":
-        # Check if we need sudo
-        if os.geteuid() != 0:
-            run_cmd(["sudo", "apt", "install", "-y", package])
-        else:
-            run_cmd(["apt", "install", "-y", package])
+        commands = [sudo + ["apt-get", "update", "-qq"], sudo + ["apt-get", "install", "-y", "-qq", package]]
     elif PKG_MANAGER == "dnf":
-        if os.geteuid() != 0:
-            run_cmd(["sudo", "dnf", "install", "-y", package])
-        else:
-            run_cmd(["dnf", "install", "-y", package])
+        commands = [sudo + ["dnf", "install", "-y", package]]
     elif PKG_MANAGER == "pacman":
-        if os.geteuid() != 0:
-            run_cmd(["sudo", "pacman", "-S", "--noconfirm", package])
-        else:
-            run_cmd(["pacman", "-S", "--noconfirm", package])
+        commands = [sudo + ["pacman", "-S", "--noconfirm", package]]
+    else:
+        warn(f"No supported package manager found; install {package} yourself")
+        return False
+    try:
+        for cmd in commands:
+            run_cmd(cmd)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        warn(f"Could not install {package} with {PKG_MANAGER}: {e}")
+        return False
+    return True
 
 
 def install_pipx(dry_run: bool = False) -> None:
@@ -741,7 +776,55 @@ def install_pipx(dry_run: bool = False) -> None:
 
 # --- Install ---
 
-def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: float | None = None) -> None:
+def restart_running_daemon(dry_run: bool = False) -> None:
+    """Restart the daemon if one is running, so it picks up new code.
+
+    Waits for the daemon to finish what it is saying; a long message makes this
+    take as long as the message. Callers that manage the daemon themselves
+    (scripts/up.py) pass --no-daemon-restart and do one restart of their own.
+    """
+    daemon_pid_file = TTS_CONFIG_DIR / "daemon.pid"
+    if daemon_pid_file.exists():
+        try:
+            pid = int(daemon_pid_file.read_text().strip())
+            os.kill(pid, 0)  # Check if running
+            if dry_run:
+                dry("Restart TTS daemon to pick up new code")
+            else:
+                if command_exists("claude-tts"):
+                    # Use the Python CLI to restart
+                    info("Restarting TTS daemon via claude-tts...")
+                    try:
+                        subprocess.run(
+                            ["claude-tts", "daemon", "restart"],
+                            capture_output=True, timeout=60,
+                        )
+                        success("Daemon restarted via claude-tts CLI")
+                    except subprocess.TimeoutExpired:
+                        # Restart likely succeeded — the startup announcement
+                        # can take longer than the timeout.
+                        success("Daemon restart initiated (still starting up)")
+                else:
+                    # Fallback: SIGTERM only (can't start new daemon without CLI)
+                    info("Stopping old daemon (claude-tts not on PATH)...")
+                    os.kill(pid, signal.SIGTERM)
+                    for _ in range(100):
+                        try:
+                            os.kill(pid, 0)
+                            time.sleep(0.1)
+                        except ProcessLookupError:
+                            break
+                    warn("Daemon stopped. Start manually: claude-tts daemon start")
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass  # Daemon not running, nothing to restart
+
+
+def do_install(
+    dry_run: bool = False,
+    upgrade: bool = False,
+    default_speed: float | None = None,
+    restart_daemon: bool = True,
+) -> None:
     platform_name = {"macos": "macOS", "linux": "Linux", "wsl": "WSL 2"}.get(PLATFORM, PLATFORM)
 
     print()
@@ -796,17 +879,12 @@ def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: floa
     print()
     info("Checking dependencies...")
 
-    # Install jq (optional, used by legacy scripts only)
-    if not command_exists("jq"):
-        install_package("jq", dry_run=dry_run)
-    success(
-        f"jq {'will be installed' if dry_run and not command_exists('jq') else 'ready'}"
-    )
 
     # Install audio player on Linux/WSL
     if PLATFORM in ("linux", "wsl") and not command_exists("paplay"):
         pkg_name = "pulseaudio-utils" if PKG_MANAGER in ("apt", "dnf") else "pulseaudio"
-        install_package(pkg_name, dry_run=dry_run)
+        if not install_package(pkg_name, dry_run=dry_run):
+            warn(f"No audio player installed; speech will synthesize but not play until you install {pkg_name}")
     if PLATFORM in ("linux", "wsl"):
         success(
             f"paplay {'will be installed' if dry_run and not command_exists('paplay') else 'ready'}"
@@ -881,7 +959,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: floa
             dry(f"  -> {VOICE_FILE}")
         else:
             VOICES_DIR.mkdir(parents=True, exist_ok=True)
-            download_file(VOICE_URL, VOICE_FILE)
+            download_file(VOICE_URL, VOICE_FILE, min_bytes=1_000_000)
             download_file(VOICE_JSON_URL, VOICE_JSON)
         success(f"Voice model {'will be downloaded' if dry_run else 'downloaded'}")
     else:
@@ -939,7 +1017,10 @@ def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: floa
         success(f"Removed {legacy_removed} legacy bash script(s) from {TTS_CONFIG_DIR}")
 
     # --- Deploy compatibility shims for externally-referenced scripts ---
-
+    # On a first install ~/.claude-tts does not exist yet; the shim write was the first thing to
+    # touch it and crashed the installer after the hooks were deployed and before settings were.
+    if not dry_run:
+        TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     shims_deployed = 0
     for shim_name, cli_cmd in COMPAT_SHIMS.items():
         shim_path = TTS_CONFIG_DIR / shim_name
@@ -955,41 +1036,10 @@ def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: floa
     if shims_deployed > 0:
         success(f"Deployed {shims_deployed} compatibility shim(s) to {TTS_CONFIG_DIR}")
 
-    # --- Restart daemon if running (picks up new code) ---
-    daemon_pid_file = TTS_CONFIG_DIR / "daemon.pid"
-    if daemon_pid_file.exists():
-        try:
-            pid = int(daemon_pid_file.read_text().strip())
-            os.kill(pid, 0)  # Check if running
-            if dry_run:
-                dry("Restart TTS daemon to pick up new code")
-            else:
-                if command_exists("claude-tts"):
-                    # Use the Python CLI to restart
-                    info("Restarting TTS daemon via claude-tts...")
-                    try:
-                        subprocess.run(
-                            ["claude-tts", "daemon", "restart"],
-                            capture_output=True, timeout=60,
-                        )
-                        success("Daemon restarted via claude-tts CLI")
-                    except subprocess.TimeoutExpired:
-                        # Restart likely succeeded — the startup announcement
-                        # can take longer than the timeout.
-                        success("Daemon restart initiated (still starting up)")
-                else:
-                    # Fallback: SIGTERM only (can't start new daemon without CLI)
-                    info("Stopping old daemon (claude-tts not on PATH)...")
-                    os.kill(pid, signal.SIGTERM)
-                    for _ in range(100):
-                        try:
-                            os.kill(pid, 0)
-                            time.sleep(0.1)
-                        except ProcessLookupError:
-                            break
-                    warn("Daemon stopped. Start manually: claude-tts daemon start")
-        except (ValueError, ProcessLookupError, PermissionError):
-            pass  # Daemon not running, nothing to restart
+    if restart_daemon:
+        restart_running_daemon(dry_run=dry_run)
+    else:
+        info("Daemon restart left to the caller (--no-daemon-restart)")
 
     # --- Install service files ---
 
@@ -1075,8 +1125,8 @@ def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: floa
     if upgrade:
         # In upgrade mode, check if PostToolUse hook needs to be added
         if SETTINGS_FILE.exists():
-            with open(SETTINGS_FILE) as f:
-                settings = json.load(f)
+            with open(SETTINGS_FILE) as fh:
+                settings = json.load(fh)
             if ensure_tts_hooks(settings):
                 write_settings(settings)
                 success("Settings updated (speech hooks registered and marked async)")
@@ -1091,8 +1141,8 @@ def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: floa
         if dry_run:
             dry("Add TTS hooks to settings.json (preserving existing hooks)")
         else:
-            with open(SETTINGS_FILE) as f:
-                settings = json.load(f)
+            with open(SETTINGS_FILE) as fh:
+                settings = json.load(fh)
             if ensure_tts_hooks(settings):
                 write_settings(settings)
                 success("TTS hooks added to settings.json (preserving existing hooks)")
@@ -1189,7 +1239,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: floa
             print("  4. Use /tts-unmute to re-enable TTS")
         print()
         print("Configuration:")
-        print(f"  CLI:      claude-tts (via uv tool)")
+        print("  CLI:      claude-tts (via uv tool)")
         print(f"  Hook:     {HOOKS_DIR / 'speak-response.sh'}")
         print(f"  Settings: {SETTINGS_FILE}")
         print(f"  Voice:    {VOICE_FILE}")
@@ -1336,7 +1386,7 @@ def save_config(config: dict) -> None:
         json.dump(config, f, indent=2)
 
 
-def get_installed_version() -> Optional[str]:
+def get_installed_version() -> str | None:
     """Get the currently installed version from config."""
     config = load_config()
     return config.get("installed_version")
@@ -1360,7 +1410,7 @@ def get_file_hash(filepath: Path) -> str:
 
 def check_for_updates() -> dict:
     """Check if installed files differ from repo files."""
-    results = {
+    results: dict[str, Any] = {
         "installed_version": get_installed_version(),
         "repo_version": __version__,
         "files": {},
@@ -1622,7 +1672,7 @@ def download_voice(voice_name: str, path_segment: str, dry_run: bool = False) ->
     VOICES_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
-        download_file(onnx_url, onnx_file)
+        download_file(onnx_url, onnx_file, min_bytes=1_000_000)
         download_file(json_url, json_file)
         return True
     except Exception as e:
@@ -1704,7 +1754,7 @@ def create_persona_from_voice(
     gender: str,
     description: str,
     ai_type: str = "claude",
-    config: Optional[dict] = None,
+    config: dict | None = None,
 ) -> str:
     """Create a persona for a downloaded voice. Returns persona name."""
     if config is None:
@@ -1865,7 +1915,7 @@ def do_download_voices() -> None:
 
     # Build display list
     display_options = []
-    for name, gender, quality, desc, path in voices_to_show:
+    for name, gender, quality, desc, _path in voices_to_show:
         is_installed = name in installed
         status = f"{Colors.GREEN}[installed]{Colors.NC}" if is_installed else ""
         gender_icon = "F" if gender == "female" else "M"
@@ -1962,7 +2012,7 @@ def do_bootstrap_from_config(config_path: Path) -> None:
 
     # Get all unique voices from personas
     voices_needed = set()
-    for name, persona in config.get("personas", {}).items():
+    for _name, persona in config.get("personas", {}).items():
         voice = persona.get("voice")
         if voice:
             voices_needed.add(voice)
@@ -2010,7 +2060,7 @@ def do_interactive() -> None:
     """Interactive main menu."""
     print()
     print("========================================")
-    print(f"  Claude Code TTS - Interactive Setup")
+    print("  Claude Code TTS - Interactive Setup")
     print("========================================")
 
     # Check current state
@@ -2197,7 +2247,7 @@ def do_enable_sherpa(*, assume_yes: bool = False, dry_run: bool = False) -> int:
                 info(f"ONNX Runtime providers available: {', '.join(providers)}")
             print()
             print(f"  Models directory: {models_dir}")
-            print(f"  (drop a model.onnx + tokens.txt under <id>/ to use it)")
+            print("  (drop a model.onnx + tokens.txt under <id>/ to use it)")
             print()
             return 0
         else:
@@ -2220,11 +2270,11 @@ def do_enable_sherpa(*, assume_yes: bool = False, dry_run: bool = False) -> int:
 
     # 4. Show plan, confirm
     plat = detect_platform()
-    print(f"This will:")
+    print("This will:")
     print(f"  • Create a Python 3.12 venv at {venv_dir}")
-    print(f"  • Install sherpa-onnx (~77 MB) into that venv")
+    print("  • Install sherpa-onnx (~77 MB) into that venv")
     print(f"  • Create models directory at {models_dir}")
-    print(f"  • Touch nothing outside ~/.claude-tts/")
+    print("  • Touch nothing outside ~/.claude-tts/")
     print()
     print(f"  Platform:    {plat}")
     if free >= 0:
@@ -2287,11 +2337,11 @@ def do_enable_sherpa(*, assume_yes: bool = False, dry_run: bool = False) -> int:
     print()
     print(f"{Colors.GREEN}Next steps:{Colors.NC}")
     print(f"  1. Drop a sherpa-onnx model under {models_dir}/<id>/")
-    print(f"     Minimum: model.onnx + tokens.txt")
-    print(f"  2. Configure a persona in ~/.claude-tts/config.json with:")
-    print(f'       "voice_sherpa": "<id>"')
-    print(f'       "speaker_sherpa": <int>   (multi-speaker models only)')
-    print(f"  3. /tts-persona <name> --project   (in your target repo)")
+    print("     Minimum: model.onnx + tokens.txt")
+    print("  2. Configure a persona in ~/.claude-tts/config.json with:")
+    print('       "voice_sherpa": "<id>"')
+    print('       "speaker_sherpa": <int>   (multi-speaker models only)')
+    print("  3. /tts-persona <name> --project   (in your target repo)")
     print()
     print("Curated model picklist + auto-download is the next slice.")
     print()
@@ -2387,6 +2437,11 @@ Examples:
         help="Bootstrap the sherpa-onnx TTS backend in an isolated venv (additive, opt-in)",
     )
     parser.add_argument(
+        "--no-daemon-restart",
+        action="store_true",
+        help="Leave the running daemon alone; the caller restarts it (used by `just up`)",
+    )
+    parser.add_argument(
         "--yes", "-y",
         action="store_true",
         help="Assume yes to interactive prompts (for scripted / non-interactive use)",
@@ -2412,9 +2467,15 @@ Examples:
     elif args.bootstrap:
         do_bootstrap_from_config(Path(args.bootstrap))
     elif args.upgrade:
-        do_install(dry_run=args.dry_run, upgrade=True, default_speed=args.default_speed)
+        do_install(
+            dry_run=args.dry_run, upgrade=True, default_speed=args.default_speed,
+            restart_daemon=not args.no_daemon_restart,
+        )
     elif args.install:
-        do_install(dry_run=args.dry_run, upgrade=False, default_speed=args.default_speed)
+        do_install(
+            dry_run=args.dry_run, upgrade=False, default_speed=args.default_speed,
+            restart_daemon=not args.no_daemon_restart,
+        )
     elif args.personas:
         do_manage_personas()
     elif args.voice:

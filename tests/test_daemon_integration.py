@@ -6,7 +6,6 @@ pause -> position tracking -> resume -> trim -> skip-near-end flow.
 """
 
 import json
-import signal
 import stat
 import threading
 import time
@@ -24,11 +23,9 @@ from claude_code_tts.daemon import (
     daemon_play_audio,
     get_wav_duration,
     read_playback_state,
-    rewind_amount,
     trim_wav,
     write_playback_state,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -319,7 +316,7 @@ class TestResumeFlowIntegration:
     def test_resume_from_early_position_plays_from_start(self, daemon_env):
         """If interrupted early (< REWIND_REAL_SECONDS), play from start."""
         tmp = daemon_env["tmp_path"]
-        full_wav = make_wav(tmp / "full.wav", 30.0)
+        make_wav(tmp / "full.wav", 30.0)
 
         audio_position = 3.0  # Less than REWIND_REAL_SECONDS (5.0)
         resume_from = max(0.0, audio_position - REWIND_REAL_SECONDS)
@@ -434,7 +431,6 @@ class TestDaemonLoopMessageFlow:
     @pytest.fixture(autouse=True)
     def _patch_daemon_for_thread(self, daemon_env):
         """Extra patches needed to run daemon_loop in a thread."""
-        tmp = daemon_env["tmp_path"]
         state_dir = daemon_env["state_dir"]
 
         with patch.object(daemon_mod, "PID_FILE", state_dir / "daemon.pid"), \
@@ -534,7 +530,7 @@ class TestDaemonLoopMessageFlow:
             make_wav(output_file, 30.0)
             return True
 
-        msg_file = self._enqueue_message(queue_dir, "A longer message to test pause")
+        self._enqueue_message(queue_dir, "A longer message to test pause")
 
         with patch.object(daemon_mod, "detect_player", return_value=[str(fake)]), \
              patch.object(daemon_mod, "daemon_generate_speech", side_effect=fake_generate), \
@@ -592,7 +588,6 @@ class TestDaemonLoopMessageFlow:
     def test_resume_after_pause_plays_trimmed(self, daemon_env):
         """After pause and resume, daemon should trim and play from position."""
         tmp = daemon_env["tmp_path"]
-        queue_dir = daemon_env["queue_dir"]
         fake = make_fake_player(tmp, duration=0.3)
 
         generate_calls = []

@@ -17,7 +17,6 @@ from __future__ import annotations
 import sqlite3
 import time
 from pathlib import Path
-from typing import Optional
 
 from claude_code_tts.handy import (
     ANALYSIS_DB,
@@ -57,7 +56,7 @@ def _get_recent_transcripts(
 def _get_tone_for_file(
     file_name: str,
     db_path: Path = ANALYSIS_DB,
-) -> Optional[str]:
+) -> str | None:
     """Get the tone summary for a specific recording file."""
     if not db_path.exists():
         return None
@@ -167,7 +166,7 @@ def enrich_message(
 
     # Build output
     lines = ["[Voice context]"]
-    for i, (pos, t_info, tone) in enumerate(matched, 1):
+    for i, (_pos, _t_info, tone) in enumerate(matched, 1):
         if tone and tone != "neutral tone":
             # Get detailed features for this file
             features_str = tone

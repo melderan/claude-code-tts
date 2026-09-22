@@ -15,10 +15,10 @@ import time
 from pathlib import Path
 
 from claude_code_tts.config import (
-    TTSConfig,
-    TTS_QUEUE_DIR,
-    SHERPA_VENV_DIR,
     SHERPA_MODELS_DIR,
+    SHERPA_VENV_DIR,
+    TTS_QUEUE_DIR,
+    TTSConfig,
     debug,
 )
 
@@ -116,12 +116,13 @@ class _SherpaWorker:
                 env=_sherpa_env(),
             )
             # Wait up to 120s for model load — no-data after that means a hang.
-            ready = select.select([proc.stdout], [], [], 120.0)[0]  # type: ignore[union-attr]
+            assert proc.stdout is not None
+            ready = select.select([proc.stdout], [], [], 120.0)[0]
             if not ready:
                 debug("sherpa worker: timed out waiting for ready signal (>120s)")
                 proc.terminate()
                 return False
-            ready_line = proc.stdout.readline()  # type: ignore[union-attr]
+            ready_line = proc.stdout.readline()
             try:
                 resp = json.loads(ready_line)
             except (json.JSONDecodeError, TypeError):

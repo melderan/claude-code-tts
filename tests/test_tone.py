@@ -5,7 +5,6 @@ import pytest
 from claude_code_tts.tone import (
     DEFAULT_TONE,
     TONES,
-    ToneParams,
     classify_tone,
     get_tone,
 )

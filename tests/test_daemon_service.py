@@ -2,7 +2,6 @@
 
 import os
 import time
-from pathlib import Path
 
 from claude_code_tts import audio as audio_mod
 from claude_code_tts import daemon as daemon_mod

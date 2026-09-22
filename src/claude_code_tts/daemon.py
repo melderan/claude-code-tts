@@ -11,8 +11,8 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-import shutil
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -22,17 +22,26 @@ from datetime import datetime
 from io import TextIOWrapper
 from pathlib import Path
 
-from claude_code_tts.audio import generate_speech as _generate_speech, detect_player, warm_sherpa_workers
+from claude_code_tts.audio import detect_player, warm_sherpa_workers
+from claude_code_tts.audio import generate_speech as _generate_speech
+from claude_code_tts.audio import last_error as audio_last_error
+from claude_code_tts.bridge import (
+    JOBS,
+    Bridge,
+    estimated_marks,
+    get_http_config,
+    synthesize_with_marks,
+    to_playback_ms,
+)
 from claude_code_tts.config import (
     TTS_CONFIG_DIR,
     TTS_QUEUE_DIR,
     VOICES_DIR,
     load_raw_config,
 )
-from claude_code_tts.tone import classify_tone, ToneParams, DEFAULT_TONE
-from claude_code_tts.handy import save_speech_wav, AnalyzerThread
-from claude_code_tts.audio import last_error as audio_last_error
+from claude_code_tts.handy import AnalyzerThread, save_speech_wav
 from claude_code_tts.mic_watcher import MicWatcher
+from claude_code_tts.tone import DEFAULT_TONE, ToneParams, classify_tone
 
 # --- Daemon path constants ---
 
@@ -152,7 +161,7 @@ def read_playback_state() -> dict:
                 return json.loads(data)
             finally:
                 os.close(fd)
-        except (json.JSONDecodeError, IOError, OSError):
+        except (json.JSONDecodeError, OSError):
             pass
     return {"paused": False, "audio_pid": None, "current_message": None}
 
@@ -212,7 +221,17 @@ NEAR_END_THRESHOLD = 2.0
 # On resume, rewind this many REAL seconds (what you hear) from where
 # we were interrupted. Converted to WAV-time using playback speed,
 # so it feels like the same amount of re-listening regardless of speed.
+# Default; "resume_rewind_seconds" in config.json overrides it.
 REWIND_REAL_SECONDS = 3.0
+
+
+def resume_rewind_seconds() -> float:
+    """How many real seconds to rewind on resume: config.json or the default."""
+    try:
+        value = float(load_raw_config().get("resume_rewind_seconds", REWIND_REAL_SECONDS))
+    except (TypeError, ValueError):
+        return REWIND_REAL_SECONDS
+    return max(0.0, value)
 
 
 def get_wav_duration(wav_file: Path) -> float:
@@ -268,9 +287,10 @@ def rewind_amount(speed: float, speed_method: str) -> float:
     At 1x, it's just 3. At 0.5x, it's 1.5.
     With length_scale, speed is baked in, so real = WAV time.
     """
+    real = resume_rewind_seconds()
     if speed_method == "playback" and speed > 0:
-        return REWIND_REAL_SECONDS * speed
-    return REWIND_REAL_SECONDS
+        return real * speed
+    return real
 
 
 # --- Persona/Config helpers ---
@@ -377,12 +397,60 @@ def daemon_generate_speech(
     return result is not None
 
 
-def daemon_play_audio(wav_file: Path, speed: float = 1.0) -> tuple[bool, bool, float]:
+def synthesize_message(
+    text: str,
+    persona: str,
+    audio_file: Path,
+    *,
+    want_marks: bool,
+    speed: float,
+    speed_method: str,
+    voice_kokoro_override: str = "",
+    voice_kokoro_blend_override: str = "",
+    tone: ToneParams | None = None,
+) -> tuple[bool, dict | None]:
+    """Generate the WAV for one queue message, with timing marks if asked.
+
+    Marks come from sentence-by-sentence synthesis (see bridge.py). If that
+    fails for any sentence we fall back to one-piece synthesis and estimated
+    marks, so a page asking for timing still gets audio and a best guess.
+    """
+
+    def gen(chunk: str, path: Path) -> bool:
+        return daemon_generate_speech(
+            chunk,
+            persona,
+            path,
+            voice_kokoro_override=voice_kokoro_override,
+            voice_kokoro_blend_override=voice_kokoro_blend_override,
+            tone=tone,
+        )
+
+    playback_speed = speed if speed_method == "playback" else 1.0
+    if want_marks:
+        marks = synthesize_with_marks(text, gen, audio_file, playback_speed=playback_speed)
+        if marks is not None:
+            return True, marks
+        log("Sentence-level synthesis failed, falling back to one piece", "WARN")
+    if not gen(text, audio_file):
+        return False, None
+    if want_marks:
+        return True, estimated_marks(
+            text, get_wav_duration(audio_file), playback_speed=playback_speed
+        )
+    return True, None
+
+
+def daemon_play_audio(
+    wav_file: Path, speed: float = 1.0, job_id: str | None = None
+) -> tuple[bool, bool, float]:
     """Play a WAV file with pause-aware polling.
 
     Returns (success, was_killed, elapsed_seconds).
     was_killed=True means audio was interrupted by pause.
     elapsed_seconds is real wall-clock time the audio played.
+    job_id names a bridge job; a /stop for its source cancels playback here,
+    which returns (False, False, elapsed) with the job marked cancelled.
     """
     player = detect_player()
     if not player:
@@ -407,6 +475,20 @@ def daemon_play_audio(wav_file: Path, speed: float = 1.0) -> tuple[bool, bool, f
             if poll_count % 20 == 0:
                 log(f"Poll #{poll_count}: paused={state.get('paused')}, pid={proc.pid}")
                 write_heartbeat()
+            if JOBS.take_cancel(job_id):
+                elapsed = time.monotonic() - start_time
+                log(f"Audio cancelled by bridge (PID {proc.pid}) after {elapsed:.1f}s")
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=1)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                write_playback_state(audio_pid=None)
+                JOBS.update(job_id, state="cancelled", position_ms=round(elapsed * 1000))
+                return (False, False, elapsed)
             if state.get("paused"):
                 elapsed = time.monotonic() - start_time
                 log(f"Audio killed for pause (PID {proc.pid}) after {elapsed:.1f}s real time")
@@ -468,6 +550,16 @@ def speak_announcement(text: str, persona: str = "claude-prime") -> None:
 # --- Control Messages ---
 
 
+def _supervised() -> bool:
+    """True when launchd or systemd started us and will restart us on exit 3.
+
+    launchd sets XPC_SERVICE_NAME to the job label for agents it runs (a plain
+    Terminal shell has it unset or "0"); systemd sets INVOCATION_ID.
+    """
+    xpc = os.environ.get("XPC_SERVICE_NAME", "")
+    return (xpc not in ("", "0")) or bool(os.environ.get("INVOCATION_ID"))
+
+
 def handle_control_message(msg: dict) -> None:
     """Handle a control message with pre_action, speech, and post_action."""
     pre_action = msg.get("pre_action")
@@ -485,14 +577,23 @@ def handle_control_message(msg: dict) -> None:
 
     if post_action == "restart":
         VERSION_FILE.write_text("control-v1")
-        log("Control: exiting for launchd restart")
         msg_file = msg.get("_file")
         if msg_file:
             Path(msg_file).unlink(missing_ok=True)
         RESPAWN_MARKER.write_text(str(time.time()))
         HEARTBEAT_FILE.unlink(missing_ok=True)
         release_lock()
-        sys.exit(3)
+        if _supervised():
+            log("Control: exiting for the service manager to restart us")
+            sys.exit(3)
+        # Nobody will respawn us, so become a fresh daemon in place. execv keeps the
+        # PID (so the pid file stays right) and runs no atexit handlers. Found
+        # 2026-09-22 when a control restart quietly killed a fork-started daemon.
+        log("Control: no service manager, re-executing in place")
+        os.execv(
+            sys.executable,
+            [sys.executable, "-m", "claude_code_tts.cli", "daemon", "foreground", "--lockpick"],
+        )
     elif post_action == "reload_config":
         log("Control: reloading config")
     elif post_action == "stop":
@@ -534,7 +635,7 @@ def write_control_message(
 
 def get_queue_messages() -> list[dict]:
     """Get all messages in the queue, sorted by timestamp."""
-    messages = []
+    messages: list[dict] = []
     if not TTS_QUEUE_DIR.exists():
         return messages
 
@@ -544,7 +645,7 @@ def get_queue_messages() -> list[dict]:
                 msg = json.load(fp)
                 msg["_file"] = f
                 messages.append(msg)
-        except (json.JSONDecodeError, IOError) as e:
+        except (OSError, json.JSONDecodeError) as e:
             log(f"Failed to read queue file {f}: {e}", "WARN")
             f.unlink(missing_ok=True)
 
@@ -565,7 +666,7 @@ def cleanup_old_messages(max_age_seconds: int) -> int:
                 f.unlink()
                 removed += 1
                 log(f"Removed stale message: {f.name}")
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             f.unlink(missing_ok=True)
             removed += 1
 
@@ -625,6 +726,20 @@ def daemon_loop(lockpick: bool = False) -> None:
     )
 
     VERSION_FILE.write_text("control-v1")
+
+    # Loopback HTTP bridge for browser pages (off unless http.enabled in config).
+    bridge: Bridge | None = None
+    http_config = get_http_config()
+    if http_config.get("enabled"):
+        bridge = Bridge(
+            log_fn=log,
+            read_playback_state=read_playback_state,
+            clear_current_message=clear_current_message,
+        )
+        if not bridge.start(http_config):
+            bridge = None
+    else:
+        log("HTTP bridge disabled (claude-tts bridge enable to turn it on)")
 
     # --- Detect restart type ---
     # Respawn marker with recent timestamp = controlled restart (upgrade/config).
@@ -709,6 +824,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             write_heartbeat()
             cleanup_old_messages(config["max_age_seconds"])
             enforce_max_depth(config["max_depth"])
+            JOBS.evict_finished()
 
             state = read_playback_state()
             if state.get("paused"):
@@ -728,16 +844,22 @@ def daemon_loop(lockpick: bool = False) -> None:
                 i_voice_kokoro = interrupted.get("voice_kokoro", "")
                 i_voice_blend = interrupted.get("voice_kokoro_blend", "")
                 prev_audio_pos = interrupted.get("audio_position", 0.0)
+                i_job_id = interrupted.get("id") if interrupted.get("source") else None
 
-                # Regenerate the full WAV
+                # Regenerate the full WAV, sentence by sentence if the page
+                # wants marks, so its offsets line up with the first pass.
                 audio_file = Path(f"/tmp/tts_queue_{session_id}.wav")
-                if daemon_generate_speech(
+                i_ok, _ = synthesize_message(
                     interrupted.get("text", ""),
                     persona,
                     audio_file,
+                    want_marks=bool(interrupted.get("want_marks")),
+                    speed=i_speed,
+                    speed_method=i_speed_method,
                     voice_kokoro_override=i_voice_kokoro,
                     voice_kokoro_blend_override=i_voice_blend,
-                ):
+                )
+                if i_ok:
                     wav_duration = get_wav_duration(audio_file)
                     remaining = wav_duration - prev_audio_pos
 
@@ -763,7 +885,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                                 f"Resuming from {resume_from:.1f}s "
                                 f"(was at {prev_audio_pos:.1f}s, "
                                 f"rewound {rw:.1f}s wav-time = "
-                                f"{REWIND_REAL_SECONDS}s real)"
+                                f"{resume_rewind_seconds()}s real)"
                             )
                             play_file = trimmed
                         else:
@@ -774,26 +896,43 @@ def daemon_loop(lockpick: bool = False) -> None:
                             f"{interrupted.get('text', '')[:50]}...")
 
                     write_playback_state(current_message=interrupted)
+                    JOBS.update(
+                        i_job_id,
+                        state="playing",
+                        started_at=time.time(),
+                        offset_ms=to_playback_ms(resume_from, i_speed, i_speed_method),
+                    )
                     if i_speed_method == "playback":
-                        _, was_killed, elapsed = daemon_play_audio(play_file, i_speed)
+                        _, was_killed, elapsed = daemon_play_audio(play_file, i_speed, i_job_id)
                     else:
-                        _, was_killed, elapsed = daemon_play_audio(play_file)
+                        _, was_killed, elapsed = daemon_play_audio(play_file, job_id=i_job_id)
 
                     audio_file.unlink(missing_ok=True)
                     if play_file != audio_file:
                         play_file.unlink(missing_ok=True)
 
-                    if was_killed:
+                    if JOBS.state(i_job_id) == "cancelled":
+                        clear_current_message()
+                    elif was_killed:
                         # Accumulate position: where we resumed + how far we got
                         new_pos = resume_from + calculate_audio_position(
                             elapsed, i_speed, i_speed_method
                         )
                         interrupted["audio_position"] = new_pos
                         write_playback_state(current_message=interrupted)
+                        JOBS.update(
+                            i_job_id,
+                            state="paused",
+                            position_ms=to_playback_ms(new_pos, i_speed, i_speed_method),
+                        )
                         log(f"Interrupted again at audio position {new_pos:.1f}s")
                         continue
                     else:
                         clear_current_message()
+                        JOBS.update(i_job_id, state="done")
+                else:
+                    clear_current_message()
+                    JOBS.update(i_job_id, state="failed")
                 continue
 
             # Get pending messages
@@ -815,10 +954,14 @@ def daemon_loop(lockpick: bool = False) -> None:
             project = msg.get("project", "unknown")
             text = msg.get("text", "")
             persona = msg.get("persona", "claude-prime")
+            # Bridge messages carry a source; their id is a job the page polls.
+            job_id = msg.get("id") if msg.get("source") else None
+            want_marks = bool(msg.get("want_marks"))
 
             if not text.strip():
                 log(f"Empty message from {project}, skipping")
                 msg_file.unlink(missing_ok=True)
+                JOBS.update(job_id, state="failed", error="empty text")
                 continue
 
             # Classify content tone for expressive speech.
@@ -845,17 +988,25 @@ def daemon_loop(lockpick: bool = False) -> None:
             # Apply tone speed factor
             effective_speed = speed * tone.speed_factor
 
-            if not daemon_generate_speech(
+            JOBS.update(job_id, state="synthesizing")
+            ok, marks = synthesize_message(
                 text,
                 persona,
                 audio_file,
+                want_marks=want_marks,
+                speed=effective_speed,
+                speed_method=effective_speed_method,
                 voice_kokoro_override=voice_kokoro,
                 voice_kokoro_blend_override=voice_kokoro_blend,
                 tone=tone,
-            ):
+            )
+            if not ok:
                 log(f"Failed to generate speech for message from {project}: {audio_last_error()}", "ERROR")
                 msg_file.unlink(missing_ok=True)
+                JOBS.update(job_id, state="failed", error=audio_last_error())
                 continue
+            if marks is not None:
+                JOBS.update(job_id, marks=marks)
 
             # Speaker transition
             speaker_key = f"{session_id}:{project}"
@@ -889,6 +1040,10 @@ def daemon_loop(lockpick: bool = False) -> None:
                 "voice_kokoro_blend": voice_kokoro_blend,
                 "pitch_filter": pitch_filter_msg,
             }
+            if job_id:
+                current_msg_info["id"] = job_id
+                current_msg_info["source"] = msg.get("source")
+                current_msg_info["want_marks"] = want_marks
             write_playback_state(current_message=current_msg_info)
 
             # Save WAV to speech history before playback
@@ -901,14 +1056,26 @@ def daemon_loop(lockpick: bool = False) -> None:
 
             wav_duration = get_wav_duration(audio_file)
 
+            JOBS.update(
+                job_id,
+                state="playing",
+                started_at=time.time(),
+                offset_ms=0,
+                speed=effective_speed,
+                duration_ms=to_playback_ms(wav_duration, effective_speed, effective_speed_method),
+            )
             if effective_speed_method == "playback":
-                _, was_killed, elapsed = daemon_play_audio(audio_file, effective_speed)
+                _, was_killed, elapsed = daemon_play_audio(audio_file, effective_speed, job_id)
             else:
-                _, was_killed, elapsed = daemon_play_audio(audio_file)
+                _, was_killed, elapsed = daemon_play_audio(audio_file, job_id=job_id)
 
             audio_file.unlink(missing_ok=True)
 
-            if was_killed:
+            if JOBS.state(job_id) == "cancelled":
+                log(f"Cancelled by bridge: {project}")
+                clear_current_message()
+                msg_file.unlink(missing_ok=True)
+            elif was_killed:
                 audio_pos = calculate_audio_position(elapsed, effective_speed, speed_method)
                 remaining = wav_duration - audio_pos
                 if remaining <= NEAR_END_THRESHOLD:
@@ -918,9 +1085,15 @@ def daemon_loop(lockpick: bool = False) -> None:
                     )
                     clear_current_message()
                     msg_file.unlink(missing_ok=True)
+                    JOBS.update(job_id, state="done")
                     continue
                 current_msg_info["audio_position"] = audio_pos
                 write_playback_state(current_message=current_msg_info)
+                JOBS.update(
+                    job_id,
+                    state="paused",
+                    position_ms=to_playback_ms(audio_pos, effective_speed, speed_method),
+                )
                 log(f"Message interrupted at {audio_pos:.1f}s / {wav_duration:.1f}s, "
                     f"will resume on unpause")
                 msg_file.unlink(missing_ok=True)
@@ -928,6 +1101,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             else:
                 clear_current_message()
                 msg_file.unlink(missing_ok=True)
+                JOBS.update(job_id, state="done")
 
         except KeyboardInterrupt:
             log("Received interrupt, shutting down...")
@@ -940,6 +1114,8 @@ def daemon_loop(lockpick: bool = False) -> None:
         mic_watcher.stop()
     if handy_analyzer:
         handy_analyzer.stop()
+    if bridge:
+        bridge.stop()
     log("Shutting down gracefully...")
     if not _shutdown_by_signal:
         speak_announcement("Voice daemon shutting down. Catch you later.")
@@ -1026,7 +1202,7 @@ def start_daemon(lockpick: bool = False) -> bool:
     os.chdir("/")
     os.umask(0)
 
-    sys.stdin = open(os.devnull, "r")
+    sys.stdin = open(os.devnull)
     sys.stdout = open(os.devnull, "w")
     sys.stderr = open(os.devnull, "w")
 

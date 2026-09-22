@@ -5,7 +5,6 @@ Tests session_set/session_del, migration, cleanup, and load_config.
 
 import json
 import time
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
