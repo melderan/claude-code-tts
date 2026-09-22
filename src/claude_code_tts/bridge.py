@@ -227,34 +227,57 @@ def split_sentences(text: str) -> list[str]:
     return parts or [text.strip()]
 
 
+_WORD = re.compile(r"\S+")
+
+
 def build_marks(
     sentences: list[str],
     durations_s: list[float],
     *,
+    text: str = "",
     sentence_timing: str = "exact",
 ) -> dict:
     """Turn per-sentence durations (already in playback time) into marks.
 
     Words inside a sentence get a share of its duration proportional to their
     character count, so a long word is highlighted longer than a short one.
+    Every entry carries "c", the character offset of that sentence or word in
+    the submitted text, so a page that spoke a transformed copy (abbreviations
+    expanded, "#339" read as "issue 339") can map back by offset rather than by
+    counting words. Pass the original text; without it offsets are relative to
+    the sentences joined by single spaces.
     """
+    source = text if text else " ".join(sentences)
     out_sentences: list[dict] = []
     out_words: list[dict] = []
     cursor = 0.0
+    search_from = 0
     for i, (sentence, dur) in enumerate(zip(sentences, durations_s, strict=True)):
         start = cursor
         end = cursor + dur
+        s_off = source.find(sentence, search_from)
+        if s_off < 0:
+            s_off = search_from
+        search_from = s_off + len(sentence)
         out_sentences.append(
-            {"i": i, "start_ms": round(start * 1000), "end_ms": round(end * 1000), "text": sentence}
+            {
+                "i": i,
+                "c": s_off,
+                "start_ms": round(start * 1000),
+                "end_ms": round(end * 1000),
+                "text": sentence,
+            }
         )
-        words = sentence.split()
-        total_chars = sum(len(w) for w in words) or 1
+        matches = list(_WORD.finditer(sentence))
+        total_chars = sum(len(m.group()) for m in matches) or 1
         w_cursor = start
-        for w in words:
+        for m in matches:
+            w = m.group()
             w_dur = dur * len(w) / total_chars
             out_words.append(
                 {
                     "s": i,
+                    "c": s_off + m.start(),
                     "start_ms": round(w_cursor * 1000),
                     "end_ms": round((w_cursor + w_dur) * 1000),
                     "text": w,
@@ -331,7 +354,7 @@ def synthesize_with_marks(
             parts = []
         elif not concat_wavs(parts, output_file):
             return None
-        return build_marks(sentences, durations)
+        return build_marks(sentences, durations, text=text)
     finally:
         for p in parts:
             p.unlink(missing_ok=True)
@@ -340,7 +363,9 @@ def synthesize_with_marks(
 def estimated_marks(text: str, wav_seconds: float, *, playback_speed: float = 1.0) -> dict:
     """Marks for a WAV synthesized in one piece: one sentence span, words estimated."""
     factor = playback_speed if playback_speed > 0 else 1.0
-    return build_marks([text.strip()], [wav_seconds / factor], sentence_timing="estimated")
+    return build_marks(
+        [text.strip()], [wav_seconds / factor], text=text, sentence_timing="estimated"
+    )
 
 
 def to_playback_ms(wav_seconds: float, speed: float, speed_method: str) -> int:

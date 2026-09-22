@@ -103,8 +103,8 @@ Response `202`:
  "marks": {
    "sentence_timing": "exact",
    "word_timing": "estimated",
-   "sentences": [{"i": 0, "start_ms": 0, "end_ms": 1840, "text": "One block of prose."}],
-   "words":     [{"s": 0, "start_ms": 0, "end_ms": 310, "text": "One"}]}}
+   "sentences": [{"i": 0, "c": 0, "start_ms": 0, "end_ms": 1840, "text": "One block of prose."}],
+   "words":     [{"s": 0, "c": 0, "start_ms": 0, "end_ms": 310, "text": "One"}]}}
 ```
 
 States: `queued`, `synthesizing`, `playing`, `paused`, `done`, `cancelled`, `failed`.
@@ -112,6 +112,9 @@ States: `queued`, `synthesizing`, `playing`, `paused`, `done`, `cancelled`, `fai
 - `marks` appears once synthesis has finished and stays for the life of the job. Times are
   milliseconds of listening time, playback speed already applied, relative to the start of the
   block.
+- `c` on every sentence and word is its character offset in the text you submitted. If your page
+  spoke a transformed copy (abbreviations expanded, "#339" read as "issue 339"), map back by
+  offset, not by counting words.
 - `started_at` (epoch seconds) and `offset_ms` are set every time playback starts or resumes.
   After a pause the daemon rewinds a little, so `offset_ms` is where in the block the audio
   restarted. Highlight the word whose span contains
