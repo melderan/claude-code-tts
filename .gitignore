@@ -60,3 +60,6 @@ htmlcov/
 
 # mypy
 .mypy_cache/
+
+# Operator run logs from `just up` (per checkout, never committed)
+.logs/
