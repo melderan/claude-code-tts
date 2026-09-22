@@ -539,6 +539,16 @@ def speak_announcement(text: str, persona: str = "claude-prime") -> None:
 # --- Control Messages ---
 
 
+def _supervised() -> bool:
+    """True when launchd or systemd started us and will restart us on exit 3.
+
+    launchd sets XPC_SERVICE_NAME to the job label for agents it runs (a plain
+    Terminal shell has it unset or "0"); systemd sets INVOCATION_ID.
+    """
+    xpc = os.environ.get("XPC_SERVICE_NAME", "")
+    return (xpc not in ("", "0")) or bool(os.environ.get("INVOCATION_ID"))
+
+
 def handle_control_message(msg: dict) -> None:
     """Handle a control message with pre_action, speech, and post_action."""
     pre_action = msg.get("pre_action")
@@ -556,14 +566,23 @@ def handle_control_message(msg: dict) -> None:
 
     if post_action == "restart":
         VERSION_FILE.write_text("control-v1")
-        log("Control: exiting for launchd restart")
         msg_file = msg.get("_file")
         if msg_file:
             Path(msg_file).unlink(missing_ok=True)
         RESPAWN_MARKER.write_text(str(time.time()))
         HEARTBEAT_FILE.unlink(missing_ok=True)
         release_lock()
-        sys.exit(3)
+        if _supervised():
+            log("Control: exiting for the service manager to restart us")
+            sys.exit(3)
+        # Nobody will respawn us, so become a fresh daemon in place. execv keeps the
+        # PID (so the pid file stays right) and runs no atexit handlers. Found
+        # 2026-09-22 when a control restart quietly killed a fork-started daemon.
+        log("Control: no service manager, re-executing in place")
+        os.execv(
+            sys.executable,
+            [sys.executable, "-m", "claude_code_tts.cli", "daemon", "foreground", "--lockpick"],
+        )
     elif post_action == "reload_config":
         log("Control: reloading config")
     elif post_action == "stop":
