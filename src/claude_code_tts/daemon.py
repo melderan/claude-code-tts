@@ -221,7 +221,17 @@ NEAR_END_THRESHOLD = 2.0
 # On resume, rewind this many REAL seconds (what you hear) from where
 # we were interrupted. Converted to WAV-time using playback speed,
 # so it feels like the same amount of re-listening regardless of speed.
+# Default; "resume_rewind_seconds" in config.json overrides it.
 REWIND_REAL_SECONDS = 3.0
+
+
+def resume_rewind_seconds() -> float:
+    """How many real seconds to rewind on resume: config.json or the default."""
+    try:
+        value = float(load_raw_config().get("resume_rewind_seconds", REWIND_REAL_SECONDS))
+    except (TypeError, ValueError):
+        return REWIND_REAL_SECONDS
+    return max(0.0, value)
 
 
 def get_wav_duration(wav_file: Path) -> float:
@@ -277,9 +287,10 @@ def rewind_amount(speed: float, speed_method: str) -> float:
     At 1x, it's just 3. At 0.5x, it's 1.5.
     With length_scale, speed is baked in, so real = WAV time.
     """
+    real = resume_rewind_seconds()
     if speed_method == "playback" and speed > 0:
-        return REWIND_REAL_SECONDS * speed
-    return REWIND_REAL_SECONDS
+        return real * speed
+    return real
 
 
 # --- Persona/Config helpers ---
@@ -874,7 +885,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                                 f"Resuming from {resume_from:.1f}s "
                                 f"(was at {prev_audio_pos:.1f}s, "
                                 f"rewound {rw:.1f}s wav-time = "
-                                f"{REWIND_REAL_SECONDS}s real)"
+                                f"{resume_rewind_seconds()}s real)"
                             )
                             play_file = trimmed
                         else:

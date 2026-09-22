@@ -149,6 +149,10 @@ and resumes the sentence.
 
 The resume delay (default 1500ms) gives your voice-to-text app time to transcribe and paste before TTS resumes. Adjust to taste.
 
+On resume the daemon rewinds a little so you hear the sentence you were cut off in: three real
+seconds by default, scaled to playback speed. Set `"resume_rewind_seconds"` in `config.json` to
+change it (0 resumes exactly where it stopped). This applies to manual pause too.
+
 Currently supports [Handy](https://handy.computer) on macOS. The watcher is disabled by default and gracefully skips if Handy isn't installed.
 
 ## Multi-Session Mode

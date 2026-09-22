@@ -192,3 +192,30 @@ class TestConstants:
 
     def test_rewind_real_seconds_reasonable(self):
         assert 1.0 <= REWIND_REAL_SECONDS <= 5.0
+
+
+
+class TestResumeRewindConfig:
+    """The rewind on resume is a config value; the default is the old constant."""
+
+    def test_default_when_unset(self, monkeypatch):
+        import claude_code_tts.daemon as d
+
+        monkeypatch.setattr(d, "load_raw_config", lambda: {})
+        assert d.resume_rewind_seconds() == d.REWIND_REAL_SECONDS
+        assert d.rewind_amount(2.0, "playback") == d.REWIND_REAL_SECONDS * 2.0
+
+    def test_config_overrides(self, monkeypatch):
+        import claude_code_tts.daemon as d
+
+        monkeypatch.setattr(d, "load_raw_config", lambda: {"resume_rewind_seconds": 1.0})
+        assert d.rewind_amount(2.0, "playback") == 2.0
+        assert d.rewind_amount(2.0, "length_scale") == 1.0
+
+    def test_bad_values_fall_back(self, monkeypatch):
+        import claude_code_tts.daemon as d
+
+        monkeypatch.setattr(d, "load_raw_config", lambda: {"resume_rewind_seconds": "lots"})
+        assert d.resume_rewind_seconds() == d.REWIND_REAL_SECONDS
+        monkeypatch.setattr(d, "load_raw_config", lambda: {"resume_rewind_seconds": -4})
+        assert d.resume_rewind_seconds() == 0.0
