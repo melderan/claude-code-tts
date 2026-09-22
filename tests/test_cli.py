@@ -277,3 +277,39 @@ class TestVersion:
         with pytest.raises(SystemExit) as exc:
             main([])
         assert exc.value.code == 0
+
+
+class TestDefaultSpeed:
+    """`speed --default` writes persona speed, the value every session inherits."""
+
+    def _config(self, tts_home):
+        return json.loads((tts_home / ".claude-tts" / "config.json").read_text())
+
+    def test_default_sets_active_persona_only(self, tts_home, patched_env, capsys):
+        before = self._config(tts_home)
+        active = before["active_persona"]
+        other = next(n for n in before["personas"] if n != active)
+        main(["speed", "--default", "1.0"])
+        after = self._config(tts_home)
+        assert after["personas"][active]["speed"] == 1.0
+        assert after["personas"][other]["speed"] == before["personas"][other]["speed"]
+        assert "Default speed set to 1.0x" in capsys.readouterr().out
+        # No session override was written
+        sf = tts_home / ".claude-tts" / "sessions.d" / "test-session.json"
+        assert not sf.exists() or "speed" not in json.loads(sf.read_text())
+
+    def test_default_all_sets_every_persona(self, tts_home, patched_env):
+        main(["speed", "--default", "--all", "1.0"])
+        after = self._config(tts_home)
+        assert {p["speed"] for p in after["personas"].values()} == {1.0}
+
+    def test_default_follows_session_persona(self, tts_home, patched_env):
+        main(["persona", "claude-chill"])
+        main(["speed", "--default", "1.2"])
+        after = self._config(tts_home)
+        assert after["personas"]["claude-chill"]["speed"] == 1.2
+        assert after["personas"]["claude-prime"]["speed"] != 1.2
+
+    def test_default_respects_range(self, tts_home, patched_env):
+        with pytest.raises(SystemExit):
+            main(["speed", "--default", "9"])

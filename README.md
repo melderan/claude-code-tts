@@ -79,7 +79,7 @@ After installation, just use Claude Code. Every response gets spoken. New sessio
 | `/tts-unmute` | Enable voice for this session |
 | `/tts-mute` | Silence voice for this session |
 | `/tts-status` | Show session status (mute, persona, mode, daemon, mic-aware) |
-| `/tts-speed [value]` | Show or set playback speed (0.5 - 4.0) |
+| `/tts-speed [value]` | Show or set playback speed (0.5 - 4.0) for this project; `claude-tts speed --default 1.0` changes the persona default |
 | `/tts-persona [name]` | Show or set voice persona |
 | `/tts-mode [direct\|queue]` | Show or set playback mode |
 | `/tts-intermediate [on\|off]` | Toggle narration between tool calls |
@@ -218,6 +218,11 @@ claude-tts audition --voice en_US-libritts_r-medium --range 100-120
 ```
 
 The audition tool plays each voice with a sample phrase. Press enter to continue, or save one you like as a named persona.
+
+## Running Claude Code in a Docker Sandbox
+
+The sandbox writes, the host speaks. `kits/claude-tts` is a Docker Sandboxes kit that installs the
+hooks inside the sandbox; the daemon stays on the host. See [`docs/docker-sandbox.md`](docs/docker-sandbox.md).
 
 ## Pause/Resume
 

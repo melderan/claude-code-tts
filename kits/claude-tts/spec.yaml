@@ -1,0 +1,56 @@
+# Docker Sandboxes kit: Claude Code with a voice.
+#
+# The sandbox only writes; a claude-code-tts daemon on the host owns the speaker. The host's
+# ~/.claude-tts directory is mounted into the sandbox after creation (see docs/docker-sandbox.md),
+# the hooks here drop queue files into it, and the host daemon speaks them.
+#
+# Validate:  sbx kit validate kits/claude-tts
+# Use:       sbx run "git+https://github.com/melderan/claude-code-tts.git#ref=v9.11.0&dir=kits/claude-tts" ~/code/my-project
+#            sbx mount <sandbox> ~/.claude-tts:/home/agent/.claude-tts
+schemaVersion: "2"
+kind: sandbox
+name: claude-tts
+extends: claude
+version: "1.0.0"
+displayName: Claude Code with a voice
+description: Claude Code plus the claude-code-tts hooks, so replies are spoken by a daemon on the host.
+sourceURL: https://github.com/melderan/claude-code-tts
+
+args:
+  tts_version:
+    default: v9.11.0
+    description: claude-code-tts git tag to install inside the sandbox
+    pattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+sandbox:
+  # Hooks live in this extra settings file, merged over the sandbox-managed ~/.claude/settings.json,
+  # which the kit leaves alone.
+  command:
+    - --settings
+    - /home/agent/.config/claude/claude-tts.json
+
+permissions:
+  network:
+    allow:
+      - github.com
+      - pypi.org
+      - files.pythonhosted.org
+
+setup:
+  install:
+    - command: "uv tool install --build git+https://github.com/melderan/claude-code-tts@${{ kit.args.tts_version }}"
+      user: "1000"
+      description: Install the claude-tts queue writer that the hook shims call
+    - command: "grep -q 'HOME/.local/bin' /etc/sandbox-persistent.sh || echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> /etc/sandbox-persistent.sh"
+      description: Put user-local tools on PATH for every shell
+    - command: "chmod +x /home/agent/.claude/hooks/speak-response.sh /home/agent/.claude/hooks/speak-intermediate.sh"
+      user: "1000"
+      description: Restore exec bits on the hook shims; kits inject files as 0644
+
+agentInstructions:
+  content: |
+    This sandbox was created from the claude-tts kit. Your replies are spoken aloud by a daemon on
+    the host through the mounted ~/.claude-tts directory; the hooks exit silently when the mount or
+    the daemon is absent, so voice is never a hard dependency. New projects start muted: the user
+    runs /tts-unmute once per project. Keep spoken prose listenable: short sentences, no tables or
+    code in the sentences meant for the ear.

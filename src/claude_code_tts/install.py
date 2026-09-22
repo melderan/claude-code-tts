@@ -741,7 +741,7 @@ def install_pipx(dry_run: bool = False) -> None:
 
 # --- Install ---
 
-def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
+def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: float | None = None) -> None:
     platform_name = {"macos": "macOS", "linux": "Linux", "wsl": "WSL 2"}.get(PLATFORM, PLATFORM)
 
     print()
@@ -1208,10 +1208,24 @@ def do_install(dry_run: bool = False, upgrade: bool = False) -> None:
         # Record installed version
         set_installed_version(__version__)
         info(f"Version {__version__} recorded in config")
+
+        if default_speed is not None:
+            names = apply_default_speed(default_speed)
+            success(f"Default speed {default_speed}x set for: {', '.join(names)}")
     print()
 
 
 # --- Config Management ---
+
+
+def apply_default_speed(speed: float) -> list[str]:
+    """Set every persona's speed in config.json; returns the persona names changed."""
+    config = load_config()
+    names = list(config.get("personas", {}))
+    for name in names:
+        config["personas"][name]["speed"] = speed
+    save_config(config)
+    return names
 
 
 def _migrate_sessions_to_confd() -> None:
@@ -2330,6 +2344,12 @@ Examples:
         help="Download new voice models from Hugging Face",
     )
     parser.add_argument(
+        "--default-speed",
+        type=float,
+        metavar="X",
+        help="With --install or --upgrade: set every persona's speed (0.5-4.0), e.g. 1.0 for normal",
+    )
+    parser.add_argument(
         "--voice",
         action="append",
         metavar="NAME",
@@ -2373,6 +2393,8 @@ Examples:
     )
 
     args = parser.parse_args()
+    if args.default_speed is not None and not 0.5 <= args.default_speed <= 4.0:
+        parser.error("--default-speed must be between 0.5 and 4.0")
 
     # If any specific action is requested, do it directly
     if args.version:
@@ -2390,9 +2412,9 @@ Examples:
     elif args.bootstrap:
         do_bootstrap_from_config(Path(args.bootstrap))
     elif args.upgrade:
-        do_install(dry_run=args.dry_run, upgrade=True)
+        do_install(dry_run=args.dry_run, upgrade=True, default_speed=args.default_speed)
     elif args.install:
-        do_install(dry_run=args.dry_run, upgrade=False)
+        do_install(dry_run=args.dry_run, upgrade=False, default_speed=args.default_speed)
     elif args.personas:
         do_manage_personas()
     elif args.voice:
