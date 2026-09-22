@@ -1,3 +1,9 @@
 #!/bin/sh
-# Installed by `just hooks` (core.hooksPath). Full gate, build included, before every push.
-exec "$(git rev-parse --show-toplevel)/scripts/gate.py" --full
+# Installed by `just hooks` (core.hooksPath). Full gate, build included, before pushing a branch.
+# A push of tags only carries commits that already passed the gate, so it goes straight through.
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+    case "$remote_ref" in
+        refs/heads/*) exec "$(git rev-parse --show-toplevel)/scripts/gate.py" --full ;;
+    esac
+done
+exit 0
