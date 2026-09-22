@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import io
 import json
-from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 

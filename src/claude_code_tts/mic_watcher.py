@@ -9,19 +9,71 @@ is enabled in config.json.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import IO, Any
 
-# Handy log location (macOS)
+# Handy log location (macOS). Handy writes here through tauri-plugin-log,
+# filtered to the level in its own settings (Settings > Debug > Log Level).
 HANDY_LOG = Path.home() / "Library" / "Logs" / "com.pais.handy" / "handy.log"
+HANDY_SETTINGS = (
+    Path.home() / "Library" / "Application Support" / "com.pais.handy" / "settings_store.json"
+)
 
-# Patterns to match in the log
-_RE_RECORDING_START = re.compile(r"Recording started for binding transcribe")
-_RE_RECORDING_STOP = re.compile(r"Recording stopped and samples retrieved")
+# Patterns to match in the log. Every recording event Handy emits is at DEBUG
+# level (src-tauri/src/actions.rs, TranscribeAction::start/stop; verified against
+# Handy 0.9.7, 2026-09-22), so the file log must be set to Debug or these lines
+# never appear. The older strings are kept for Handy versions before the
+# TranscribeAction refactor.
+_RE_RECORDING_START = re.compile(
+    r"TranscribeAction::start called for binding"
+    r"|Recording started for binding"
+)
+_RE_RECORDING_STOP = re.compile(
+    r"TranscribeAction::stop called for binding"
+    r"|Recording stopped and samples retrieved"
+    r"|Recording produced no audio samples"
+    r"|No samples retrieved from recording stop"
+)
+
+# Handy's log_level setting: string since 0.7, numeric 1-5 before that
+# (settings.rs LogLevel deserializer: 1 trace, 2 debug, 3 info, 4 warn, 5 error).
+_HANDY_NUMERIC_LEVELS = {1: "trace", 2: "debug", 3: "info", 4: "warn", 5: "error"}
+_LEVELS_THAT_SHOW_RECORDING = ("trace", "debug")
+
+
+def handy_settings() -> dict:
+    """Handy's saved settings, or {} if unreadable."""
+    try:
+        store = json.loads(HANDY_SETTINGS.read_text())
+        settings = store.get("settings", store)
+        return settings if isinstance(settings, dict) else {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def handy_file_log_level(settings: dict | None = None) -> str | None:
+    """Handy's file log level as a lower-case word, or None if unknown."""
+    if settings is None:
+        settings = handy_settings()
+    raw = settings.get("log_level")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return _HANDY_NUMERIC_LEVELS.get(raw)
+    if isinstance(raw, str) and raw:
+        return raw.lower()
+    return None
+
+
+def handy_log_level_hides_recording(level: str | None) -> bool:
+    """True when Handy's file log will never contain recording start/stop lines."""
+    return level is not None and level not in _LEVELS_THAT_SHOW_RECORDING
 
 # How long to wait after recording stops before resuming TTS (ms).
 # Gives Handy time to transcribe + paste before TTS resumes.
@@ -33,6 +85,7 @@ ROTATION_CHECK_INTERVAL = 2.0
 
 
 class MicWatcher:
+    _last_rotation_check: float
     """Watches Handy's log for recording events, pauses/resumes TTS."""
 
     def __init__(
@@ -67,7 +120,7 @@ class MicWatcher:
         Returns True if the mic appears to be actively recording.
         """
         try:
-            with open(HANDY_LOG, "r") as f:
+            with open(HANDY_LOG) as f:
                 # Read last 8KB -- enough for ~50 lines
                 f.seek(0, os.SEEK_END)
                 size = f.tell()
@@ -95,6 +148,30 @@ class MicWatcher:
         if not HANDY_LOG.exists():
             self._log(f"Mic watcher: Handy log not found at {HANDY_LOG}", "WARN")
             return False
+
+        # Handy only logs recording events at debug. Say so once, loudly, rather
+        # than tailing a file that will never mention a recording (2026-09-22:
+        # "it pauses then immediately plays" was Handy's own mute, not us).
+        settings = handy_settings()
+        level = handy_file_log_level(settings)
+        if handy_log_level_hides_recording(level):
+            self._log(
+                f"Mic watcher: Handy's log level is '{level}', but Handy only logs "
+                "recording start/stop at debug, so mic-aware pause will never fire. "
+                "In Handy: Settings > Debug > Log Level > Debug (applies at once).",
+                "WARN",
+            )
+        elif level is None:
+            self._log(
+                f"Mic watcher: could not read Handy's log level from {HANDY_SETTINGS}; "
+                "mic-aware pause needs it set to Debug",
+                "WARN",
+            )
+        if settings.get("mute_while_recording"):
+            self._log(
+                "Mic watcher: Handy's own mute_while_recording is on; Handy will also mute "
+                "the Mac's output during recording, independent of this pause"
+            )
 
         # Check if mic is currently recording before we start tailing.
         # This handles the case where the daemon restarts mid-recording.
@@ -145,7 +222,7 @@ class MicWatcher:
         self._write_state(paused=False, paused_by=None)
         self._log("Mic watcher: resumed after recording")
 
-    def _check_rotation(self, f: object) -> bool:
+    def _check_rotation(self, f: IO[Any]) -> bool:
         """Check if the log file was rotated. Debounced to avoid false positives."""
         now = time.monotonic()
         if now - self._last_rotation_check < ROTATION_CHECK_INTERVAL:
@@ -153,7 +230,7 @@ class MicWatcher:
         self._last_rotation_check = now
         try:
             current_inode = os.stat(HANDY_LOG).st_ino
-            fd_inode = os.fstat(f.fileno()).st_ino  # type: ignore[union-attr]
+            fd_inode = os.fstat(f.fileno()).st_ino
             if current_inode != fd_inode:
                 self._log("Mic watcher: log rotated, reopening")
                 return True
@@ -167,7 +244,7 @@ class MicWatcher:
 
         try:
             # Open and seek to end — we only care about new events
-            with open(HANDY_LOG, "r") as f:
+            with open(HANDY_LOG) as f:
                 f.seek(0, os.SEEK_END)
                 self._log(f"Mic watcher: tailing {HANDY_LOG}")
 
@@ -188,6 +265,10 @@ class MicWatcher:
                         self._pause_for_mic()
 
                     elif _RE_RECORDING_STOP.search(line):
+                        if not self._recording:
+                            # Handy logs several stop-side lines per recording;
+                            # the first one already resumed us.
+                            continue
                         self._recording = False
                         # Wait for transcription + paste before resuming
                         self._stop_event.wait(self._resume_delay)

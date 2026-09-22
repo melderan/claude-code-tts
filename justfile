@@ -1,73 +1,71 @@
-# claude-code-tts recipes
+# claude-code-tts developer tasks. `just` runs the same recipes CI runs, so local and CI agree.
+# Recipes stay one line and dispatch to scripts/: a script can be run and debugged on its own,
+# while a recipe body passes through just's templating first. Python before Bash for anything
+# with logic; Bash only sequences commands.
+# Install just: brew install just  (or: uv tool install rust-just)
 
-# Show available recipes
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
 default:
     @just --list
 
-# Deploy changes to local machine via installer
-upgrade:
-    uv tool install . --force && claude-tts-install --upgrade
+# Lint (ruff) and type check (mypy)
+check: lint typecheck
 
-# Check what would change without deploying
-check:
-    claude-tts-install --check
+lint:
+    uv tool run ruff check src tests scripts
 
-# Commit a feature (bumps minor version)
-feat message:
-    ./scripts/commit-feature.sh feat "{{message}}"
+fmt:
+    uv tool run ruff check --fix src tests scripts
+    uv tool run ruff format src tests scripts
 
-# Commit a bug fix (bumps patch version)
-fix message:
-    ./scripts/commit-feature.sh fix "{{message}}"
+# mypy is the long-standing checker; ty (Astral) catches what it misses. Both must pass.
+typecheck:
+    uv tool run mypy src
+    uv tool run ty check src
 
-# Commit docs/chore/refactor (bumps patch version)
-patch type message:
-    bump-my-version bump patch --no-commit --no-tag --allow-dirty
-    git add -A && git commit -m "{{type}}: {{message}}"
+# Interpreter for `just test`; override before the recipe name: `just PY=3.14 test`
+PY := "3.12"
 
-# Push to remote (with pre-push checks)
-push:
-    git push && git push --tags
+# Unit tests on the PY interpreter
+test:
+    uv run --python {{PY}} --with pytest pytest -q --ignore=tests/docker
 
-# Interactive release workflow
-release *args:
-    claude-tts release {{args}}
+# Coverage report
+cov:
+    uv run --with pytest --with pytest-cov pytest -q --ignore=tests/docker --cov=claude_code_tts --cov-report=term-missing
 
-# Run pre-push checks without pushing
-checks:
-    claude-tts release --check
-
-# Show TTS status for current session
-status:
-    claude-tts status
-
-# Test TTS with a sample phrase
-speak *text:
-    claude-tts speak {{text}}
-
-# Audition voices interactively
-audition *args:
-    claude-tts audition {{args}}
-
-# Tail the TTS debug log
-log:
-    tail -f /tmp/claude_tts_debug.log
-
-# Tail the daemon log
-daemon-log:
-    tail -f ~/.claude-tts/daemon.log
-
-# Restart the TTS daemon
-daemon-restart:
-    claude-tts daemon restart
-
-# Clean up stale TTS sessions
-cleanup:
-    claude-tts cleanup
-
-# Show version across all files
+# Version files agree
 version:
-    @echo "pyproject.toml: $(grep '^version' pyproject.toml | head -1 | cut -d'"' -f2)"
-    @echo "install.py:     $(grep '__version__' src/claude_code_tts/install.py | cut -d'"' -f2)"
-    @echo "__init__.py:    $(grep '__version__' src/claude_code_tts/__init__.py | cut -d'"' -f2)"
-    @echo "CLAUDE.md:      $(grep 'Version' CLAUDE.md | head -1 | sed 's/.*Version //' | sed 's/\.//' | sed 's/\.$//')"
+    scripts/check-version.sh
+
+# Build the wheel and prove a cold install of it finds its own hooks and commands
+build:
+    scripts/build-check.sh
+
+# Clean Ubuntu container, real install, synthesized speech (needs docker). TAG or WHEEL=dist/x.whl
+e2e TAG="main":
+    tests/docker/run-clean-install-test.sh {{TAG}}
+
+# Everything CI runs, in order
+ci: lint typecheck version test build
+
+# The local gate: same checks as ci, real exit codes, stops at the first failure. FULL=1 adds build.
+gate FULL="":
+    @scripts/gate.py {{ if FULL != "" { "--full" } else { "" } }}
+
+# Point git at .githooks: pre-commit runs the fast gate, pre-push the full one
+hooks:
+    git config core.hooksPath .githooks
+    @echo "hooks installed: pre-commit -> gate, pre-push -> gate --full"
+
+# Operator, on the daemon's machine: rebuild from this checkout, deploy hooks, restart, verify; logs in .logs/just/
+up:
+    @scripts/up.py
+
+# Operator: the timeline of `just up` runs, newest last
+timeline N="20":
+    @tail -n {{N}} .logs/just/timeline.log 2>/dev/null || echo "no runs yet (.logs/just/timeline.log)"
+
+# Same as `just up`; kept for muscle memory
+install: up

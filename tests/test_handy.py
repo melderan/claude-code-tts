@@ -10,10 +10,8 @@ from pathlib import Path
 import pytest
 
 from claude_code_tts.handy import (
-    ANALYSIS_DB,
     AnalysisResult,
     AudioFeatures,
-    HandyWatcher,
     _autocorrelation_pitch,
     _detect_pauses,
     _read_pcm_samples,
@@ -28,7 +26,6 @@ from claude_code_tts.handy import (
     store_analysis,
     summarize_tone,
 )
-
 
 # --- Test helpers ---
 

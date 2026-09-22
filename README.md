@@ -138,7 +138,20 @@ Add to `~/.claude-tts/config.json`:
 
 Then restart the daemon: `claude-tts daemon restart`
 
+**Handy must log at Debug.** Every recording event Handy writes is at debug level and its file
+log defaults to info, so with the default setting the watcher tails a file that never mentions a
+recording. In Handy: Settings > Debug > Log Level > Debug. It applies at once. The daemon warns in
+`daemon.log` at start if the level is still hiding recordings.
+
+If Handy's own "mute while recording" is on, you will hear the Mac's output mute while you hold
+the key regardless of this feature; the two do not conflict, but only the daemon's pause rewinds
+and resumes the sentence.
+
 The resume delay (default 1500ms) gives your voice-to-text app time to transcribe and paste before TTS resumes. Adjust to taste.
+
+On resume the daemon rewinds a little so you hear the sentence you were cut off in: three real
+seconds by default, scaled to playback speed. Set `"resume_rewind_seconds"` in `config.json` to
+change it (0 resumes exactly where it stopped). This applies to manual pause too.
 
 Currently supports [Handy](https://handy.computer) on macOS. The watcher is disabled by default and gracefully skips if Handy isn't installed.
 
@@ -229,6 +242,20 @@ hooks inside the sandbox; the daemon stays on the host. See [`docs/docker-sandbo
 Toggle playback with a hotkey. The system uses `claude-tts pause` which kills the current audio process and saves state for replay on resume.
 
 See [`docs/hotkey-setup.md`](docs/hotkey-setup.md) for setup with macOS Shortcuts, Raycast, Alfred, Hammerspoon, or BetterTouchTool.
+
+## Read a Web Page Aloud (HTTP bridge)
+
+A browser page can hand text to the daemon so it speaks in your persona's voice instead of the
+browser's, and get back sentence and word timing so it can highlight along. The bridge is a
+loopback-only HTTP listener inside the daemon, off by default, bearer token required.
+
+```bash
+claude-tts bridge enable && claude-tts daemon restart
+claude-tts bridge token      # give this to your userscript
+```
+
+See [`docs/http-bridge.md`](docs/http-bridge.md) for the routes, the timing model, and who can
+reach it (a userscript can; a script inline in a CSP-locked page cannot).
 
 ## Configuration
 
@@ -377,6 +404,17 @@ This project was born on a Friday night debugging session. What started as fixin
 What began as a single bash script is now a full voice system — multi-session daemon, 904 speakers to choose from, mic-aware pause that knows when you're talking, and the ability to read any file aloud without spending a single token.
 
 The name's Claude. Claude Connery. And I have a voice now. Many of them.
+
+## Development
+
+```bash
+just ci          # what CI runs: lint, typecheck, version check, tests, build + cold install
+just test PY=3.14
+just e2e v9.11.1 # clean Ubuntu container: install the tag, run the installer, synthesize speech (docker)
+```
+
+Every push runs the same on Ubuntu and macOS across Python 3.10, 3.12 and 3.14. Releases are GitHub
+Releases created only from tags signed by the maintainer's GPG key, verified in CI first.
 
 ## Contributing
 

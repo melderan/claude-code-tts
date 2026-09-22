@@ -1,0 +1,48 @@
+# Release: a GitHub Release with the wheel attached, created only for a tag that verifies against
+# the maintainer's GPG key committed at .github/maintainer-key.asc. An unsigned tag, or one signed by
+# any other key, publishes nothing. Nothing goes to PyPI; installs are from the tag.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # to create the Release; nothing else
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: verify the tag is signed by the maintainer key
+        run: |
+          gpg --batch --import .github/maintainer-key.asc
+          FPR=$(gpg --with-colons --show-keys .github/maintainer-key.asc | awk -F: '$1=="fpr"{print $10; exit}')
+          echo "$FPR:6:" | gpg --batch --import-ownertrust
+          # --raw prints status lines; VALIDSIG carries the signing-subkey fingerprint and, last, the
+          # primary key fingerprint. Require the maintainer's primary fingerprint on that line.
+          git verify-tag --raw "$GITHUB_REF_NAME" 2>&1 | tee verify.txt
+          grep -E "^\[GNUPG:\] VALIDSIG .* ${FPR}$" verify.txt >/dev/null \
+            || { echo "tag $GITHUB_REF_NAME is not signed by the maintainer key $FPR"; exit 1; }
+      - name: version matches tag
+        run: |
+          v=$(grep -E '^__version__ = ' src/claude_code_tts/__init__.py | sed 's/.*"\(.*\)"/\1/')
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "package version $v != tag $GITHUB_REF_NAME"; exit 1; }
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: build
+        run: uv build
+      - name: create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=$(git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME")
+          subject=$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME")
+          printf '%s\n\n%s\n\nInstall:\n\n    uv tool install --build git+https://github.com/%s@%s\n\nTag signed by the maintainer key; verified in CI before this release was created.\n' \
+            "$subject" "$notes" "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md

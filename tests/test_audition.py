@@ -1,14 +1,13 @@
 """Tests for audition subcommand — non-interactive logic."""
 
+import argparse
 import json
 from unittest.mock import patch
-import argparse
 
 import pytest
 
-import claude_code_tts.config as config_mod
 import claude_code_tts.audio as audio_mod
-
+import claude_code_tts.config as config_mod
 
 # ---------------------------------------------------------------------------
 # Helpers — extracted from cmd_audition's inner functions for testability

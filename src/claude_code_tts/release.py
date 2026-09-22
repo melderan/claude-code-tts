@@ -119,18 +119,18 @@ def run_checks(repo: Path) -> bool:
 
     # Check 6: Tests pass
     print("6. Running tests... ", end="")
-    r = subprocess.run(
+    tests_run = subprocess.run(
         ["uv", "run", "pytest", "tests/", "-q"],
         capture_output=True, text=True, cwd=repo,
     )
-    if r.returncode == 0:
+    if tests_run.returncode == 0:
         # Extract summary line
-        lines = r.stdout.strip().splitlines()
+        lines = tests_run.stdout.strip().splitlines()
         summary = lines[-1] if lines else "OK"
         print(f"OK ({summary})")
     else:
         print("FAIL")
-        print(r.stdout[-500:] if len(r.stdout) > 500 else r.stdout)
+        print(tests_run.stdout[-500:] if len(tests_run.stdout) > 500 else tests_run.stdout)
         errors += 1
 
     print()

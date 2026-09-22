@@ -58,8 +58,12 @@ When writing documentation, comments, commit messages, or any public-facing cont
 uv tool install git+https://github.com/melderan/claude-code-tts
 claude-tts-install
 
-# Upgrade local install (rebuilds CLI + deploys hooks/commands)
-uv tool install . --force && claude-tts-install --upgrade
+# Upgrade the machine that owns the daemon from this checkout: rebuild CLI, deploy
+# hooks/commands, restart the daemon, verify; full log per run in .logs/just/ (gitignored)
+just up
+just timeline                 # the runs so far, with version and git ref
+# Without just: uv tool install . --force --build && claude-tts-install --upgrade
+# (--build is needed where a uv config disables source builds; harmless elsewhere)
 
 # Release workflow
 claude-tts release          # Interactive release
@@ -121,6 +125,7 @@ src/claude_code_tts/
   audio.py                 # Piper/Kokoro/afplay backends, tts_speak()
   filter.py                # Text filter (filter_text for responses, filter_document for files)
   daemon.py                # Queue daemon (pause/resume, heartbeat)
+  bridge.py                # Opt-in loopback HTTP bridge (browser pages -> queue, timing marks)
   install.py               # Installer (hooks, voices, service)
   release.py               # Release workflow (checks + version bump)
 hooks/
@@ -131,10 +136,15 @@ commands/tts-*.md          # Slash command definitions (call claude-tts CLI)
 scripts/
   commit-feature.sh        # Commit helper (version bump + feature in one)
   check-version.sh         # Version consistency checker
+  up.py                    # `just up`: rebuild, install, restart, verify, log to .logs/just/
+  gate.py                  # `just gate` and the git hooks: lint, mypy, ty, version, tests [, build]
+  build-check.sh           # `just build`: wheel + cold-install proof
   tts-builder.py           # Voice builder TUI (Textual, standalone)
 docs/
   voice-notes.md           # Voice compatibility knowledge base
   hotkey-setup.md          # Pause/resume hotkey setup guide
+  http-bridge.md           # HTTP bridge contract (routes, marks, threat model)
+  what-and-why.md          # What the system does and why, with no how; the fixed points for any redesign
 ```
 
 ## Config Files
@@ -209,11 +219,27 @@ pyproject reads it at build time (hatch dynamic version) and the installer impor
 
 ## Testing Changes (IMPORTANT)
 
+`just ci` runs exactly what GitHub Actions runs: lint (ruff), type checks (mypy and ty), version
+check, tests, wheel build with a cold install. `just gate` runs the same through `scripts/gate.py` with
+real exit codes, and `just hooks` installs it as the pre-commit (fast) and pre-push (full) hook. Run
+`just hooks` once per clone. Never judge a check through a pipe (`pytest | tail`): the pipe's exit
+code wins and a failure disappears, which is how a flaky test once reached a signed commit. `just up` is the operator side: it rebuilds, installs,
+restarts the daemon, verifies the heartbeat, writes the full output of the run to
+`.logs/just/up-<time>-<git ref>.log`, and appends one line (time, version, git ref, branch, daemon,
+bridge and mic state, run file) to `.logs/just/timeline.log`, which `just timeline` prints. The
+directory is gitignored and lives in the checkout, so a sandbox sharing the working tree can read
+what the host is running without asking. `just --list` shows the rest (`PY=3.14 test`,
+`cov`, `e2e`, `fmt`). Install just with `brew install just` or `uv tool install rust-just`.
+
+CI (`.github/workflows/ci.yml`) pins every action to a commit SHA, runs with a read-only token, and
+publishes nothing. Releases (`release.yml`) are created only for tags that verify against the
+maintainer key in `.github/maintainer-key.asc`. Keep it that way.
+
 **Always rebuild the CLI and run the installer to deploy changes.**
 
 ```bash
 # After making changes, rebuild CLI + deploy hooks/commands:
-uv tool install . --force && claude-tts-install --upgrade
+uv tool install . --force --build && claude-tts-install --upgrade
 
 # To verify what would be updated without changing anything:
 claude-tts-install --check
