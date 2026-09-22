@@ -227,7 +227,7 @@ restarts the daemon, verifies the heartbeat, writes the full output of the run t
 `.logs/just/up-<time>-<git ref>.log`, and appends one line (time, version, git ref, branch, daemon,
 bridge and mic state, run file) to `.logs/just/timeline.log`, which `just timeline` prints. The
 directory is gitignored and lives in the checkout, so a sandbox sharing the working tree can read
-what the host is running without asking. `just --list` shows the rest (`test PY=3.14`,
+what the host is running without asking. `just --list` shows the rest (`PY=3.14 test`,
 `cov`, `e2e`, `fmt`). Install just with `brew install just` or `uv tool install rust-just`.
 
 CI (`.github/workflows/ci.yml`) pins every action to a commit SHA, runs with a read-only token, and

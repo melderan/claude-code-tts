@@ -24,7 +24,7 @@ typecheck:
     uv tool run mypy src
     uv tool run ty check src
 
-# Interpreter for `just test`; override on the command line: `just test PY=3.14`
+# Interpreter for `just test`; override before the recipe name: `just PY=3.14 test`
 PY := "3.12"
 
 # Unit tests on the PY interpreter
