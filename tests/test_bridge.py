@@ -294,6 +294,8 @@ def test_build_marks_words_share_sentence_by_length() -> None:
     assert marks["sentences"][1]["end_ms"] == 1500
     words = marks["words"]
     assert [w["text"] for w in words] == ["ab", "cd.", "e"]
+    assert [w["c"] for w in words] == [0, 3, 7]
+    assert [s["c"] for s in marks["sentences"]] == [0, 7]
     assert words[0]["start_ms"] == 0 and words[0]["end_ms"] == 400
     assert words[1]["start_ms"] == 400 and words[1]["end_ms"] == 1000
     assert words[2]["s"] == 1 and words[2]["start_ms"] == 1000
@@ -378,3 +380,15 @@ def test_evict_finished_only_after_ttl() -> None:
     assert JOBS.get("live") is not None
     JOBS.update("missing", state="done")  # unknown ids are ignored
     assert JOBS.state(None) is None
+
+
+def test_marks_offsets_follow_the_submitted_text() -> None:
+    text = "See #339.   Then  PR #1223 lands."
+    sentences = split_sentences(text)
+    marks = build_marks(sentences, [1.0, 1.0], text=text)
+    # Offsets index the original text, whitespace runs included.
+    for w in marks["words"]:
+        assert text[w["c"] : w["c"] + len(w["text"])] == w["text"]
+    for s in marks["sentences"]:
+        assert text[s["c"] : s["c"] + len(s["text"])] == s["text"]
+    assert marks["sentences"][1]["c"] == text.index("Then")
