@@ -1265,6 +1265,56 @@ def _explain_speech_failure() -> str:
     return "\n".join(lines)
 
 
+def cmd_bridge(args: argparse.Namespace) -> None:
+    """Manage the loopback HTTP bridge (browser pages -> daemon)."""
+    from claude_code_tts.bridge import TOKEN_FILE, ensure_token, get_http_config, read_token
+    from claude_code_tts.config import load_raw_config, save_raw_config
+
+    sub = getattr(args, "bridge_command", None)
+    http = get_http_config()
+
+    if sub == "status":
+        print(f"Bridge: {'enabled' if http['enabled'] else 'disabled'}")
+        print(f"Listen: http://{http['bind']}:{http['port']}")
+        print(f"Token:  {TOKEN_FILE} ({'present' if read_token() else 'not created yet'})")
+        origins = http.get("allowed_origins") or []
+        print(f"Allowed origins: {', '.join(origins) if origins else '(none; userscripts only)'}")
+        if http["enabled"]:
+            print("Restart the daemon after changing any of this: claude-tts daemon restart")
+    elif sub == "token":
+        print(ensure_token())
+    elif sub in ("enable", "disable"):
+        config = load_raw_config()
+        block = {**http, **config.get("http", {})}
+        block["enabled"] = sub == "enable"
+        port = getattr(args, "port", None)
+        if port:
+            block["port"] = int(port)
+        config["http"] = block
+        save_raw_config(config)
+        if sub == "enable":
+            ensure_token()
+            print(f"Bridge enabled on http://{block['bind']}:{block['port']}")
+            print(f"Bearer token: {TOKEN_FILE}  (claude-tts bridge token prints it)")
+        else:
+            print("Bridge disabled")
+        print("Restart the daemon to apply: claude-tts daemon restart")
+    elif sub == "allow-origin":
+        config = load_raw_config()
+        block = {**http, **config.get("http", {})}
+        origins = list(block.get("allowed_origins", []))
+        origin = args.origin.rstrip("/")
+        if origin not in origins:
+            origins.append(origin)
+        block["allowed_origins"] = origins
+        config["http"] = block
+        save_raw_config(config)
+        print(f"Allowed origins: {', '.join(origins)}")
+        print("Restart the daemon to apply: claude-tts daemon restart")
+    else:
+        print("Usage: claude-tts bridge <status|token|enable|disable|allow-origin ORIGIN>")
+
+
 def cmd_speak(args: argparse.Namespace) -> None:
     """Speak text (standalone tool or from hook)."""
     from claude_code_tts.audio import generate_speech, play_audio
@@ -2702,6 +2752,19 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=cmd_daemon)
 
     # --- speak ---
+    p = subparsers.add_parser("bridge", help="Loopback HTTP bridge for browser pages")
+    bridge_sub = p.add_subparsers(dest="bridge_command")
+    bridge_sub.add_parser("status", help="Show bridge settings").set_defaults(func=cmd_bridge)
+    bridge_sub.add_parser("token", help="Print the bearer token").set_defaults(func=cmd_bridge)
+    bs = bridge_sub.add_parser("enable", help="Enable the bridge (daemon restart applies it)")
+    bs.add_argument("--port", type=int, help="Listen port (default 7457)")
+    bs.set_defaults(func=cmd_bridge)
+    bridge_sub.add_parser("disable", help="Disable the bridge").set_defaults(func=cmd_bridge)
+    bs = bridge_sub.add_parser("allow-origin", help="Allow a browser origin (CORS)")
+    bs.add_argument("origin", help="e.g. https://example.com")
+    bs.set_defaults(func=cmd_bridge)
+    p.set_defaults(func=cmd_bridge)
+
     p = subparsers.add_parser("speak", help="Speak text (standalone or from hook)")
     p.add_argument("text", nargs="?", help="Text to speak")
     p.add_argument("--voice", help="Piper voice model name")

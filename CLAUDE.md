@@ -121,6 +121,7 @@ src/claude_code_tts/
   audio.py                 # Piper/Kokoro/afplay backends, tts_speak()
   filter.py                # Text filter (filter_text for responses, filter_document for files)
   daemon.py                # Queue daemon (pause/resume, heartbeat)
+  bridge.py                # Opt-in loopback HTTP bridge (browser pages -> queue, timing marks)
   install.py               # Installer (hooks, voices, service)
   release.py               # Release workflow (checks + version bump)
 hooks/
@@ -135,6 +136,7 @@ scripts/
 docs/
   voice-notes.md           # Voice compatibility knowledge base
   hotkey-setup.md          # Pause/resume hotkey setup guide
+  http-bridge.md           # HTTP bridge contract (routes, marks, threat model)
 ```
 
 ## Config Files

@@ -230,6 +230,20 @@ Toggle playback with a hotkey. The system uses `claude-tts pause` which kills th
 
 See [`docs/hotkey-setup.md`](docs/hotkey-setup.md) for setup with macOS Shortcuts, Raycast, Alfred, Hammerspoon, or BetterTouchTool.
 
+## Read a Web Page Aloud (HTTP bridge)
+
+A browser page can hand text to the daemon so it speaks in your persona's voice instead of the
+browser's, and get back sentence and word timing so it can highlight along. The bridge is a
+loopback-only HTTP listener inside the daemon, off by default, bearer token required.
+
+```bash
+claude-tts bridge enable && claude-tts daemon restart
+claude-tts bridge token      # give this to your userscript
+```
+
+See [`docs/http-bridge.md`](docs/http-bridge.md) for the routes, the timing model, and who can
+reach it (a userscript can; a script inline in a CSP-locked page cannot).
+
 ## Configuration
 
 ### Config file
