@@ -59,7 +59,9 @@ uv tool install git+https://github.com/melderan/claude-code-tts
 claude-tts-install
 
 # Upgrade local install (rebuilds CLI + deploys hooks/commands)
-uv tool install . --force && claude-tts-install --upgrade
+uv tool install . --force --build && claude-tts-install --upgrade
+# --build is needed where a uv config disables source builds (some company setups);
+# it is harmless elsewhere.
 
 # Release workflow
 claude-tts release          # Interactive release
@@ -223,7 +225,7 @@ maintainer key in `.github/maintainer-key.asc`. Keep it that way.
 
 ```bash
 # After making changes, rebuild CLI + deploy hooks/commands:
-uv tool install . --force && claude-tts-install --upgrade
+uv tool install . --force --build && claude-tts-install --upgrade
 
 # To verify what would be updated without changing anything:
 claude-tts-install --check
