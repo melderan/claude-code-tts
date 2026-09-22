@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -904,11 +905,12 @@ def _sha256_file(path: Path, chunk_size: int = 65536) -> str:
 
 def _format_bytes(n: int) -> str:
     """Render a byte count as human-readable."""
+    size = float(n)
     for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-        n /= 1024  # type: ignore[assignment]
-    return f"{n:.1f} TB"
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
 
 
 def _download_with_progress(url: str, dest: Path, expected_bytes: int) -> bool:
@@ -1863,6 +1865,16 @@ def _watermark_unlock(lock_dir: Path) -> None:
     shutil.rmtree(lock_dir, ignore_errors=True)
 
 
+@dataclass
+class _MessageGroup:
+    """One assistant message as it appears across transcript lines."""
+
+    line: int
+    texts: list[str] = field(default_factory=list)
+    summaries: list[str] = field(default_factory=list)
+    redacted: bool = False
+
+
 def _speakable_messages(transcript: Path, watermark: int, hook_type: str) -> list[tuple[int, str, str]]:
     """Return (line_no, source, text) for each assistant message worth speaking.
 
@@ -1892,7 +1904,7 @@ def _speakable_messages(transcript: Path, watermark: int, hook_type: str) -> lis
         return []
 
     order: list[str] = []
-    groups: dict[str, dict] = {}
+    groups: dict[str, _MessageGroup] = {}
     for idx in range(watermark, len(all_lines)):
         try:
             data = json.loads(all_lines[idx])
@@ -1905,12 +1917,12 @@ def _speakable_messages(transcript: Path, watermark: int, hook_type: str) -> lis
         key = message.get("id") or data.get("uuid") or f"line-{idx}"
         group = groups.get(key)
         if group is None:
-            group = groups[key] = {"texts": [], "summaries": [], "redacted": False, "line": idx}
+            group = groups[key] = _MessageGroup(line=idx)
             order.append(key)
         if isinstance(content, str):
             if content.strip():
-                group["texts"].append(content)
-                group["line"] = idx
+                group.texts.append(content)
+                group.line = idx
             continue
         if not isinstance(content, list):
             continue
@@ -1919,24 +1931,24 @@ def _speakable_messages(transcript: Path, watermark: int, hook_type: str) -> lis
                 continue
             kind = item.get("type")
             if kind == "text" and item.get("text", "").strip():
-                group["texts"].append(item["text"])
-                group["line"] = idx
+                group.texts.append(item["text"])
+                group.line = idx
             elif kind == "thinking":
                 body = (item.get("thinking") or "").strip()
                 if body and item.get("signature"):
-                    group["summaries"].append(body)
-                    if not group["texts"]:
-                        group["line"] = idx
+                    group.summaries.append(body)
+                    if not group.texts:
+                        group.line = idx
                 elif not body:
-                    group["redacted"] = True
+                    group.redacted = True
 
     result: list[tuple[int, str, str]] = []
     for key in order:
         group = groups[key]
-        if group["texts"]:
-            result.append((group["line"], "text", " ".join(group["texts"])))
-        elif group["redacted"] and group["summaries"]:
-            result.append((group["line"], "thinking-summary", " ".join(group["summaries"])))
+        if group.texts:
+            result.append((group.line, "text", " ".join(group.texts)))
+        elif group.redacted and group.summaries:
+            result.append((group.line, "thinking-summary", " ".join(group.summaries)))
     return result
 
 

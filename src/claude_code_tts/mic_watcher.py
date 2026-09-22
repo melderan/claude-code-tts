@@ -9,6 +9,7 @@ is enabled in config.json.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
@@ -49,8 +50,6 @@ _LEVELS_THAT_SHOW_RECORDING = ("trace", "debug")
 def handy_settings() -> dict:
     """Handy's saved settings, or {} if unreadable."""
     try:
-        import json
-
         store = json.loads(HANDY_SETTINGS.read_text())
         settings = store.get("settings", store)
         return settings if isinstance(settings, dict) else {}
