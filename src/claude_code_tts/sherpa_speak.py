@@ -38,7 +38,7 @@ def _build_tts(model_dir: Path):
     Returns a configured OfflineTts. Raises FileNotFoundError if the layout
     doesn't match any supported family.
     """
-    import sherpa_onnx  # type: ignore[import-not-found]
+    import sherpa_onnx
 
     model = model_dir / "model.onnx"
     tokens = model_dir / "tokens.txt"
@@ -124,7 +124,7 @@ def _serve_mode(model_dir: Path) -> int:
         print(json.dumps({"ready": False, "error": str(e)}), flush=True)
         return 4
 
-    import sherpa_onnx  # type: ignore[import-not-found]
+    import sherpa_onnx
 
     # One-time warmup: Kokoro's ONNX runtime discards the first ~80-120ms of
     # audio frames during session init. Synthesise a throw-away phrase now so
@@ -244,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
         print("sherpa_speak: generation produced no samples", file=sys.stderr)
         return 5
 
-    import sherpa_onnx  # type: ignore[import-not-found]
+    import sherpa_onnx
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     sherpa_onnx.write_wave(str(args.output), audio.samples, audio.sample_rate)

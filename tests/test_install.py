@@ -5,8 +5,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 # Import the module under test
 from claude_code_tts import install
 
@@ -126,7 +124,6 @@ class TestVoiceUrls:
         name, gender, quality, desc, path = voice
 
         expected_onnx = f"{install.HF_VOICES_BASE}/{path}/{name}.onnx"
-        expected_json = f"{install.HF_VOICES_BASE}/{path}/{name}.onnx.json"
 
         # These would be the URLs used in download_voice
         assert path in expected_onnx

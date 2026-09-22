@@ -11,8 +11,8 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-import shutil
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -22,17 +22,18 @@ from datetime import datetime
 from io import TextIOWrapper
 from pathlib import Path
 
-from claude_code_tts.audio import generate_speech as _generate_speech, detect_player, warm_sherpa_workers
+from claude_code_tts.audio import detect_player, warm_sherpa_workers
+from claude_code_tts.audio import generate_speech as _generate_speech
+from claude_code_tts.audio import last_error as audio_last_error
 from claude_code_tts.config import (
     TTS_CONFIG_DIR,
     TTS_QUEUE_DIR,
     VOICES_DIR,
     load_raw_config,
 )
-from claude_code_tts.tone import classify_tone, ToneParams, DEFAULT_TONE
-from claude_code_tts.handy import save_speech_wav, AnalyzerThread
-from claude_code_tts.audio import last_error as audio_last_error
+from claude_code_tts.handy import AnalyzerThread, save_speech_wav
 from claude_code_tts.mic_watcher import MicWatcher
+from claude_code_tts.tone import DEFAULT_TONE, ToneParams, classify_tone
 
 # --- Daemon path constants ---
 
@@ -152,7 +153,7 @@ def read_playback_state() -> dict:
                 return json.loads(data)
             finally:
                 os.close(fd)
-        except (json.JSONDecodeError, IOError, OSError):
+        except (json.JSONDecodeError, OSError):
             pass
     return {"paused": False, "audio_pid": None, "current_message": None}
 
@@ -534,7 +535,7 @@ def write_control_message(
 
 def get_queue_messages() -> list[dict]:
     """Get all messages in the queue, sorted by timestamp."""
-    messages = []
+    messages: list[dict] = []
     if not TTS_QUEUE_DIR.exists():
         return messages
 
@@ -544,7 +545,7 @@ def get_queue_messages() -> list[dict]:
                 msg = json.load(fp)
                 msg["_file"] = f
                 messages.append(msg)
-        except (json.JSONDecodeError, IOError) as e:
+        except (OSError, json.JSONDecodeError) as e:
             log(f"Failed to read queue file {f}: {e}", "WARN")
             f.unlink(missing_ok=True)
 
@@ -565,7 +566,7 @@ def cleanup_old_messages(max_age_seconds: int) -> int:
                 f.unlink()
                 removed += 1
                 log(f"Removed stale message: {f.name}")
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             f.unlink(missing_ok=True)
             removed += 1
 
@@ -1026,7 +1027,7 @@ def start_daemon(lockpick: bool = False) -> bool:
     os.chdir("/")
     os.umask(0)
 
-    sys.stdin = open(os.devnull, "r")
+    sys.stdin = open(os.devnull)
     sys.stdout = open(os.devnull, "w")
     sys.stderr = open(os.devnull, "w")
 

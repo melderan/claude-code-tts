@@ -13,8 +13,9 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import IO, Any
 
 # Handy log location (macOS)
 HANDY_LOG = Path.home() / "Library" / "Logs" / "com.pais.handy" / "handy.log"
@@ -33,6 +34,7 @@ ROTATION_CHECK_INTERVAL = 2.0
 
 
 class MicWatcher:
+    _last_rotation_check: float
     """Watches Handy's log for recording events, pauses/resumes TTS."""
 
     def __init__(
@@ -67,7 +69,7 @@ class MicWatcher:
         Returns True if the mic appears to be actively recording.
         """
         try:
-            with open(HANDY_LOG, "r") as f:
+            with open(HANDY_LOG) as f:
                 # Read last 8KB -- enough for ~50 lines
                 f.seek(0, os.SEEK_END)
                 size = f.tell()
@@ -145,7 +147,7 @@ class MicWatcher:
         self._write_state(paused=False, paused_by=None)
         self._log("Mic watcher: resumed after recording")
 
-    def _check_rotation(self, f: object) -> bool:
+    def _check_rotation(self, f: IO[Any]) -> bool:
         """Check if the log file was rotated. Debounced to avoid false positives."""
         now = time.monotonic()
         if now - self._last_rotation_check < ROTATION_CHECK_INTERVAL:
@@ -153,7 +155,7 @@ class MicWatcher:
         self._last_rotation_check = now
         try:
             current_inode = os.stat(HANDY_LOG).st_ino
-            fd_inode = os.fstat(f.fileno()).st_ino  # type: ignore[union-attr]
+            fd_inode = os.fstat(f.fileno()).st_ino
             if current_inode != fd_inode:
                 self._log("Mic watcher: log rotated, reopening")
                 return True
@@ -167,7 +169,7 @@ class MicWatcher:
 
         try:
             # Open and seek to end — we only care about new events
-            with open(HANDY_LOG, "r") as f:
+            with open(HANDY_LOG) as f:
                 f.seek(0, os.SEEK_END)
                 self._log(f"Mic watcher: tailing {HANDY_LOG}")
 

@@ -19,10 +19,10 @@ import struct
 import threading
 import time
 import wave
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
-
+from typing import Any
 
 # --- Paths ---
 
@@ -412,7 +412,7 @@ def store_analysis(result: AnalysisResult, db_path: Path = ANALYSIS_DB) -> None:
 def get_recent_tone(
     max_age_seconds: float = 30.0,
     db_path: Path = ANALYSIS_DB,
-) -> Optional[str]:
+) -> str | None:
     """Get the tone summary for the most recent analysis within max_age.
 
     Returns a natural language string like "speaking with high energy,
@@ -436,7 +436,7 @@ def get_recent_tone(
 def get_recent_analysis(
     max_age_seconds: float = 60.0,
     db_path: Path = ANALYSIS_DB,
-) -> Optional[AnalysisResult]:
+) -> AnalysisResult | None:
     """Get the full analysis for the most recent recording within max_age."""
     if not db_path.exists():
         return None
@@ -478,7 +478,7 @@ def get_recent_analysis(
 def get_aggregated_tone(
     max_age_seconds: float = 60.0,
     db_path: Path = ANALYSIS_DB,
-) -> Optional[str]:
+) -> str | None:
     """Aggregate tone across all recent recordings.
 
     When the user speaks multiple Handy blocks before hitting enter,
@@ -544,7 +544,7 @@ def get_aggregated_tone(
 
 # --- Handy integration ---
 
-def get_handy_transcript(file_name: str) -> Optional[str]:
+def get_handy_transcript(file_name: str) -> str | None:
     """Look up the transcript for a recording in Handy's history DB."""
     if not HANDY_HISTORY_DB.exists():
         return None
@@ -576,7 +576,7 @@ def get_handy_timestamp(file_name: str) -> int:
         return 0
 
 
-def analyze_recording(wav_path: Path) -> Optional[AnalysisResult]:
+def analyze_recording(wav_path: Path) -> AnalysisResult | None:
     """Analyze a single Handy recording.
 
     Looks up the transcript from Handy's history DB, analyzes the WAV,
@@ -841,7 +841,7 @@ def save_speech_wav(
     history_limit: int = DEFAULT_SPEECH_HISTORY_LIMIT,
     history_dir: Path = SPEECH_HISTORY_DIR,
     db_path: Path = SPEECH_HISTORY_DB,
-) -> Optional[Path]:
+) -> Path | None:
     """Copy a generated WAV to speech history before playback.
 
     Returns the path to the history copy, or None on failure.

@@ -209,6 +209,14 @@ pyproject reads it at build time (hatch dynamic version) and the installer impor
 
 ## Testing Changes (IMPORTANT)
 
+`just ci` runs exactly what GitHub Actions runs: lint (ruff), type check (mypy), version check, tests,
+wheel build with a cold install. Run it before every push. `just --list` shows the rest (`test PY=3.14`,
+`cov`, `e2e`, `fmt`). Install just with `brew install just` or `uv tool install rust-just`.
+
+CI (`.github/workflows/ci.yml`) pins every action to a commit SHA, runs with a read-only token, and
+publishes nothing. Releases (`release.yml`) are created only for tags that verify against the
+maintainer key in `.github/maintainer-key.asc`. Keep it that way.
+
 **Always rebuild the CLI and run the installer to deploy changes.**
 
 ```bash

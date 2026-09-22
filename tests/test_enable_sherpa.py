@@ -11,8 +11,6 @@ feedback_installer_interactive.md:
 
 from __future__ import annotations
 
-import io
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 

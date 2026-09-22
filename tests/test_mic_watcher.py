@@ -5,12 +5,11 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from claude_code_tts.mic_watcher import (
-    MicWatcher,
-    RESUME_DELAY_MS,
     _RE_RECORDING_START,
     _RE_RECORDING_STOP,
+    RESUME_DELAY_MS,
+    MicWatcher,
 )
-
 
 # --- Regex tests ---
 

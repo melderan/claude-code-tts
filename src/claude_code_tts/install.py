@@ -27,11 +27,10 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 # Version of this installer/package
 from claude_code_tts import __version__
-
 
 # --- Platform Detection ---
 
@@ -43,7 +42,7 @@ def detect_platform() -> str:
     elif system == "Linux":
         # Check for WSL
         try:
-            with open("/proc/version", "r") as f:
+            with open("/proc/version") as f:
                 if "microsoft" in f.read().lower():
                     return "wsl"
         except (FileNotFoundError, PermissionError):
@@ -53,7 +52,7 @@ def detect_platform() -> str:
         return "unsupported"
 
 
-def detect_package_manager() -> Optional[str]:
+def detect_package_manager() -> str | None:
     """Detect available package manager."""
     if shutil.which("brew"):
         return "brew"
@@ -377,7 +376,7 @@ class BackupManager:
     def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.backup_path: Optional[Path] = None
+        self.backup_path: Path | None = None
         self.backed_up_files: list[tuple[Path, Path]] = []
 
     def create_backup_dir(self) -> Path:
@@ -387,13 +386,14 @@ class BackupManager:
             self.backup_path.mkdir(parents=True, exist_ok=True)
         return self.backup_path
 
-    def backup_file(self, file_path: Path) -> Optional[Path]:
+    def backup_file(self, file_path: Path) -> Path | None:
         """Backup a single file if it exists."""
         if not file_path.exists():
             return None
 
         if self.backup_path is None:
             self.create_backup_dir()
+        assert self.backup_path is not None
 
         # Preserve directory structure in backup
         relative = file_path.relative_to(HOME)
@@ -422,7 +422,7 @@ class BackupManager:
             for original, backup in self.backed_up_files:
                 print(f"  cp {backup} {original}")
             print()
-            print(f"Or restore everything:")
+            print("Or restore everything:")
             print(f"  cp -r {self.backup_path}/.claude/* ~/.claude/")
         print(f"{Colors.YELLOW}--------------------------{Colors.NC}")
 
@@ -468,7 +468,7 @@ def run_preflight_checks(dry_run: bool = False) -> tuple[bool, list[str]]:
         preflight(f"{Colors.GREEN}PASS{Colors.NC} curl found")
 
     # Check source files exist
-    for name, src_path, dst_path in _manifest_entries():
+    for name, src_path, _dst_path in _manifest_entries():
         if not src_path.exists():
             issues.append(f"Source file not found: {src_path}")
             preflight(f"{Colors.RED}FAIL{Colors.NC} Source {name} missing")
@@ -606,8 +606,8 @@ def do_uninstall(dry_run: bool = False) -> None:
 
     # Remove our hooks from settings.json: all three events, only our entries
     if SETTINGS_FILE.exists():
-        with open(SETTINGS_FILE) as f:
-            settings = json.load(f)
+        with open(SETTINGS_FILE) as fh:
+            settings = json.load(fh)
 
         removed = remove_tts_hooks(settings)
         if removed:
@@ -1075,8 +1075,8 @@ def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: floa
     if upgrade:
         # In upgrade mode, check if PostToolUse hook needs to be added
         if SETTINGS_FILE.exists():
-            with open(SETTINGS_FILE) as f:
-                settings = json.load(f)
+            with open(SETTINGS_FILE) as fh:
+                settings = json.load(fh)
             if ensure_tts_hooks(settings):
                 write_settings(settings)
                 success("Settings updated (speech hooks registered and marked async)")
@@ -1091,8 +1091,8 @@ def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: floa
         if dry_run:
             dry("Add TTS hooks to settings.json (preserving existing hooks)")
         else:
-            with open(SETTINGS_FILE) as f:
-                settings = json.load(f)
+            with open(SETTINGS_FILE) as fh:
+                settings = json.load(fh)
             if ensure_tts_hooks(settings):
                 write_settings(settings)
                 success("TTS hooks added to settings.json (preserving existing hooks)")
@@ -1189,7 +1189,7 @@ def do_install(dry_run: bool = False, upgrade: bool = False, default_speed: floa
             print("  4. Use /tts-unmute to re-enable TTS")
         print()
         print("Configuration:")
-        print(f"  CLI:      claude-tts (via uv tool)")
+        print("  CLI:      claude-tts (via uv tool)")
         print(f"  Hook:     {HOOKS_DIR / 'speak-response.sh'}")
         print(f"  Settings: {SETTINGS_FILE}")
         print(f"  Voice:    {VOICE_FILE}")
@@ -1336,7 +1336,7 @@ def save_config(config: dict) -> None:
         json.dump(config, f, indent=2)
 
 
-def get_installed_version() -> Optional[str]:
+def get_installed_version() -> str | None:
     """Get the currently installed version from config."""
     config = load_config()
     return config.get("installed_version")
@@ -1360,7 +1360,7 @@ def get_file_hash(filepath: Path) -> str:
 
 def check_for_updates() -> dict:
     """Check if installed files differ from repo files."""
-    results = {
+    results: dict[str, Any] = {
         "installed_version": get_installed_version(),
         "repo_version": __version__,
         "files": {},
@@ -1704,7 +1704,7 @@ def create_persona_from_voice(
     gender: str,
     description: str,
     ai_type: str = "claude",
-    config: Optional[dict] = None,
+    config: dict | None = None,
 ) -> str:
     """Create a persona for a downloaded voice. Returns persona name."""
     if config is None:
@@ -1865,7 +1865,7 @@ def do_download_voices() -> None:
 
     # Build display list
     display_options = []
-    for name, gender, quality, desc, path in voices_to_show:
+    for name, gender, quality, desc, _path in voices_to_show:
         is_installed = name in installed
         status = f"{Colors.GREEN}[installed]{Colors.NC}" if is_installed else ""
         gender_icon = "F" if gender == "female" else "M"
@@ -1962,7 +1962,7 @@ def do_bootstrap_from_config(config_path: Path) -> None:
 
     # Get all unique voices from personas
     voices_needed = set()
-    for name, persona in config.get("personas", {}).items():
+    for _name, persona in config.get("personas", {}).items():
         voice = persona.get("voice")
         if voice:
             voices_needed.add(voice)
@@ -2010,7 +2010,7 @@ def do_interactive() -> None:
     """Interactive main menu."""
     print()
     print("========================================")
-    print(f"  Claude Code TTS - Interactive Setup")
+    print("  Claude Code TTS - Interactive Setup")
     print("========================================")
 
     # Check current state
@@ -2197,7 +2197,7 @@ def do_enable_sherpa(*, assume_yes: bool = False, dry_run: bool = False) -> int:
                 info(f"ONNX Runtime providers available: {', '.join(providers)}")
             print()
             print(f"  Models directory: {models_dir}")
-            print(f"  (drop a model.onnx + tokens.txt under <id>/ to use it)")
+            print("  (drop a model.onnx + tokens.txt under <id>/ to use it)")
             print()
             return 0
         else:
@@ -2220,11 +2220,11 @@ def do_enable_sherpa(*, assume_yes: bool = False, dry_run: bool = False) -> int:
 
     # 4. Show plan, confirm
     plat = detect_platform()
-    print(f"This will:")
+    print("This will:")
     print(f"  • Create a Python 3.12 venv at {venv_dir}")
-    print(f"  • Install sherpa-onnx (~77 MB) into that venv")
+    print("  • Install sherpa-onnx (~77 MB) into that venv")
     print(f"  • Create models directory at {models_dir}")
-    print(f"  • Touch nothing outside ~/.claude-tts/")
+    print("  • Touch nothing outside ~/.claude-tts/")
     print()
     print(f"  Platform:    {plat}")
     if free >= 0:
@@ -2287,11 +2287,11 @@ def do_enable_sherpa(*, assume_yes: bool = False, dry_run: bool = False) -> int:
     print()
     print(f"{Colors.GREEN}Next steps:{Colors.NC}")
     print(f"  1. Drop a sherpa-onnx model under {models_dir}/<id>/")
-    print(f"     Minimum: model.onnx + tokens.txt")
-    print(f"  2. Configure a persona in ~/.claude-tts/config.json with:")
-    print(f'       "voice_sherpa": "<id>"')
-    print(f'       "speaker_sherpa": <int>   (multi-speaker models only)')
-    print(f"  3. /tts-persona <name> --project   (in your target repo)")
+    print("     Minimum: model.onnx + tokens.txt")
+    print("  2. Configure a persona in ~/.claude-tts/config.json with:")
+    print('       "voice_sherpa": "<id>"')
+    print('       "speaker_sherpa": <int>   (multi-speaker models only)')
+    print("  3. /tts-persona <name> --project   (in your target repo)")
     print()
     print("Curated model picklist + auto-download is the next slice.")
     print()

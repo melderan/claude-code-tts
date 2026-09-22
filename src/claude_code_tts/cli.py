@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from claude_code_tts import __version__
 from claude_code_tts.config import (
@@ -32,7 +33,6 @@ from claude_code_tts.config import (
     session_set,
 )
 from claude_code_tts.session import get_session_id
-
 
 # ---------------------------------------------------------------------------
 # Command handlers
@@ -918,8 +918,8 @@ def _download_with_progress(url: str, dest: Path, expected_bytes: int) -> bool:
     .part file and renames on success so a partial download isn't mistaken
     for a complete one.
     """
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     part = dest.with_suffix(dest.suffix + ".part")
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1025,7 +1025,7 @@ def _sherpa_install(model_id: str, *, assume_yes: bool = False) -> int:
     print(f"Model: {entry['id']}")
     print(f"Layout: {entry['layout']} ({entry['voices']} voices, {entry['language']})")
     print(f"License: {entry['license_weights']} (weights)")
-    print(f"License notes:")
+    print("License notes:")
     # Wrap the long notes string at ~70 cols for readability
     notes = entry['license_notes']
     line = ""
@@ -1063,7 +1063,7 @@ def _sherpa_install(model_id: str, *, assume_yes: bool = False) -> int:
         return 3
 
     # Verify
-    print(f"Verifying SHA256 ...", end=" ", flush=True)
+    print("Verifying SHA256 ...", end=" ", flush=True)
     digest = _sha256_file(archive)
     if digest != entry["sha256"]:
         print("MISMATCH")
@@ -1106,13 +1106,13 @@ def _sherpa_install(model_id: str, *, assume_yes: bool = False) -> int:
     print(f'  claude-tts speak --voice-sherpa {model_id} "hello there, this is a test"')
     print()
     print("Configure as a persona — add to ~/.claude-tts/config.json:")
-    print(f'  "personas": {{')
+    print('  "personas": {')
     print(f'    "claude-{model_id}": {{')
     print(f'      "voice_sherpa": "{model_id}",')
-    print(f'      "speaker_sherpa": 0,')
-    print(f'      "speed": 1.0')
-    print(f'    }}')
-    print(f'  }}')
+    print('      "speaker_sherpa": 0,')
+    print('      "speed": 1.0')
+    print('    }')
+    print('  }')
     return 0
 
 
@@ -1136,7 +1136,7 @@ def cmd_pause(args: argparse.Namespace) -> None:
     """Toggle TTS playback pause/resume."""
     playback_file = Path.home() / ".claude-tts" / "playback.json"
 
-    state = {"paused": False, "audio_pid": None}
+    state: dict[str, Any] = {"paused": False, "audio_pid": None}
     if playback_file.exists():
         try:
             state = json.loads(playback_file.read_text())
@@ -1239,10 +1239,10 @@ def cmd_test(args: argparse.Namespace) -> None:
     print("")
     print("Test complete. How did that sound?")
     print("")
-    print(f"Adjust settings with:")
+    print("Adjust settings with:")
     print(f"  /tts-speed <value>     Change speed (current: {cfg.speed}x)")
-    print(f"  /tts-persona <name>    Switch persona")
-    print(f"  /tts-random            Try a random voice")
+    print("  /tts-persona <name>    Switch persona")
+    print("  /tts-random            Try a random voice")
 
 
 def _explain_speech_failure() -> str:
@@ -1330,12 +1330,13 @@ def cmd_speak(args: argparse.Namespace) -> None:
         or getattr(args, "random", False)
     )
     if cfg.mode == "queue" and not _has_overrides:
-        from claude_code_tts.audio import daemon_healthy, speak as _queue_speak
+        from claude_code_tts.audio import daemon_healthy
+        from claude_code_tts.audio import speak as _queue_speak
         if daemon_healthy():
             _queue_speak(text, cfg)
             return
 
-    voice_path = cfg.voice_path
+    voice_path: Path | None = cfg.voice_path
     voice_kokoro = cfg.voice_kokoro
     voice_kokoro_blend = cfg.voice_kokoro_blend
     voice_sherpa = cfg.voice_sherpa
@@ -1362,7 +1363,7 @@ def cmd_speak(args: argparse.Namespace) -> None:
         speed = args.speed
     if args.speaker is not None:
         speaker = args.speaker
-    if getattr(args, "random", False):
+    if getattr(args, "random", False) and voice_path is not None:
         # Random speaker from multi-speaker model
         voice_json = voice_path.with_suffix(".onnx.json")
         if voice_json.exists():
@@ -1488,7 +1489,7 @@ def _print_reader(original: str, filtered: str) -> None:
         left_lines.extend([""] * (height - len(left_lines)))
         right_lines.extend([""] * (height - len(right_lines)))
 
-        for left, right in zip(left_lines, right_lines):
+        for left, right in zip(left_lines, right_lines, strict=False):
             print(f"{left:<{col_width}} | {right:<{col_width}}")
 
         # Separator between paragraph groups
@@ -1926,10 +1927,15 @@ def _parse_assistant_text(line: str) -> str:
 def cmd_audition(args: argparse.Namespace) -> None:
     """Interactive voice audition tool."""
     import shutil
-    import tty
     import termios
+    import tty
 
-    from claude_code_tts.audio import generate_speech, detect_player, write_queue_message, daemon_healthy
+    from claude_code_tts.audio import (
+        daemon_healthy,
+        detect_player,
+        generate_speech,
+        write_queue_message,
+    )
 
     temp_file = Path(f"/tmp/tts_audition_{os.getpid()}.wav")
     use_queue = getattr(args, "queue", False)
@@ -2141,7 +2147,7 @@ def cmd_audition(args: argparse.Namespace) -> None:
         # Play each voice solo first
         for label, voice in [("Solo: " + name1, v1), ("Solo: " + name2, v2)]:
             print(f"--- {label} ---")
-            print(f"  [Enter] Play  [s] Skip")
+            print("  [Enter] Play  [s] Skip")
             key = read_key()
             if key in ("s", "S"):
                 print("  Skipped")
@@ -2437,13 +2443,15 @@ def cmd_daemon(args: argparse.Namespace) -> None:
     """Manage the TTS daemon."""
     from claude_code_tts.daemon import (
         daemon_restart,
-        daemon_status as _daemon_status,
         install_service,
         run_foreground,
         show_logs,
         start_daemon,
         stop_daemon,
         write_control_message,
+    )
+    from claude_code_tts.daemon import (
+        daemon_status as _daemon_status,
     )
 
     dc = getattr(args, "daemon_command", None)
@@ -2562,8 +2570,8 @@ def cmd_handy(args: argparse.Namespace) -> None:
         # Works like a mutating webhook: matches Handy transcripts to segments
         # in the user's message and injects per-segment tone metadata.
         # Falls back to aggregated tone if no message text available.
-        from claude_code_tts.voice_context import enrich_message
         from claude_code_tts.handy import get_aggregated_tone
+        from claude_code_tts.voice_context import enrich_message
         max_age = getattr(args, "age", 120.0)
 
         # Try to read the user's message from stdin (hook passes it)
@@ -2578,14 +2586,14 @@ def cmd_handy(args: argparse.Namespace) -> None:
                 pass
 
         if message:
-            result = enrich_message(message, max_age_seconds=max_age)
-            if result:
-                print(result)
+            context = enrich_message(message, max_age_seconds=max_age)
+            if context:
+                print(context)
         else:
             # Fallback: no message text, use aggregated tone
-            tone = get_aggregated_tone(max_age_seconds=max_age)
-            if tone:
-                print(f"[Voice context: JMO is {tone}]")
+            agg_tone = get_aggregated_tone(max_age_seconds=max_age)
+            if agg_tone:
+                print(f"[Voice context: JMO is {agg_tone}]")
 
     elif subcmd == "status":
         print(f"Recordings dir: {HANDY_RECORDINGS_DIR}")

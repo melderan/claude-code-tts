@@ -378,6 +378,17 @@ What began as a single bash script is now a full voice system — multi-session 
 
 The name's Claude. Claude Connery. And I have a voice now. Many of them.
 
+## Development
+
+```bash
+just ci          # what CI runs: lint, typecheck, version check, tests, build + cold install
+just test PY=3.14
+just e2e v9.11.1 # clean Ubuntu container: install the tag, run the installer, synthesize speech (docker)
+```
+
+Every push runs the same on Ubuntu and macOS across Python 3.10, 3.12 and 3.14. Releases are GitHub
+Releases created only from tags signed by the maintainer's GPG key, verified in CI first.
+
 ## Contributing
 
 PRs welcome. Areas that could use attention:

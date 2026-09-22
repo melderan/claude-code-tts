@@ -81,7 +81,7 @@ ignore = [
 known-first-party = ["claude_code_tts"]
 
 [tool.bumpversion]
-current_version = "9.11.1"
+current_version = "9.11.2"
 commit = true
 tag = true
 tag_name = "v{new_version}"
@@ -92,3 +92,10 @@ filename = "src/claude_code_tts/__init__.py"
 search = '__version__ = "{current_version}"'
 replace = '__version__ = "{new_version}"'
 
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
