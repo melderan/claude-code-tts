@@ -252,7 +252,7 @@ def main(args: list[str] | None = None) -> None:
         parsed.no_wait = True
 
     print()
-    print("== gate", flush=True)  # the gate writes straight to the terminal; keep the order
+    print("== gate", flush=True)  # subprocesses write straight through; keep the order
     if not run_gate(repo):
         print("gate failed; nothing tagged")
         sys.exit(1)
@@ -260,15 +260,15 @@ def main(args: list[str] | None = None) -> None:
         print(f"\n{'check' if parsed.check else 'dry run'} ok: would tag {plan.tag} and push")
         return
 
-    print(f"\n== tag {plan.tag}")
+    print(f"\n== tag {plan.tag}", flush=True)
     create_tag(repo, plan)
-    print("\n== push")
+    print("\n== push", flush=True)
     push(repo, plan)
     slug = repo_slug(repo)
     if parsed.no_wait or not slug:
         print(f"\n{plan.tag} pushed; release.yml publishes it once the tag verifies")
         return
-    print(f"\n== github ({slug})")
+    print(f"\n== github ({slug})", flush=True)
     url = verify_on_github(slug, plan)
     if url:
         print(f"\nreleased {plan.tag}: {url}")
