@@ -55,6 +55,9 @@ LOCK_FILE = TTS_CONFIG_DIR / "daemon.lock"
 LOG_FILE = TTS_CONFIG_DIR / "daemon.log"
 # Rotate once to daemon.log.1 past this size; the daemon is meant to run for weeks.
 LOG_MAX_BYTES = 5 * 1024 * 1024
+# While audio plays: refresh the heartbeat this often, and say so in the log this often.
+HEARTBEAT_INTERVAL_S = 1.0
+PLAYING_LOG_INTERVAL_S = 30.0
 HEARTBEAT_FILE = TTS_CONFIG_DIR / "daemon.heartbeat"
 PLAYBACK_STATE_FILE = TTS_CONFIG_DIR / "playback.json"
 VERSION_FILE = TTS_CONFIG_DIR / "daemon.version"
@@ -480,14 +483,20 @@ def daemon_play_audio(
         start_time = time.monotonic()
         log(f"Audio started (PID {proc.pid}), polling for pause...")
 
-        poll_count = 0
+        # Heartbeat and the occasional log line are on the clock, not on a poll
+        # count: a slow machine that takes 100 ms per poll must still refresh
+        # the heartbeat every second or hooks will judge the daemon dead.
+        last_heartbeat = start_time
+        last_status_log = start_time
         while proc.poll() is None:
             state = read_playback_state()
-            poll_count += 1
-            if poll_count % 20 == 0:
+            now = time.monotonic()
+            if now - last_heartbeat >= HEARTBEAT_INTERVAL_S:
                 write_heartbeat()
-            if poll_count % 600 == 0:
-                log(f"Still playing (PID {proc.pid}, poll #{poll_count}, paused={state.get('paused')})")
+                last_heartbeat = now
+            if now - last_status_log >= PLAYING_LOG_INTERVAL_S:
+                log(f"Still playing (PID {proc.pid}, {now - start_time:.0f}s, paused={state.get('paused')})")
+                last_status_log = now
             if JOBS.take_cancel(job_id):
                 elapsed = time.monotonic() - start_time
                 log(f"Audio cancelled by bridge (PID {proc.pid}) after {elapsed:.1f}s")
