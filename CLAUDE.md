@@ -168,7 +168,8 @@ When adding a new `/tts-*` command:
 ```bash
 tail -f ~/.claude-tts/debug.log       # Hook debug log (shared with the daemon dir)
 claude-tts daemon logs --follow      # Daemon log
-claude-tts status                    # Quick status
+claude-tts daemon stats              # Digest: messages, queue-to-first-audio latency, pauses, log noise
+claude-tts status                    # Quick status: mute, pause, daemon, heartbeat age, queue depth
 ```
 
 ## Code Style
