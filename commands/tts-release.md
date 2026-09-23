@@ -1,6 +1,6 @@
 ---
 description: Push a release and upgrade the local installation
-argument-hint: [patch|minor|major|--check]
+argument-hint: [--check|--dry-run|--no-wait|--notes TEXT]
 disable-model-invocation: true
 ---
 
@@ -8,17 +8,18 @@ This is a two-step process:
 
 ## Step 1: Release (maintainer)
 
-Run the release workflow to bump version, commit, tag, and push:
+Every commit already bumps the version, so a release is a signed tag on HEAD, pushed, then
+published by GitHub once the signature verifies. Run:
 
 ```bash
 claude-tts release $ARGUMENTS
 ```
 
 Common usage:
-- `claude-tts release patch` - Bug fix release
-- `claude-tts release minor` - New feature release
-- `claude-tts release major` - Breaking change release
-- `claude-tts release --check` - Verify without releasing
+- `claude-tts release` - gate, signed tag `v<version>` with notes from the HEAD commit, push, wait
+- `claude-tts release --check` - preflight and gate only; prints the plan
+- `claude-tts release --notes "summary\nbody"` - release notes by hand
+- `claude-tts release --no-wait` - push and return without waiting for GitHub
 
 ## Step 2: Upgrade (install from GitHub)
 

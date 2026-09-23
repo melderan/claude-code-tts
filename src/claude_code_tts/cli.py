@@ -2552,9 +2552,13 @@ def cmd_release(args: argparse.Namespace) -> None:
     release_args = []
     if args.check:
         release_args.append("--check")
-    elif args.bump:
-        release_args.append(args.bump)
-    release_main(release_args if release_args else None)
+    if args.dry_run:
+        release_args.append("--dry-run")
+    if args.no_wait:
+        release_args.append("--no-wait")
+    if args.notes:
+        release_args += ["--notes", args.notes]
+    release_main(release_args)
 
 
 def cmd_handy(args: argparse.Namespace) -> None:
@@ -2898,9 +2902,13 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=cmd_handy)
 
     # --- release ---
-    p = subparsers.add_parser("release", help="Create a release")
-    p.add_argument("bump", nargs="?", choices=["patch", "minor", "major"], help="Version bump type")
-    p.add_argument("--check", action="store_true", help="Verify without releasing")
+    p = subparsers.add_parser(
+        "release", help="Tag HEAD's version (signed), push, wait for GitHub to publish"
+    )
+    p.add_argument("--check", action="store_true", help="Preflight and gate only; print the plan")
+    p.add_argument("--notes", help="Release notes (first line summary); default: HEAD commit")
+    p.add_argument("--dry-run", action="store_true", help="Everything but tag and push")
+    p.add_argument("--no-wait", action="store_true", help="Push and return without waiting")
     p.set_defaults(func=cmd_release)
 
     args = parser.parse_args(argv)

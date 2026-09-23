@@ -65,9 +65,9 @@ just timeline                 # the runs so far, with version and git ref
 # Without just: uv tool install . --force --build && claude-tts-install --upgrade
 # (--build is needed where a uv config disables source builds; harmless elsewhere)
 
-# Release workflow
-claude-tts release          # Interactive release
-claude-tts release --check  # Verify without releasing
+# Release: signed tag on HEAD's version, push, wait for GitHub to publish (see Commit Workflow)
+just release                # or: claude-tts release
+just release --check        # preflight and gate only; prints the plan
 ```
 
 ## Session Model
@@ -127,7 +127,7 @@ src/claude_code_tts/
   daemon.py                # Queue daemon (pause/resume, heartbeat)
   bridge.py                # Opt-in loopback HTTP bridge (browser pages -> queue, timing marks)
   install.py               # Installer (hooks, voices, service)
-  release.py               # Release workflow (checks + version bump)
+  release.py               # Release: preflight, gate, signed tag with notes, push, verify on GitHub
 hooks/
   speak-response.sh        # Thin shim -> claude-tts speak --from-hook
   speak-intermediate.sh    # Thin shim -> claude-tts speak --from-hook
@@ -209,7 +209,10 @@ bump-my-version bump patch --no-commit --no-tag --allow-dirty
 git add -A && git commit -m "docs: update README"
 ```
 
-Then push: `git push && git push --tags` (tags only needed for feat/fix)
+Then push: `git push`. To publish a release, `just release` (or `claude-tts release`): it runs the
+gate, creates a signed annotated tag `v<version>` on HEAD whose subject is `v<version> - <summary>` and
+whose body is the commit body (trailers dropped), pushes main and the tag, and waits for `release.yml`
+to publish. `--notes "summary\nbody"` overrides the text, `--check` rehearses. Do not hand-roll tags.
 
 **Why this matters:** The version must reflect the exact state of the repo. Every commit changes the repo, so every commit needs a version bump.
 
