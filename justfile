@@ -59,6 +59,10 @@ hooks:
     git config core.hooksPath .githooks
     @echo "hooks installed: pre-commit -> gate, pre-push -> gate --full"
 
+# Maintainer: signed tag on HEAD's version, push, wait for GitHub to publish. `just release --check` to rehearse.
+release *ARGS:
+    uv run python -m claude_code_tts.cli release {{ARGS}}
+
 # Operator, on the daemon's machine: rebuild from this checkout, deploy hooks, restart, verify; logs in .logs/just/
 up:
     @scripts/up.py
