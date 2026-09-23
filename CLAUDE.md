@@ -18,7 +18,7 @@ What this means:
 With that ownership comes responsibility:
 - Think through backward compatibility before shipping
 - Audit for patterns when you find bugs (if it's wrong in one place, check everywhere)
-- Document what you learn in `~/.claude/working-with-jmo.md`
+- Document what you learn in your own notes, outside this repo
 - Leave the codebase better than you found it
 
 ## Public Repo — Never Commit Internals
@@ -31,6 +31,13 @@ This is a public open-source repo. Do not commit:
 - Personal paths or tooling that isn't part of this codebase
 
 When in doubt, ask your friend before commit. A little pre-work goes a long way.
+
+The gate enforces this before every commit and push: `scripts/private-check.py` scans tracked files,
+staged changes, unpushed commit messages and their tag notes against `.private-words`, a gitignored
+list of patterns (logins, hostnames, home paths, private tool and repo names) that each maintainer
+keeps in their own checkout. Without the file the step says it is skipped, loudly. If something
+private did get pushed, rewrite history so it never existed, recreate the tags on the clean commits,
+delete and republish the releases; do not patch forward.
 
 ## Ethos
 

@@ -63,3 +63,6 @@ htmlcov/
 
 # Operator run logs from `just up` (per checkout, never committed)
 .logs/
+
+# Private word list for scripts/private-check.py (per maintainer, never committed)
+.private-words
