@@ -20,6 +20,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 FAST: list[tuple[str, list[str]]] = [
+    # First, and cheapest: nothing private (names, paths, hosts, internal tools) leaves this
+    # public repo, in files, staged changes, unpushed commit messages or tag notes.
+    ("private", ["scripts/private-check.py"]),
     ("lint", ["uv", "tool", "run", "ruff", "check", "src", "tests", "scripts"]),
     ("mypy", ["uv", "tool", "run", "mypy", "src"]),
     ("ty", ["uv", "tool", "run", "ty", "check", "src"]),
