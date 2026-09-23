@@ -969,29 +969,78 @@ def get_queue_messages() -> list[dict]:
     return messages
 
 
-def cleanup_old_messages(max_age_seconds: int) -> int:
-    """Remove messages older than max_age. Returns count removed."""
+class PauseLedger:
+    """Seconds the daemon has spent paused, so a held queue does not age.
+
+    A pause means "hold everything", so time spent paused is subtracted from a
+    message's age before the max_age check, and a message that waited through a
+    pause is exempt from depth trimming until it plays. The ledger lives in
+    memory: a daemon restart forgets it and wall-clock age applies again.
+    """
+
+    def __init__(self) -> None:
+        self._closed: list[tuple[float, float]] = []
+        self._open: float | None = None
+
+    def mark(self, paused: bool, now: float | None = None) -> None:
+        """Record the pause flag as seen on this pass of the loop."""
+        t = time.time() if now is None else now
+        if paused and self._open is None:
+            self._open = t
+        elif not paused and self._open is not None:
+            self._closed.append((self._open, t))
+            self._open = None
+
+    @property
+    def paused(self) -> bool:
+        return self._open is not None
+
+    def held_since(self, since: float, now: float | None = None) -> float:
+        """Paused seconds between since and now."""
+        t = time.time() if now is None else now
+        intervals = list(self._closed)
+        if self._open is not None:
+            intervals.append((self._open, t))
+        held = 0.0
+        for start, end in intervals:
+            held += max(0.0, min(end, t) - max(start, since))
+        return held
+
+
+def cleanup_old_messages(max_age_seconds: int, ledger: PauseLedger | None = None) -> int:
+    """Remove messages older than max_age, not counting paused time. Returns count removed."""
     removed = 0
-    cutoff = time.time() - max_age_seconds
+    now = time.time()
 
     for f in TTS_QUEUE_DIR.glob("*.json"):
         try:
             with open(f) as fp:
                 msg = json.load(fp)
-            if msg.get("timestamp", 0) < cutoff:
+            ts = float(msg.get("timestamp", 0))
+            held = ledger.held_since(ts, now) if ledger else 0.0
+            if now - ts - held > max_age_seconds:
                 f.unlink()
                 removed += 1
                 log(f"Removed stale message: {f.name}")
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
             f.unlink(missing_ok=True)
             removed += 1
 
     return removed
 
 
-def enforce_max_depth(max_depth: int) -> int:
-    """Remove oldest messages if queue exceeds max depth."""
-    messages = get_queue_messages()
+def enforce_max_depth(max_depth: int, ledger: PauseLedger | None = None) -> int:
+    """Remove oldest messages if queue exceeds max depth.
+
+    Messages that waited through a pause are held, not trimmed: they neither
+    count toward the depth nor get removed.
+    """
+    now = time.time()
+    messages = [
+        m
+        for m in get_queue_messages()
+        if not ledger or ledger.held_since(float(m.get("timestamp", 0) or 0), now) <= 0
+    ]
     removed = 0
 
     while len(messages) > max_depth:
@@ -1135,17 +1184,32 @@ def daemon_loop(lockpick: bool = False) -> None:
         warm_sherpa_workers(personas)
         log("Sherpa worker(s) ready")
 
+    ledger = PauseLedger()
+    if startup_state.get("paused") and startup_state.get("paused_by") != "mic":
+        # A restart while paused (an upgrade mid-meeting) keeps the hold from the
+        # moment of the pause, which is the last write to the state file.
+        try:
+            ledger.mark(True, now=float(startup_state.get("updated_at") or time.time()))
+        except (TypeError, ValueError):
+            ledger.mark(True)
+        log("Started paused; holding the queue since the pause")
     while not _shutdown_requested:
         try:
             write_heartbeat()
-            cleanup_old_messages(config["max_age_seconds"])
-            enforce_max_depth(config["max_depth"])
-            JOBS.evict_finished()
-
             state = read_playback_state()
+            was_paused = ledger.paused
+            ledger.mark(bool(state.get("paused")))
             if state.get("paused"):
+                # Paused holds the queue: nothing expires, nothing is trimmed.
+                if not was_paused:
+                    log(f"Paused by {state.get('paused_by') or 'user'}; holding the queue")
                 time.sleep(poll_interval)
                 continue
+            if was_paused:
+                log(f"Resumed with {len(get_queue_messages())} message(s) waiting")
+            cleanup_old_messages(config["max_age_seconds"], ledger)
+            enforce_max_depth(config["max_depth"], ledger)
+            JOBS.evict_finished()
 
             # Check for interrupted message to replay first
             interrupted = get_interrupted_message()
