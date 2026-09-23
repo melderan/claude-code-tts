@@ -110,14 +110,24 @@ class TestPlaySentences:
         synth = Synth(delay=0.05)
         player = fake_player(env["tmp"], 0.4)
         out = env["tmp"] / "msg.wav"
-        with patch.object(d, "detect_player", return_value=[str(player)]):
-            t0 = time.monotonic()
+        play_ended: list[float] = []
+        real_play = d.daemon_play_audio
+
+        def recording_play(*args, **kwargs):
+            result = real_play(*args, **kwargs)
+            play_ended.append(time.monotonic())
+            return result
+
+        with (
+            patch.object(d, "detect_player", return_value=[str(player)]),
+            patch.object(d, "daemon_play_audio", recording_play),
+        ):
             r = play_sentences(SENTENCES, out, synth)
         assert r.outcome == "done"
-        # All three syntheses started well before the first sentence finished playing.
-        assert synth.started_at[2] - t0 < 0.4
-        # Total time is playback bound, not synth + playback in series.
-        assert time.monotonic() - t0 < 3 * 0.4 + 0.5
+        # Ordering, not wall time (CI runners are slow): every synthesis had started
+        # before the first sentence finished playing, so playback never waited.
+        assert len(synth.started_at) == 3
+        assert synth.started_at[2] < play_ended[0]
 
     def test_start_index_skips_spoken_sentences(self, env):
         synth = Synth()
@@ -406,13 +416,16 @@ class TestLogHygiene:
         assert "after rotation" in env["log"].read_text()
         assert env["log"].stat().st_size < 200
 
-    def test_playback_does_not_log_every_second(self, env):
+    def test_playback_heartbeats_on_the_clock_and_logs_rarely(self, env, monkeypatch):
+        # Short intervals so the test is quick; the invariant is time-based, not poll-based.
+        monkeypatch.setattr(d, "HEARTBEAT_INTERVAL_S", 0.2)
+        monkeypatch.setattr(d, "PLAYING_LOG_INTERVAL_S", 0.5)
         wav = make_wav(env["tmp"] / "a.wav", 1.0)
-        player = fake_player(env["tmp"], 1.3)
+        player = fake_player(env["tmp"], 1.2)
         hb = env["state"] / "daemon.heartbeat"
         with patch.object(d, "detect_player", return_value=[str(player)]):
             d.daemon_play_audio(wav)
         text = env["log"].read_text()
         assert "Poll #" not in text
-        assert "Still playing" not in text  # first status line comes at 30 s
-        assert hb.exists()  # heartbeat still refreshed during playback
+        assert 1 <= text.count("Still playing") <= 3  # one per interval, not one per poll
+        assert hb.exists()  # heartbeat refreshed during playback
