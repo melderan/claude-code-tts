@@ -153,6 +153,13 @@ On resume the daemon rewinds a little so you hear the sentence you were cut off 
 seconds by default, scaled to playback speed. Set `"resume_rewind_seconds"` in `config.json` to
 change it (0 resumes exactly where it stopped). This applies to manual pause too.
 
+**Sentence streaming (opt-in).** Set `"speech_unit": "sentence"` in `config.json` and the daemon
+speaks each message one sentence at a time: the first sentence plays as soon as it is synthesized
+while the rest are synthesized ahead, so a long answer starts sooner. A pause then lands on a
+sentence boundary and resume replays the cut sentence from its start, with nothing trimmed by the
+clock. The daemon reads the key per message, so flipping it needs no restart. The default,
+`"message"`, keeps the one-piece path. Browser pages asking for timing marks always use one piece.
+
 Currently supports [Handy](https://handy.computer) on macOS. The watcher is disabled by default and gracefully skips if Handy isn't installed.
 
 ## Multi-Session Mode
@@ -269,6 +276,7 @@ reach it (a userscript can; a script inline in a CSP-locked page cannot).
   "default_muted": true,
   "mic_aware_pause": true,
   "mic_resume_delay_ms": 1500,
+  "speech_unit": "message",
   "active_persona": "claude-prime",
   "queue": {
     "max_depth": 20,
