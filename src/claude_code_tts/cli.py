@@ -56,10 +56,17 @@ def cmd_status(args: argparse.Namespace) -> None:
     else:
         mute_source = "default"
 
-    # Daemon status
-    from claude_code_tts.daemon import is_daemon_running
+    # Daemon status, heartbeat age, queue depth
+    from claude_code_tts.config import TTS_QUEUE_DIR
+    from claude_code_tts.daemon import HEARTBEAT_FILE, is_daemon_running
     running, pid = is_daemon_running()
     daemon_status = f"running (PID {pid})" if running else "not running"
+    heartbeat = "none"
+    try:
+        heartbeat = f"{time.time() - float(HEARTBEAT_FILE.read_text().strip()):.0f}s ago"
+    except (OSError, ValueError):
+        pass
+    queued = len(list(TTS_QUEUE_DIR.glob("*.json"))) if TTS_QUEUE_DIR.exists() else 0
 
     # Playback state
     playback_file = Path.home() / ".claude-tts" / "playback.json"
@@ -94,6 +101,8 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(f"Persona:  {cfg.active_persona}")
     print(f"Mode:     {cfg.mode}")
     print(f"Daemon:   {daemon_status}")
+    print(f"Heartbeat: {heartbeat}")
+    print(f"Queue:    {queued} waiting")
     print(f"Mic-aware: {'enabled' if mic_aware else 'disabled'}")
 
 
@@ -2506,6 +2515,7 @@ def cmd_daemon(args: argparse.Namespace) -> None:
     from claude_code_tts.daemon import (
         daemon_restart,
         install_service,
+        print_log_stats,
         run_foreground,
         show_logs,
         start_daemon,
@@ -2529,6 +2539,8 @@ def cmd_daemon(args: argparse.Namespace) -> None:
         _daemon_status()
     elif dc == "logs":
         show_logs(follow=getattr(args, "follow", False))
+    elif dc == "stats":
+        print_log_stats()
     elif dc == "install":
         install_service()
     elif dc == "foreground":
@@ -2541,7 +2553,7 @@ def cmd_daemon(args: argparse.Namespace) -> None:
         )
         print(f"Control message written: {qf.name}")
     else:
-        print("Usage: claude-tts daemon <start|stop|restart|status|logs|install|foreground>")
+        print("Usage: claude-tts daemon <start|stop|restart|status|logs|stats|install|foreground>")
         sys.exit(1)
 
 
@@ -2756,6 +2768,9 @@ def main(argv: list[str] | None = None) -> None:
     ds = daemon_sub.add_parser("logs", help="Show daemon logs")
     ds.add_argument("--follow", "-f", action="store_true", help="Follow log output")
     ds.set_defaults(func=cmd_daemon)
+    daemon_sub.add_parser(
+        "stats", help="Digest of the daemon log: messages, first-audio latency, pauses, noise"
+    ).set_defaults(func=cmd_daemon)
     daemon_sub.add_parser("install", help="Install system service").set_defaults(func=cmd_daemon)
     ds = daemon_sub.add_parser("foreground", help="Run daemon in foreground")
     ds.add_argument("--lockpick", action="store_true", help="Force start even if locked")

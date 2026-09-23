@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 import wave
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from io import TextIOWrapper
@@ -1733,6 +1733,113 @@ def daemon_restart(lockpick: bool = False) -> None:
         print("Stopping daemon...")
         stop_daemon()
     start_daemon(lockpick=lockpick)
+
+
+def _log_parts(line: str) -> tuple[str, str] | None:
+    """(timestamp, message) from a daemon log line, or None for a line without the stamp."""
+    if len(line) < 22 or line[0] != "[" or line[20] != "]":
+        return None
+    rest = line[22:]
+    if rest.startswith("["):
+        _, _, rest = rest.partition("] ")
+    return line[1:20], rest
+
+
+def _collapse_digits(text: str) -> str:
+    out: list[str] = []
+    in_digits = False
+    for ch in text:
+        if ch.isdigit():
+            if not in_digits:
+                out.append("N")
+            in_digits = True
+        else:
+            in_digits = False
+            out.append(ch)
+    return "".join(out)
+
+
+def log_stats(lines: Iterable[str]) -> dict:
+    """Digest of the daemon log: messages, first-audio latency, pauses, errors, line kinds.
+
+    First-audio latency is the gap from "Speaking for" to the next "Audio started" or
+    "Sentence stream: first audio", which is the delay the listener feels. Line kinds are
+    the messages with digit runs collapsed to N, ranked by count, so log noise stands out.
+    """
+    count = 0
+    first: str | None = None
+    last: str | None = None
+    messages = streams = mic_pauses = errors = 0
+    pending: datetime | None = None
+    gaps: list[float] = []
+    kinds: dict[str, int] = {}
+    for line in lines:
+        count += 1
+        parts = _log_parts(line)
+        if parts is None:
+            continue
+        stamp, msg = parts
+        first = first or stamp
+        last = stamp
+        kinds[_collapse_digits(msg)[:60]] = kinds.get(_collapse_digits(msg)[:60], 0) + 1
+        if "[ERROR]" in line[:30]:
+            errors += 1
+        if msg.startswith("Speaking for "):
+            messages += 1
+            pending = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+        elif msg.startswith("Sentence stream: first audio"):
+            streams += 1
+            if pending is not None:
+                gaps.append((datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S") - pending).total_seconds())
+                pending = None
+        elif msg.startswith("Audio started") and pending is not None:
+            gaps.append((datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S") - pending).total_seconds())
+            pending = None
+        elif msg.startswith("Mic watcher: paused"):
+            mic_pauses += 1
+    gaps.sort()
+
+    def pick(p: float) -> float:
+        return gaps[min(len(gaps) - 1, int(p * len(gaps)))] if gaps else 0.0
+
+    return {
+        "lines": count,
+        "first": first,
+        "last": last,
+        "messages": messages,
+        "streams": streams,
+        "mic_pauses": mic_pauses,
+        "errors": errors,
+        "latency": {"n": len(gaps), "median": pick(0.5), "p90": pick(0.9), "max": gaps[-1] if gaps else 0.0},
+        "kinds": sorted(((n, k) for k, n in kinds.items()), reverse=True)[:8],
+    }
+
+
+def format_log_stats(stats: dict, name: str, size_bytes: int) -> str:
+    """The digest as a short report."""
+    size = f"{size_bytes / 1024:.1f} KB" if size_bytes < 1024 * 1024 else f"{size_bytes / 1024 / 1024:.1f} MB"
+    span = f", {stats['first']} to {stats['last']}" if stats["first"] else ""
+    lat = stats["latency"]
+    out = [
+        f"{name}: {stats['lines']} lines, {size}{span}",
+        f"messages spoken: {stats['messages']}   streamed: {stats['streams']}   "
+        f"mic pauses: {stats['mic_pauses']}   errors: {stats['errors']}",
+        f"queue to first audio: median {lat['median']:.1f}s  p90 {lat['p90']:.1f}s  "
+        f"max {lat['max']:.1f}s  (n={lat['n']})",
+        "line kinds:",
+    ]
+    out += [f"  {n:>6}  {k}" for n, k in stats["kinds"]]
+    return "\n".join(out)
+
+
+def print_log_stats() -> None:
+    """`claude-tts daemon stats`: the digest of the current daemon log."""
+    if not LOG_FILE.exists():
+        print(f"No log file found at {LOG_FILE}")
+        return
+    with open(LOG_FILE, errors="replace") as f:
+        stats = log_stats(f.read().splitlines())
+    print(format_log_stats(stats, LOG_FILE.name, LOG_FILE.stat().st_size))
 
 
 def show_logs(follow: bool = False) -> None:
