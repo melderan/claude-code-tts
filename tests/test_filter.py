@@ -72,6 +72,42 @@ class TestURLs:
         assert "example.com" not in result
         assert "Normal item" in result
 
+    OAUTH = (
+        "Two servers need a browser login:\n\n"
+        "  - Jira: port 51362, https://mcp.example.com/v1/authorize?client_id=xlLgtkvcoWtc06n4"
+        "&code_challenge=iVMFgRGy3WMStq8Dm1H6iQ7_DApFAC7YyGGiGliq2-8&code_challenge_method=S256"
+        "&redirect_uri=http%3A%2F%2F127.0.0.1%3A51362%2Fcallback&resource=https%3A%2F%2Fmcp.example.com"
+        "%2Fv1%2Fmcp&response_type=code&state=XN_3GTFmD7WSN63ccC_w995OHhhfuFVOsi9Nu7BBva0\n"
+        "  - Notes: port 51372, https://mcp.example.org/authorize?client_id=0qmgpzlPnrp42FU4"
+        "&code_challenge=THOsuF1uYWNADVZcFD0zBjCVrPv2qVTzPYB4cLedsgE&scope=default"
+        "&state=XkMX89J4hc-tu7sqRmkfRjhGVdWXY-KKxfjyx2tVShE\n\n"
+        "Open each in a browser."
+    )
+
+    def test_oauth_links_vanish_whole_before_redaction_can_split_them(self):
+        # Regression: redaction used to run first, break the URL with spaces, and the
+        # unrecognised tail (redirect_uri, resource, percent-encoding) was spoken.
+        result = filter_text(self.OAUTH)
+        for leaked in ("redirect_uri", "resource=", "response_type", "%2F", "%3A",
+                       "code_challenge", "client_id", "authorize", "redacted"):
+            assert leaked not in result, leaked
+        assert "Jira: port 51362," in result
+        assert "Notes: port 51372," in result
+        assert result.endswith("Open each in a browser.")
+
+    def test_percent_encoded_url_and_query_debris_removed(self):
+        text = "Go to https%3A%2F%2Fexample.com%2Fcb and redirect_uri=http%3A%2F%2Fhost&x=1 now"
+        result = filter_text(text)
+        assert "%" not in result and "redirect" not in result and "example" not in result
+        assert result.startswith("Go to") and result.endswith("now")
+
+    def test_www_url_removed(self):
+        assert "www." not in filter_text("See www.example.com/path?a=b for details")
+
+    def test_ordinary_percent_and_ampersand_survive(self):
+        result = filter_text("Coverage rose 12% and R&D shipped 3% more.")
+        assert "12%" in result and "R&D" in result
+
 
 class TestBoilerplate:
     def test_removes_agent_launch(self):

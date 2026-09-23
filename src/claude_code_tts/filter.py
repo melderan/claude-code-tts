@@ -92,6 +92,18 @@ def _redact_secrets(text: str) -> str:
 def _filter_markdown(text: str) -> str:
     """Shared markdown cleanup used by both filter modes."""
 
+    # Links and URLs go first, whole. Secret redaction inserts spaces inside a
+    # long query string; after that the URL regex sees no URL and the tail
+    # (redirect_uri=..., resource=..., response_type=code) is spoken. Two OAuth
+    # authorize links reached the speaker that way on 2026-09-23.
+    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)  # images: keep alt text
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r" \1 ", text)  # links: keep link text
+    text = re.sub(r"^\s*[-*]\s*https?:.*$", "", text, flags=re.MULTILINE)  # URL-only bullets
+    text = re.sub(r"^\s*[-*]\s*\[.*?\]\(http.*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"(?:https?://|www\.)\S+", "", text, flags=re.IGNORECASE)
+    # A percent-encoded URL only occurs as a query value; take its key with it.
+    text = re.sub(r"\S*https?%3A%2F%2F\S+", "", text, flags=re.IGNORECASE)
+
     # Redact secrets before any other processing
     text = _redact_secrets(text)
 
@@ -109,19 +121,6 @@ def _filter_markdown(text: str) -> str:
 
     # Strip inline code backticks but keep the word (it's often part of speech)
     text = re.sub(r"`([^`]*)`", r"\1", text)
-
-    # Remove markdown image syntax ![alt](url)
-    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
-
-    # Replace markdown links with link text
-    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r" \1 ", text)
-
-    # Remove bare URLs
-    text = re.sub(r"https?://\S+", "", text)
-
-    # Remove URL-only bullet lines
-    text = re.sub(r"^\s*[-*]\s*https?:.*$", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^\s*[-*]\s*\[.*?\]\(http.*$", "", text, flags=re.MULTILINE)
 
     # Remove markdown headers (keep the text)
     text = re.sub(r"^##* *", "", text, flags=re.MULTILINE)
@@ -150,6 +149,10 @@ def _filter_markdown(text: str) -> str:
     # artifacts. E.g., ".)" or "?)" or "!]" -- Piper generates end-of-
     # sentence prosody on the first mark, then chokes on the second.
     text = re.sub(r"([.!?])[)\]}>\"']+", r"\1", text)
+
+    # Query-string debris that survived everything above: a token holding
+    # key=value pairs joined by & or percent-encoding is never speech.
+    text = re.sub(r"\S*(?:&[\w-]+=|%[0-9A-Fa-f]{2})\S*", "", text)
 
     return text
 
