@@ -16,8 +16,11 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import wave
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from io import TextIOWrapper
 from pathlib import Path
@@ -28,8 +31,10 @@ from claude_code_tts.audio import last_error as audio_last_error
 from claude_code_tts.bridge import (
     JOBS,
     Bridge,
+    concat_wavs,
     estimated_marks,
     get_http_config,
+    split_sentences,
     synthesize_with_marks,
     to_playback_ms,
 )
@@ -48,6 +53,8 @@ from claude_code_tts.tone import DEFAULT_TONE, ToneParams, classify_tone
 PID_FILE = TTS_CONFIG_DIR / "daemon.pid"
 LOCK_FILE = TTS_CONFIG_DIR / "daemon.lock"
 LOG_FILE = TTS_CONFIG_DIR / "daemon.log"
+# Rotate once to daemon.log.1 past this size; the daemon is meant to run for weeks.
+LOG_MAX_BYTES = 5 * 1024 * 1024
 HEARTBEAT_FILE = TTS_CONFIG_DIR / "daemon.heartbeat"
 PLAYBACK_STATE_FILE = TTS_CONFIG_DIR / "playback.json"
 VERSION_FILE = TTS_CONFIG_DIR / "daemon.version"
@@ -62,6 +69,8 @@ _missing_voice_warned: set[tuple[str, str]] = set()
 _lock_fd: TextIOWrapper | None = None
 _shutdown_requested = False
 _daemon_mode = False
+# log() is called from the synth, bridge and mic-watcher threads too.
+_log_lock = threading.Lock()
 
 
 # --- Logging ---
@@ -76,8 +85,14 @@ def log(msg: str, level: str = "INFO") -> None:
         print(line.strip())
 
     try:
-        with open(LOG_FILE, "a") as f:
-            f.write(line)
+        with _log_lock:
+            try:
+                if LOG_FILE.stat().st_size > LOG_MAX_BYTES:
+                    LOG_FILE.replace(LOG_FILE.with_suffix(".log.1"))
+            except OSError:
+                pass
+            with open(LOG_FILE, "a") as f:
+                f.write(line)
     except Exception:
         pass
 
@@ -416,15 +431,12 @@ def synthesize_message(
     marks, so a page asking for timing still gets audio and a best guess.
     """
 
-    def gen(chunk: str, path: Path) -> bool:
-        return daemon_generate_speech(
-            chunk,
-            persona,
-            path,
-            voice_kokoro_override=voice_kokoro_override,
-            voice_kokoro_blend_override=voice_kokoro_blend_override,
-            tone=tone,
-        )
+    gen = sentence_generator(
+        persona,
+        voice_kokoro=voice_kokoro_override,
+        voice_kokoro_blend=voice_kokoro_blend_override,
+        tone=tone,
+    )
 
     playback_speed = speed if speed_method == "playback" else 1.0
     if want_marks:
@@ -473,8 +485,9 @@ def daemon_play_audio(
             state = read_playback_state()
             poll_count += 1
             if poll_count % 20 == 0:
-                log(f"Poll #{poll_count}: paused={state.get('paused')}, pid={proc.pid}")
                 write_heartbeat()
+            if poll_count % 600 == 0:
+                log(f"Still playing (PID {proc.pid}, poll #{poll_count}, paused={state.get('paused')})")
             if JOBS.take_cancel(job_id):
                 elapsed = time.monotonic() - start_time
                 log(f"Audio cancelled by bridge (PID {proc.pid}) after {elapsed:.1f}s")
@@ -511,6 +524,309 @@ def daemon_play_audio(
         log(f"Audio playback failed: {e}", "ERROR")
         write_playback_state(audio_pid=None)
         return (False, False, 0.0)
+
+
+# --- Sentence streaming ---
+#
+# With speech_unit "sentence" a message is spoken one sentence at a time: the
+# first sentence plays as soon as it is synthesized while the next ones are
+# synthesized ahead in a thread. A pause lands on a sentence boundary and resume
+# replays the cut sentence from its start, so no WAV is trimmed by the clock.
+
+
+def speech_unit() -> str:
+    """What the daemon synthesizes and plays as one piece: "message" or "sentence"."""
+    unit = str(load_raw_config().get("speech_unit", "message")).strip().lower()
+    return unit if unit in ("message", "sentence") else "message"
+
+
+@dataclass
+class StreamResult:
+    """How a sentence stream ended.
+
+    outcome is "done", "paused", "cancelled" or "failed". index is the sentence
+    that was cut off (resume from it), or the one that failed to synthesize.
+    parts are the sentence WAVs that exist; the caller keeps or deletes them.
+    cut_played says the cut sentence had started playing (as opposed to a pause
+    that landed while it was still being synthesized); remaining_s is then the
+    WAV seconds left in it, for the near-end check. played_s is cumulative
+    listening time across passes, seeded from played_before_s.
+    """
+
+    outcome: str
+    index: int
+    parts: list[Path] = field(default_factory=list)
+    cut_played: bool = False
+    remaining_s: float = 0.0
+    played_s: float = 0.0
+
+
+def sentence_generator(
+    persona: str,
+    *,
+    voice_kokoro: str = "",
+    voice_kokoro_blend: str = "",
+    tone: ToneParams | None = None,
+) -> Callable[[str, Path], bool]:
+    """Bind a persona and voice overrides into the generate(sentence, path) call."""
+
+    def gen(chunk: str, path: Path) -> bool:
+        return daemon_generate_speech(
+            chunk,
+            persona,
+            path,
+            voice_kokoro_override=voice_kokoro,
+            voice_kokoro_blend_override=voice_kokoro_blend,
+            tone=tone,
+        )
+
+    return gen
+
+
+def play_sentences(
+    sentences: list[str],
+    audio_file: Path,
+    generate: Callable[[str, Path], bool],
+    *,
+    speed: float = 1.0,
+    speed_method: str = "playback",
+    start_index: int = 0,
+    job_id: str | None = None,
+    lookahead: int = 2,
+    played_before_s: float = 0.0,
+) -> StreamResult:
+    """Speak sentences[start_index:] in order, synthesizing ahead while one plays.
+
+    generate(sentence, path) is the daemon's synthesis call. Parts are written
+    next to audio_file as <stem>_<pass>_sN.wav, the pass token keeping a worker
+    abandoned by an earlier pass from writing over this one. lookahead bounds how
+    many sentences the synthesis thread may run ahead of playback. The stream
+    stops at a sentence boundary on pause, bridge cancel or daemon shutdown.
+    """
+    n = len(sentences)
+    if start_index >= n:
+        return StreamResult("done", n, played_s=played_before_s)
+
+    token = secrets.token_hex(3)
+    part_paths = [
+        audio_file.with_name(f"{audio_file.stem}_{token}_s{i}.wav") for i in range(n)
+    ]
+    ready = [threading.Event() for _ in range(n)]
+    ok = [False] * n
+    stop = threading.Event()
+    # The worker takes one slot per sentence it synthesizes; playback returns
+    # one per sentence spoken, so synthesis never runs more than lookahead ahead.
+    slots = threading.Semaphore(max(1, lookahead) + 1)
+
+    def worker() -> None:
+        for i in range(start_index, n):
+            while not slots.acquire(timeout=0.2):
+                if stop.is_set():
+                    return
+            if stop.is_set():
+                return
+            try:
+                ok[i] = generate(sentences[i], part_paths[i]) and part_paths[i].exists()
+            except Exception as e:  # a synthesis crash ends the stream, not the daemon
+                log(f"Sentence {i} synthesis raised: {e}", "ERROR")
+                ok[i] = False
+            if stop.is_set():
+                # The stream ended while this ran; nobody will play or delete it.
+                part_paths[i].unlink(missing_ok=True)
+                return
+            ready[i].set()
+            if not ok[i]:
+                return
+
+    t = threading.Thread(target=worker, name="tts-synth", daemon=True)
+    t.start()
+    play_speed = speed if speed_method == "playback" else 1.0
+    parts: list[Path] = []
+    played_s = played_before_s
+
+    def cancelled(i: int) -> StreamResult:
+        JOBS.update(job_id, state="cancelled", position_ms=round(played_s * 1000))
+        return StreamResult("cancelled", i, parts, played_s=played_s)
+
+    try:
+        for i in range(start_index, n):
+            while not ready[i].wait(timeout=0.2):
+                # A bridge /stop between plays marks the job cancelled without a
+                # cancel request (there is no player to kill), so check both.
+                if JOBS.take_cancel(job_id) or JOBS.state(job_id) == "cancelled":
+                    return cancelled(i)
+                if read_playback_state().get("paused") or _shutdown_requested:
+                    return StreamResult("paused", i, parts, played_s=played_s)
+            if _shutdown_requested:
+                return StreamResult("paused", i, parts, played_s=played_s)
+            if not ok[i]:
+                return StreamResult("failed", i, parts, played_s=played_s)
+            parts.append(part_paths[i])
+            part_s = get_wav_duration(part_paths[i])
+            if i == start_index:
+                log(f"Sentence stream: first audio, sentence {i + 1}/{n}")
+                JOBS.update(
+                    job_id,
+                    state="playing",
+                    started_at=time.time(),
+                    offset_ms=round(played_s * 1000),
+                )
+            _, was_killed, elapsed = daemon_play_audio(part_paths[i], play_speed, job_id)
+            slots.release()
+            if JOBS.state(job_id) == "cancelled":
+                return StreamResult("cancelled", i, parts, played_s=played_s)
+            if was_killed:
+                pos = calculate_audio_position(elapsed, speed, speed_method)
+                played_s += elapsed
+                return StreamResult(
+                    "paused",
+                    i,
+                    parts,
+                    cut_played=True,
+                    remaining_s=max(0.0, part_s - pos),
+                    played_s=played_s,
+                )
+            played_s += part_s / (play_speed if play_speed > 0 else 1.0)
+        return StreamResult("done", n, parts, played_s=played_s)
+    finally:
+        stop.set()
+        # Do not hold the daemon loop for a slow backend; an abandoned worker
+        # deletes its own output (see worker) and the pass token keeps it apart.
+        t.join(timeout=2.0)
+        for path in part_paths:
+            if path not in parts:
+                path.unlink(missing_ok=True)
+
+
+def stream_message(
+    msg_info: dict,
+    generate: Callable[[str, Path], bool],
+    *,
+    start_index: int = 0,
+    msg_file: Path | None = None,
+) -> None:
+    """Speak one queue message sentence by sentence and settle its state.
+
+    msg_info is the current_message record (text, session_id, speed, ...); on a
+    pause it is written back with sentence_index and played_s so the next loop
+    pass resumes from the cut sentence. msg_file, the queue entry, is removed
+    once the message is settled, so a daemon that dies mid-stream and is not
+    respawned quickly still finds it in the queue.
+    """
+    session_id = msg_info.get("session_id", "unknown")
+    project = msg_info.get("project", "unknown")
+    speed = float(msg_info.get("speed", 1.0))
+    speed_method = msg_info.get("speed_method", "playback")
+    job_id = msg_info.get("id") if msg_info.get("source") else None
+    sentences = split_sentences(msg_info.get("text", ""))
+    n = len(sentences)
+    audio_file = Path(f"/tmp/tts_queue_{session_id}.wav")
+    played_before = float(msg_info.get("played_s", 0.0))
+
+    msg_info = dict(msg_info)
+    msg_info["sentence_index"] = start_index
+    write_playback_state(current_message=msg_info)
+    JOBS.update(job_id, state="synthesizing", speed=speed)
+    if start_index:
+        log(f"Resuming at sentence {start_index + 1}/{n}: {sentences[start_index][:50]}...")
+
+    result = play_sentences(
+        sentences,
+        audio_file,
+        generate,
+        speed=speed,
+        speed_method=speed_method,
+        start_index=start_index,
+        job_id=job_id,
+        played_before_s=played_before,
+    )
+    position_ms = round(result.played_s * 1000)
+
+    def save_history() -> None:
+        """Keep what this pass spoke in speech history as one WAV."""
+        spoken = sentences[start_index : start_index + len(result.parts)]
+        if result.parts and concat_wavs(result.parts, audio_file):
+            save_speech_wav(
+                audio_file,
+                session_id=session_id,
+                project=project,
+                persona=msg_info.get("persona", ""),
+                text=" ".join(spoken),
+                speed=speed,
+                tone=msg_info.get("tone", "neutral"),
+            )
+            audio_file.unlink(missing_ok=True)
+
+    try:
+        if result.outcome == "paused":
+            last = result.index == n - 1
+            if last and result.cut_played and result.remaining_s <= NEAR_END_THRESHOLD:
+                log(f"Interrupted near end ({result.remaining_s:.1f}s remaining), skipping replay")
+                save_history()
+                clear_current_message()
+                JOBS.update(job_id, state="done", position_ms=position_ms)
+                return
+            msg_info["sentence_index"] = result.index
+            msg_info["played_s"] = result.played_s
+            write_playback_state(current_message=msg_info)
+            JOBS.update(job_id, state="paused", position_ms=position_ms)
+            why = "on unpause" if not _shutdown_requested else "after restart"
+            log(
+                f"Message interrupted at sentence {result.index + 1}/{n}, "
+                f"will resume from its start {why}"
+            )
+            return
+        if result.outcome == "cancelled":
+            log(f"Cancelled by bridge: {project}")
+            clear_current_message()
+            return
+        if result.outcome == "failed":
+            log(
+                f"Failed to generate sentence {result.index + 1}/{n} for {project}: "
+                f"{audio_last_error()}",
+                "ERROR",
+            )
+            save_history()
+            clear_current_message()
+            if not result.parts and start_index == 0:
+                JOBS.update(job_id, state="failed", error=audio_last_error())
+            else:
+                # Degradation over failure: what was spoken counts as the message.
+                JOBS.update(job_id, state="done", position_ms=position_ms)
+            return
+        save_history()
+        clear_current_message()
+        JOBS.update(job_id, state="done", position_ms=position_ms, duration_ms=position_ms)
+    finally:
+        for part in result.parts:
+            part.unlink(missing_ok=True)
+        if msg_file is not None:
+            msg_file.unlink(missing_ok=True)
+
+
+def speaker_transition(
+    transition: str,
+    last_speaker: str,
+    speaker_key: str,
+    project: str,
+    persona: str,
+    speed: float,
+    speed_method: str,
+) -> None:
+    """Mark a change of speaking session with a chime or a spoken name."""
+    if transition == "chime":
+        log(f"Speaker change: {last_speaker} -> {speaker_key}")
+        play_chime()
+    elif transition == "announce":
+        log(f"Announcing speaker: {project}")
+        announce_file = Path("/tmp/tts_announce.wav")
+        if daemon_generate_speech(f"{project} says:", persona, announce_file):
+            if speed_method == "playback":
+                daemon_play_audio(announce_file, speed)
+            else:
+                daemon_play_audio(announce_file)
+            announce_file.unlink(missing_ok=True)
+        time.sleep(0.3)
 
 
 def play_chime() -> None:
@@ -846,6 +1162,23 @@ def daemon_loop(lockpick: bool = False) -> None:
                 prev_audio_pos = interrupted.get("audio_position", 0.0)
                 i_job_id = interrupted.get("id") if interrupted.get("source") else None
 
+                if "sentence_index" in interrupted:
+                    i_tone = classify_tone(interrupted.get("text", "")) if raw_config.get(
+                        "tone_modulation", False
+                    ) else DEFAULT_TONE
+
+                    stream_message(
+                        interrupted,
+                        sentence_generator(
+                            persona,
+                            voice_kokoro=i_voice_kokoro,
+                            voice_kokoro_blend=i_voice_blend,
+                            tone=i_tone,
+                        ),
+                        start_index=int(interrupted.get("sentence_index", 0)),
+                    )
+                    continue
+
                 # Regenerate the full WAV, sentence by sentence if the page
                 # wants marks, so its offsets line up with the first pass.
                 audio_file = Path(f"/tmp/tts_queue_{session_id}.wav")
@@ -988,6 +1321,46 @@ def daemon_loop(lockpick: bool = False) -> None:
             # Apply tone speed factor
             effective_speed = speed * tone.speed_factor
 
+            current_msg_info = {
+                "session_id": session_id,
+                "project": project,
+                "text": text,
+                "persona": persona,
+                "speed": effective_speed,
+                "speed_method": effective_speed_method,
+                "voice_kokoro": voice_kokoro,
+                "voice_kokoro_blend": voice_kokoro_blend,
+                "pitch_filter": pitch_filter_msg,
+            }
+            if job_id:
+                current_msg_info["id"] = job_id
+                current_msg_info["source"] = msg.get("source")
+                current_msg_info["want_marks"] = want_marks
+
+            speaker_key = f"{session_id}:{project}"
+
+            # Sentence streaming: first audio after the first sentence, pause on a
+            # sentence boundary. Pages asking for marks keep the one-piece path,
+            # since marks need the whole WAV before playback starts.
+            if speech_unit() == "sentence" and not want_marks:
+                if last_speaker and last_speaker != speaker_key:
+                    speaker_transition(config["speaker_transition"], last_speaker, speaker_key,
+                                       project, persona, speed, speed_method)
+                last_speaker = speaker_key
+                current_msg_info["tone"] = tone.name
+
+                stream_message(
+                    current_msg_info,
+                    sentence_generator(
+                        persona,
+                        voice_kokoro=voice_kokoro,
+                        voice_kokoro_blend=voice_kokoro_blend,
+                        tone=tone,
+                    ),
+                    msg_file=msg_file,
+                )
+                continue
+
             JOBS.update(job_id, state="synthesizing")
             ok, marks = synthesize_message(
                 text,
@@ -1009,41 +1382,11 @@ def daemon_loop(lockpick: bool = False) -> None:
                 JOBS.update(job_id, marks=marks)
 
             # Speaker transition
-            speaker_key = f"{session_id}:{project}"
             if last_speaker and last_speaker != speaker_key:
-                transition = config["speaker_transition"]
-                if transition == "chime":
-                    log(f"Speaker change: {last_speaker} -> {speaker_key}")
-                    play_chime()
-                elif transition == "announce":
-                    log(f"Announcing speaker: {project}")
-                    announce_file = Path("/tmp/tts_announce.wav")
-                    if daemon_generate_speech(f"{project} says:", persona, announce_file):
-                        announce_speed = speed if speed_method == "playback" else None
-                        if announce_speed:
-                            daemon_play_audio(announce_file, announce_speed)
-                        else:
-                            daemon_play_audio(announce_file)
-                        announce_file.unlink(missing_ok=True)
-                    time.sleep(0.3)
-
+                speaker_transition(config["speaker_transition"], last_speaker, speaker_key,
+                                   project, persona, speed, speed_method)
             last_speaker = speaker_key
 
-            current_msg_info = {
-                "session_id": session_id,
-                "project": project,
-                "text": text,
-                "persona": persona,
-                "speed": effective_speed,
-                "speed_method": effective_speed_method,
-                "voice_kokoro": voice_kokoro,
-                "voice_kokoro_blend": voice_kokoro_blend,
-                "pitch_filter": pitch_filter_msg,
-            }
-            if job_id:
-                current_msg_info["id"] = job_id
-                current_msg_info["source"] = msg.get("source")
-                current_msg_info["want_marks"] = want_marks
             write_playback_state(current_message=current_msg_info)
 
             # Save WAV to speech history before playback
@@ -1327,7 +1670,7 @@ def show_logs(follow: bool = False) -> None:
 
     if follow:
         try:
-            subprocess.run(["tail", "-f", str(LOG_FILE)])
+            subprocess.run(["tail", "-F", str(LOG_FILE)])
         except KeyboardInterrupt:
             pass
     else:
