@@ -21,6 +21,8 @@ from typing import Any
 
 from claude_code_tts import __version__
 from claude_code_tts.config import (
+    DEFAULT_VOICE,
+    SHERPA_MODELS_DIR,
     TTS_CONFIG_FILE,
     TTS_SESSIONS_DIR,
     VOICES_DIR,
@@ -273,6 +275,10 @@ def cmd_persona(args: argparse.Namespace) -> None:
     personas = config.get("personas", {})
     name = args.name
 
+    if name in ("add", "remove"):
+        _persona_edit(args, config, sid)
+        return
+
     if args.project:
         if not name:
             project_persona = config.get("project_personas", {}).get(sid, "")
@@ -364,6 +370,102 @@ def cmd_persona(args: argparse.Namespace) -> None:
 
         session_set(sid, "persona", name)
         print(f"Persona set to: {name}")
+
+
+PERSONA_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+
+def _persona_edit(args: argparse.Namespace, config: dict, sid: str) -> None:
+    """`persona add <name> [--voice ...]` and `persona remove <name>`.
+
+    Writes the same persona shape the installer seeds, so a room can create
+    its own voice without hand-editing config.json (asked by the house room,
+    2026-09-23). Voice models are checked on this machine only as a note: the
+    daemon may run elsewhere, and it already says when a voice is missing.
+    """
+    personas = config.setdefault("personas", {})
+    target = args.target
+    if not target:
+        if args.name == "add":
+            print("Usage: claude-tts persona add <name> [--voice MODEL] [--speed X] [--description TEXT]")
+        else:
+            print("Usage: claude-tts persona remove <name> [--force]")
+        sys.exit(2)
+
+    if args.name == "remove":
+        if target not in personas:
+            print(f"Persona not found: {target}")
+            sys.exit(1)
+        project_refs = sorted(k for k, v in config.get("project_personas", {}).items() if v == target)
+        if config.get("active_persona") == target:
+            print(f"{target} is the global persona (active_persona); pick another first")
+            sys.exit(1)
+        if project_refs and not args.force:
+            print(f"{target} is the project persona for: {', '.join(project_refs)}")
+            print("Use --force to remove it and clear those projects")
+            sys.exit(1)
+        for key in project_refs:
+            config["project_personas"].pop(key, None)
+        if "project_personas" in config and not config["project_personas"]:
+            config.pop("project_personas")
+        personas.pop(target)
+        save_raw_config(config)
+        print(f"Persona removed: {target}")
+        for key in project_refs:
+            print(f"  cleared project persona for {key}")
+        return
+
+    if not PERSONA_NAME_RE.match(target):
+        print(f"Persona names are lowercase letters, digits, '.', '_' or '-', starting with a letter or digit: {target}")
+        sys.exit(2)
+    if target in personas and not args.force:
+        print(f"Persona exists: {target}")
+        print(json.dumps(personas[target], indent=2))
+        print("Use --force to overwrite it")
+        sys.exit(1)
+
+    speed = args.speed if args.speed is not None else 2.0
+    if not 0.5 <= speed <= 4.0:
+        print(f"Speed must be between 0.5 and 4.0: {speed}")
+        sys.exit(2)
+
+    entry: dict[str, Any] = {
+        "description": args.description or f"Added by claude-tts persona add on {time.strftime('%Y-%m-%d')}",
+        "voice": args.voice or DEFAULT_VOICE,
+        "speed": speed,
+        "speed_method": args.speed_method or "playback",
+        "max_chars": args.max_chars if args.max_chars is not None else 10000,
+        "ai_type": "claude",
+    }
+    if args.kokoro:
+        entry["voice_kokoro"] = args.kokoro
+    if args.sherpa:
+        entry["voice_sherpa"] = args.sherpa
+        if args.speaker is not None:
+            entry["speaker_sherpa"] = args.speaker
+    elif args.speaker is not None:
+        print("--speaker applies to a sherpa model; give --sherpa MODEL with it")
+        sys.exit(2)
+
+    personas[target] = entry
+    if args.project:
+        config.setdefault("project_personas", {})[sid] = target
+    save_raw_config(config)
+    if args.session:
+        session_set(sid, "persona", target)
+
+    print(f"Persona {'replaced' if args.force and target in personas else 'added'}: {target}")
+    print(json.dumps(entry, indent=2))
+    if args.project:
+        print(f"Project persona for {sid} set to {target}")
+    if args.session:
+        print(f"Session persona set to {target}")
+
+    if args.voice and not (VOICES_DIR / f"{args.voice}.onnx").is_file():
+        print(f"Note: {args.voice} is not installed on this machine ({VOICES_DIR}).")
+        print(f"      Where the daemon runs: claude-tts-install --voice {args.voice}")
+    if args.sherpa and not (SHERPA_MODELS_DIR / args.sherpa).is_dir():
+        print(f"Note: sherpa model {args.sherpa} is not under {SHERPA_MODELS_DIR} on this machine.")
 
 
 def cmd_intermediate(args: argparse.Namespace) -> None:
@@ -2756,10 +2858,24 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=cmd_speed)
 
     # --- persona ---
-    p = subparsers.add_parser("persona", help="Show or set voice persona")
-    p.add_argument("name", nargs="?", help="Persona name or 'reset'")
+    p = subparsers.add_parser(
+        "persona",
+        help="Show, set, add or remove voice personas",
+        epilog="Examples: persona add house-geordi --voice en_GB-alan-medium --speed 2.0 --project;  persona remove old-name",
+    )
+    p.add_argument("name", nargs="?", help="Persona name, 'reset', 'add' or 'remove'")
+    p.add_argument("target", nargs="?", help="With add or remove: the persona to add or remove")
     p.add_argument("--project", action="store_true", help="Set as project-level persona")
     p.add_argument("--session", action="store_true", help="Set as session-level persona (default)")
+    p.add_argument("--voice", metavar="MODEL", help="add: Piper voice model, e.g. en_GB-alan-medium")
+    p.add_argument("--kokoro", metavar="VOICE", help="add: Kokoro voice for swift-kokoro, e.g. af_heart")
+    p.add_argument("--sherpa", metavar="MODEL", help="add: sherpa-onnx model dir name under ~/.claude-tts/sherpa-models")
+    p.add_argument("--speaker", type=int, help="add: speaker id in a multi-speaker sherpa model")
+    p.add_argument("--speed", type=float, help="add: speed 0.5-4.0 (default 2.0)")
+    p.add_argument("--speed-method", choices=["playback", "length_scale"], help="add: how speed is applied (default playback)")
+    p.add_argument("--description", help="add: one line about the voice")
+    p.add_argument("--max-chars", type=int, help="add: longest text spoken whole (default 10000)")
+    p.add_argument("--force", action="store_true", help="add: overwrite an existing persona; remove: clear projects that use it")
     p.set_defaults(func=cmd_persona)
 
     # --- mode ---

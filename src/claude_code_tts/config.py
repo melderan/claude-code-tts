@@ -23,6 +23,9 @@ TTS_CONFIG_FILE = TTS_CONFIG_DIR / "config.json"
 TTS_SESSIONS_DIR = TTS_CONFIG_DIR / "sessions.d"
 TTS_QUEUE_DIR = TTS_CONFIG_DIR / "queue"
 VOICES_DIR = HOME / ".local" / "share" / "piper-voices"
+# The Piper voice every install ships with; personas fall back to it when
+# their own model is missing on the machine that runs the daemon.
+DEFAULT_VOICE = "en_US-hfc_male-medium"
 SHERPA_VENV_DIR = TTS_CONFIG_DIR / "venvs" / "sherpa"
 SHERPA_MODELS_DIR = TTS_CONFIG_DIR / "sherpa-models"
 PROJECTS_DIR = HOME / ".claude" / "projects"

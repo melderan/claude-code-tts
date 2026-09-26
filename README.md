@@ -213,6 +213,16 @@ Personas are named voice configurations. Each has a voice model, speed, and play
 }
 ```
 
+Add one from the command line instead of editing the file; the entry gets the same shape as
+above, and a note tells you if the voice model is not installed on this machine:
+
+```bash
+claude-tts persona add claude-joe --voice en_US-joe-medium --speed 2.0 --description "Low US male"
+claude-tts persona add room-x --voice en_GB-alan-medium --project   # and make it this project's voice
+claude-tts persona add k --kokoro af_heart                          # or a Kokoro / sherpa voice
+claude-tts persona remove claude-joe                                # refuses while a project uses it
+```
+
 Assign personas per-project so each repo has its own voice:
 
 ```json
