@@ -39,6 +39,7 @@ from claude_code_tts.bridge import (
     to_playback_ms,
 )
 from claude_code_tts.config import (
+    DEFAULT_VOICE,
     TTS_CONFIG_DIR,
     TTS_QUEUE_DIR,
     VOICES_DIR,
@@ -64,9 +65,59 @@ VERSION_FILE = TTS_CONFIG_DIR / "daemon.version"
 RESPAWN_MARKER = TTS_CONFIG_DIR / "daemon.respawn"
 
 # Default voice model
-DEFAULT_VOICE = "en_US-hfc_male-medium"
 # (persona, voice) pairs already reported as missing, so the log says it once.
 _missing_voice_warned: set[tuple[str, str]] = set()
+
+
+def resolve_piper_voice(persona: str, persona_config: dict, *, other_engine: bool = False) -> tuple[str, bool]:
+    """Return the Piper voice to use for a persona and whether it is the default standing in.
+
+    A missing voice is logged once per persona, not per message: a silent
+    substitution sounds like the wrong voice with no trail to follow (found
+    2026-09-21 when a new persona's model was on another machine). When a
+    voice warned about earlier turns up installed, that is logged once too,
+    so the log can say which voice is playing without anyone listening for
+    it (asked by the house room, 2026-09-23). With other_engine the persona
+    speaks through Kokoro or sherpa and its Piper voice is not checked.
+    """
+    voice_name = persona_config.get("voice", DEFAULT_VOICE)
+    if other_engine:
+        return voice_name, False
+    key = (persona, voice_name)
+    voice_path = VOICES_DIR / f"{voice_name}.onnx"
+    if voice_path.exists():
+        if key in _missing_voice_warned:
+            _missing_voice_warned.discard(key)
+            log(f"Voice {voice_name} for persona {persona} is installed now at {voice_path}; using it")
+        return voice_name, False
+    if key not in _missing_voice_warned:
+        _missing_voice_warned.add(key)
+        log(
+            f"Voice {voice_name} for persona {persona} is not installed at {voice_path}; "
+            f"using {DEFAULT_VOICE}. Fetch it with: claude-tts-install --voice {voice_name}",
+            "WARN",
+        )
+    return DEFAULT_VOICE, True
+
+
+def describe_voice(persona: str, persona_config: dict, voice_kokoro: str = "", voice_kokoro_blend: str = "") -> str:
+    """One token naming the engine and voice a message will play with, for the log.
+
+    `kokoro:<voice>`, `sherpa:<model>[#speaker]`, or the Piper voice name,
+    with ` (fallback)` when the default is standing in for a missing model.
+    """
+    blend = voice_kokoro_blend or persona_config.get("voice_kokoro_blend", "")
+    kokoro = voice_kokoro or persona_config.get("voice_kokoro", "")
+    if blend:
+        return f"kokoro:{blend}"
+    if kokoro:
+        return f"kokoro:{kokoro}"
+    sherpa = persona_config.get("voice_sherpa", "")
+    if sherpa:
+        speaker = int(persona_config.get("speaker_sherpa", -1))
+        return f"sherpa:{sherpa}" + (f"#{speaker}" if speaker >= 0 else "")
+    voice, fell_back = resolve_piper_voice(persona, persona_config)
+    return f"{voice} (fallback)" if fell_back else voice
 
 # Global state
 _lock_fd: TextIOWrapper | None = None
@@ -367,28 +418,15 @@ def daemon_generate_speech(
 
     kokoro_blend = voice_kokoro_blend_override or persona_config.get("voice_kokoro_blend", "")
     kokoro_voice = voice_kokoro_override or persona_config.get("voice_kokoro", "")
-    voice_name = persona_config.get("voice", DEFAULT_VOICE)
-    voice_path = VOICES_DIR / f"{voice_name}.onnx"
     speed = persona_config.get("speed", 2.0)
     speed_method = persona_config.get("speed_method", "playback")
     voice_sherpa = persona_config.get("voice_sherpa", "")
     speaker_sherpa = int(persona_config.get("speaker_sherpa", -1))
     pitch_filter = persona_config.get("pitch_filter", "")
-
-    # Fall back to default voice if persona voice not found, and say so once
-    # per persona: a silent substitution sounds like the wrong voice with no
-    # trail to follow (found 2026-09-21 when a new persona's model was on
-    # another machine).
-    if not voice_path.exists() and not voice_sherpa and not kokoro_voice:
-        key = (persona, voice_name)
-        if key not in _missing_voice_warned:
-            _missing_voice_warned.add(key)
-            log(
-                f"Voice {voice_name} for persona {persona} is not installed at {voice_path}; "
-                f"using {DEFAULT_VOICE}. Fetch it with: claude-tts-install --voice {voice_name}",
-                "WARN",
-            )
-        voice_path = VOICES_DIR / f"{DEFAULT_VOICE}.onnx"
+    voice_name, _ = resolve_piper_voice(
+        persona, persona_config, other_engine=bool(voice_sherpa or kokoro_voice)
+    )
+    voice_path = VOICES_DIR / f"{voice_name}.onnx"
 
     # Tone-aware generation parameters.
     # Only pass when tone is non-default — otherwise let Piper use its
@@ -1379,13 +1417,16 @@ def daemon_loop(lockpick: bool = False) -> None:
             if tone_enabled and tone.name != "neutral":
                 log(f"Tone: {tone.name} (noise={tone.noise_scale}, silence={tone.sentence_silence})")
 
-            log(f"Speaking for {project}: {text[:50]}...")
             audio_file = Path(f"/tmp/tts_queue_{session_id}.wav")
             persona_config = get_persona_config(persona)
             speed = msg.get("speed", persona_config.get("speed", 2.0))
             speed_method = msg.get("speed_method", persona_config.get("speed_method", "playback"))
             voice_kokoro = msg.get("voice_kokoro", "")
             voice_kokoro_blend = msg.get("voice_kokoro_blend", "")
+            # The line `daemon stats` counts messages by; the bracket says which
+            # voice is about to play, so the log can answer that without an ear.
+            voice_label = describe_voice(persona, persona_config, voice_kokoro, voice_kokoro_blend)
+            log(f"Speaking for {project} [{persona}, {voice_label}]: {text[:50]}...")
             pitch_filter_msg = msg.get("pitch_filter", "")
 
             # Sherpa applies speed during synthesis — don't also apply at playback

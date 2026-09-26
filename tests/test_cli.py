@@ -162,6 +162,92 @@ class TestPersona:
         assert config["project_personas"]["test-session"] == "claude-chill"
 
 
+class TestPersonaAddRemove:
+    """`claude-tts persona add|remove` writes the same shape the installer seeds."""
+
+    def _config(self, tts_home):
+        return json.loads((tts_home / ".claude-tts" / "config.json").read_text())
+
+    def test_add_writes_full_persona_with_defaults(self, tts_home, patched_env, capsys):
+        main(["persona", "add", "house-geordi", "--voice", "en_GB-alan-medium"])
+        entry = self._config(tts_home)["personas"]["house-geordi"]
+        assert entry["voice"] == "en_GB-alan-medium"
+        assert entry["speed"] == 2.0
+        assert entry["speed_method"] == "playback"
+        assert entry["max_chars"] == 10000
+        assert entry["ai_type"] == "claude"
+        assert entry["description"]
+        out = capsys.readouterr().out
+        assert "Persona added: house-geordi" in out
+        assert "not installed on this machine" in out
+        assert "claude-tts-install --voice en_GB-alan-medium" in out
+
+    def test_add_takes_every_field_and_sets_project_and_session(self, tts_home, patched_env):
+        main(["persona", "add", "room-x", "--voice", "en_US-joe-medium", "--speed", "1.5",
+              "--speed-method", "length_scale", "--description", "A room", "--max-chars", "5000",
+              "--project", "--session"])
+        config = self._config(tts_home)
+        assert config["personas"]["room-x"] == {
+            "description": "A room", "voice": "en_US-joe-medium", "speed": 1.5,
+            "speed_method": "length_scale", "max_chars": 5000, "ai_type": "claude",
+        }
+        assert config["project_personas"]["test-session"] == "room-x"
+        sf = tts_home / ".claude-tts" / "sessions.d" / "test-session.json"
+        assert json.loads(sf.read_text())["persona"] == "room-x"
+
+    def test_add_with_sherpa_and_kokoro(self, tts_home, patched_env):
+        main(["persona", "add", "k", "--kokoro", "af_heart"])
+        main(["persona", "add", "s", "--sherpa", "vctk-vits", "--speaker", "42"])
+        personas = self._config(tts_home)["personas"]
+        assert personas["k"]["voice_kokoro"] == "af_heart"
+        assert personas["k"]["voice"] == "en_US-hfc_male-medium"
+        assert personas["s"]["voice_sherpa"] == "vctk-vits"
+        assert personas["s"]["speaker_sherpa"] == 42
+
+    def test_add_refuses_to_overwrite_without_force(self, tts_home, patched_env, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["persona", "add", "claude-chill", "--voice", "en_US-joe-medium"])
+        assert exc.value.code == 1
+        assert "Persona exists: claude-chill" in capsys.readouterr().out
+        main(["persona", "add", "claude-chill", "--voice", "en_GB-alan-medium", "--force"])
+        assert self._config(tts_home)["personas"]["claude-chill"]["voice"] == "en_GB-alan-medium"
+
+    @pytest.mark.parametrize("argv", [
+        ["persona", "add"],
+        ["persona", "add", "Bad Name", "--voice", "x"],
+        ["persona", "add", "ok", "--speed", "9"],
+        ["persona", "add", "ok", "--speaker", "3"],
+    ])
+    def test_add_rejects_bad_input(self, tts_home, patched_env, argv):
+        with pytest.raises(SystemExit) as exc:
+            main(argv)
+        assert exc.value.code == 2
+        assert "ok" not in self._config(tts_home)["personas"]
+
+    def test_remove_drops_persona(self, tts_home, patched_env, capsys):
+        main(["persona", "remove", "claude-chill"])
+        assert "claude-chill" not in self._config(tts_home)["personas"]
+        assert "Persona removed: claude-chill" in capsys.readouterr().out
+
+    def test_remove_refuses_global_and_referenced_personas(self, tts_home, patched_env, capsys):
+        with pytest.raises(SystemExit):
+            main(["persona", "remove", "claude-prime"])
+        assert "global persona" in capsys.readouterr().out
+        main(["persona", "--project", "claude-chill"])
+        with pytest.raises(SystemExit):
+            main(["persona", "remove", "claude-chill"])
+        assert "project persona for: test-session" in capsys.readouterr().out
+        main(["persona", "remove", "claude-chill", "--force"])
+        config = self._config(tts_home)
+        assert "claude-chill" not in config["personas"]
+        assert "project_personas" not in config
+
+    def test_remove_unknown_persona_fails(self, tts_home, patched_env):
+        with pytest.raises(SystemExit) as exc:
+            main(["persona", "remove", "nope"])
+        assert exc.value.code == 1
+
+
 class TestPersonasGuide:
     """`claude-tts personas` — sibling-Claude voice picker guide."""
 

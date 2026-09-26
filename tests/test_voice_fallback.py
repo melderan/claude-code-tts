@@ -57,6 +57,30 @@ class TestDaemonVoiceFallback:
         logs, _ = self._run(tmp_path, {"voice": "not-a-piper-model", "voice_sherpa": "vctk-vits"})
         assert not [m for level, m in logs if level == "WARN"]
 
+    def test_says_once_when_the_missing_voice_turns_up(self, tmp_path):
+        """The log can tell fallback from persona without an ear (house room, 2026-09-23)."""
+        voice = "en_GB-northern_english_male-medium"
+        (tmp_path / f"{daemon_mod.DEFAULT_VOICE}.onnx").write_bytes(b"model")
+        logs: list[tuple[str, str]] = []
+        with patch.object(daemon_mod, "VOICES_DIR", tmp_path), \
+             patch.object(daemon_mod, "log", side_effect=lambda m, level="INFO": logs.append((level, m))), \
+             patch.object(daemon_mod, "_missing_voice_warned", set()):
+            assert daemon_mod.resolve_piper_voice("p", {"voice": voice}) == (daemon_mod.DEFAULT_VOICE, True)
+            assert daemon_mod.describe_voice("p", {"voice": voice}) == f"{daemon_mod.DEFAULT_VOICE} (fallback)"
+            (tmp_path / f"{voice}.onnx").write_bytes(b"model")
+            assert daemon_mod.resolve_piper_voice("p", {"voice": voice}) == (voice, False)
+            assert daemon_mod.resolve_piper_voice("p", {"voice": voice}) == (voice, False)
+            assert daemon_mod.describe_voice("p", {"voice": voice}) == voice
+        assert [level for level, _ in logs] == ["WARN", "INFO"]
+        assert "installed now" in logs[1][1]
+
+    def test_describe_voice_names_the_engine(self, tmp_path):
+        with patch.object(daemon_mod, "VOICES_DIR", tmp_path):
+            assert daemon_mod.describe_voice("p", {"voice_kokoro": "af_heart"}) == "kokoro:af_heart"
+            assert daemon_mod.describe_voice("p", {}, voice_kokoro_blend="af_heart:0.5,am_adam:0.5") == "kokoro:af_heart:0.5,am_adam:0.5"
+            assert daemon_mod.describe_voice("p", {"voice_sherpa": "vctk-vits", "speaker_sherpa": 42}) == "sherpa:vctk-vits#42"
+            assert daemon_mod.describe_voice("p", {"voice_sherpa": "kokoro-en"}) == "sherpa:kokoro-en"
+
 
 class TestNamedVoiceDownload:
     def test_downloads_known_voice_and_reports_missing(self, tmp_path):

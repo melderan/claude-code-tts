@@ -92,7 +92,7 @@ just release --check        # preflight and gate only; prints the plan
 | `/tts-mute` | Mute this session |
 | `/tts-unmute` | Unmute this session |
 | `/tts-speed [value]` | Show/set speech speed (0.5-4.0) |
-| `/tts-persona [name]` | Show/set voice persona |
+| `/tts-persona [name]` | Show/set voice persona; `add <name> --voice <model>` and `remove <name>` edit config.json |
 | `/tts-mode [direct\|queue]` | Show/set playback mode |
 | `/tts-cleanup` | Remove stale session entries |
 | `/tts-sounds` | Configure sound effects |
