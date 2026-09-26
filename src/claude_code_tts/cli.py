@@ -447,11 +447,11 @@ def _persona_edit(args: argparse.Namespace, config: dict, sid: str) -> None:
         print("--speaker applies to a sherpa model; give --sherpa MODEL with it")
         sys.exit(2)
     if args.mlx:
-        from claude_code_tts.mlx_catalog import CATALOG, resolve_model
+        from claude_code_tts.mlx_catalog import CATALOG, default_lang_for, resolve_model
         entry["voice_mlx"] = resolve_model(args.mlx)
         catalog = CATALOG.get(args.mlx)
         voice = args.mlx_voice or (catalog["default_voice"] if catalog else "")
-        lang = args.mlx_lang or (catalog["default_lang"] if catalog else "")
+        lang = args.mlx_lang or default_lang_for(args.mlx, voice)
         if voice:
             entry["speaker_mlx"] = voice
         if lang:
@@ -1187,7 +1187,7 @@ def cmd_mlx(args: argparse.Namespace) -> None:
             print(f"      repo:      {entry['hf_repo']}")
             print(f"      engine:    {entry['engine']}    license: {entry['license_weights']}    size: {entry['size_mb']} MB    checked: {entry['checked']}")
             print(f"      languages: {entry['languages']}")
-            print(f"      voices:    {entry['voices_hint']}")
+            print(f"      voices:    {entry['voices_hint']}" + (f" ({len(entry['voices'])} named, `claude-tts audition --mlx {entry['id']}` cycles them)" if entry["voices"] else ""))
             if entry["default_voice"]:
                 print(f"      default:   --speaker-mlx {entry['default_voice']}" + (f" --lang-mlx {entry['default_lang']}" if entry["default_lang"] else ""))
             print(f"      {entry['notes']}")
@@ -1635,11 +1635,11 @@ def cmd_speak(args: argparse.Namespace) -> None:
     # CLI overrides for mlx take precedence and disable other backends for
     # this one-shot call; a catalog id resolves to its Hugging Face repo.
     if getattr(args, "voice_mlx", None):
-        from claude_code_tts.mlx_catalog import CATALOG, resolve_model
+        from claude_code_tts.mlx_catalog import CATALOG, default_lang_for, resolve_model
         catalog = CATALOG.get(args.voice_mlx)
         voice_mlx = resolve_model(args.voice_mlx)
         speaker_mlx = getattr(args, "speaker_mlx", "") or (catalog["default_voice"] if catalog else "")
-        lang_mlx = getattr(args, "lang_mlx", "") or (catalog["default_lang"] if catalog else "")
+        lang_mlx = getattr(args, "lang_mlx", "") or default_lang_for(args.voice_mlx, speaker_mlx)
         voice_sherpa = ""
         voice_kokoro = ""
         voice_kokoro_blend = ""
@@ -2380,11 +2380,25 @@ def cmd_audition(args: argparse.Namespace) -> None:
             if key in ("q", "Q"):
                 return "quit"
 
-    def save_persona(name: str, voice: str, speaker: str = "", is_kokoro: bool = False) -> None:
+    def save_persona(name: str, voice: str, speaker: str = "", is_kokoro: bool = False, mlx_repo: str = "") -> None:
         """Save a voice as a named persona."""
         config = load_raw_config()
         personas = config.get("personas", {})
-        if is_kokoro:
+        if mlx_repo:
+            from claude_code_tts.mlx_catalog import default_lang_for
+            personas[name] = {
+                "description": f"Audition - mlx {mlx_repo} {voice}",
+                "voice_mlx": mlx_repo,
+                "speaker_mlx": voice,
+                "speed": speed,
+                "speed_method": method,
+                "max_chars": 10000,
+                "ai_type": "claude",
+            }
+            lang = default_lang_for(mlx_repo, voice)
+            if lang:
+                personas[name]["lang_mlx"] = lang
+        elif is_kokoro:
             personas[name] = {
                 "description": f"Audition - Kokoro {voice}",
                 "voice_kokoro": voice,
@@ -2571,6 +2585,76 @@ def cmd_audition(args: argparse.Namespace) -> None:
         print("Falling back to direct playback.")
         print()
         use_queue = False
+
+    mlx_arg = getattr(args, "mlx", None)
+    if mlx_arg:
+        # mlx-audio voice presets: every named voice of a catalog model, in order,
+        # each in its own language (Kokoro's bm_george speaks British English).
+        from claude_code_tts.config import MLX_VENV_DIR
+        from claude_code_tts.mlx_catalog import default_lang_for, resolve_model, voices_for
+
+        if not (MLX_VENV_DIR / "bin" / "python").is_file():
+            print("mlx backend not enabled (run: claude-tts-install --enable-mlx)")
+            sys.exit(1)
+        repo = resolve_model(mlx_arg)
+        voices = voices_for(mlx_arg)
+        if not voices:
+            print(f"No named voices known for {repo}; try: claude-tts speak --voice-mlx {mlx_arg} \"hello\"")
+            sys.exit(1)
+        voice_filter = getattr(args, "filter", None)
+        if voice_filter:
+            prefixes = [p.strip() for p in voice_filter.split(",")]
+            voices = [v for v in voices if any(v.startswith(p) for p in prefixes)]
+            if not voices:
+                print(f"No voices matching filter: {voice_filter}")
+                sys.exit(1)
+        print(f"Model: {repo}")
+        print(f"Found {len(voices)} voices" + (f" (filter: {voice_filter})" if voice_filter else ""))
+        print("Press Enter to begin (the first clip loads the model)...")
+        input()
+
+        def mlx_clip(voice: str) -> None:
+            wav = generate_speech(
+                text,
+                voice_mlx=repo,
+                speaker_mlx=voice,
+                lang_mlx=default_lang_for(mlx_arg, voice),
+                speed=speed,
+                speed_method=method,
+                output_path=temp_file,
+            )
+            if wav:
+                proc = play_clip(wav, speed if method == "playback" else 1.0)
+                if wait_with_skip(proc):
+                    print("  (skipped)")
+            else:
+                print(f"  {_explain_speech_failure()}")
+
+        for i, voice in enumerate(voices):
+            print()
+            print(f">>> {_kokoro_display_name(voice)} ({voice}) [{len(voices) - i} remaining] <<<")
+            print("  [Enter] Play  [s] Skip  [q] Quit")
+            key = read_key()
+            if key in ("s", "S"):
+                print("  Skipped")
+                continue
+            if key in ("q", "Q"):
+                break
+            mlx_clip(voice)
+            action = prompt_action(voice)
+            while action == "replay":
+                mlx_clip(voice)
+                action = prompt_action(voice)
+            if action == "keep":
+                print("  Save as persona name (Enter to skip): ", end="", flush=True)
+                name = input()
+                if name:
+                    save_persona(name, voice, mlx_repo=repo)
+            elif action == "quit":
+                break
+        print()
+        print("Auditions complete!")
+        return
 
     if getattr(args, "kokoro", False):
         # Kokoro voice auditions
@@ -3099,9 +3183,10 @@ def main(argv: list[str] | None = None) -> None:
     p = subparsers.add_parser("audition", help="Audition voices interactively")
     p.add_argument("--voice", help="Specific voice to audition")
     p.add_argument("--speakers", type=int, help="Number of speakers to try")
-    p.add_argument("--kokoro", action="store_true", help="Audition Kokoro voices")
+    p.add_argument("--kokoro", action="store_true", help="Audition Kokoro voices (swift-kokoro)")
+    p.add_argument("--mlx", metavar="MODEL", help="Audition an mlx-audio model's named voices, e.g. kokoro or kitten-nano")
     p.add_argument("--blend", help="Blend two Kokoro voices (e.g., am_adam,af_heart)")
-    p.add_argument("--filter", help="Filter Kokoro voices by prefix (e.g., am_,bf_)")
+    p.add_argument("--filter", help="Filter Kokoro or mlx voices by prefix (e.g., am_,bf_)")
     p.add_argument("--text", help="Custom audition text")
     p.add_argument("--range", help="Speaker ID range (e.g., 0-50)")
     p.add_argument("--queue", action="store_true", help="Play through daemon queue")
