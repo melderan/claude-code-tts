@@ -7,6 +7,7 @@ and system audio players. Replaces tts_speak() from tts-lib.sh.
 import json
 import os
 import platform
+import re
 import secrets
 import select
 import shutil
@@ -19,6 +20,7 @@ from claude_code_tts.config import (
     MLX_VENV_DIR,
     SHERPA_MODELS_DIR,
     SHERPA_VENV_DIR,
+    TTS_CONFIG_DIR,
     TTS_QUEUE_DIR,
     TTSConfig,
     debug,
@@ -87,16 +89,26 @@ class _JsonLineWorker:
 
     The subclass names the command; this class starts it, waits for the
     ready line, sends one request per line and reads one response per
-    line, and restarts the process when it has died. A lock serialises
-    callers, so a warm-up thread and the play loop never race to start two.
+    line, and restarts the process when it has died. Three things keep the
+    daemon's play loop safe from a slow or broken child (clean-room review,
+    2026-09-26): the child's stderr goes to a log file, never to a pipe
+    nobody drains; every read has a timeout, after which the child is
+    killed; and a failed start is not retried for `start_backoff` seconds.
+    A lock serialises callers, and a caller that cannot take it within
+    `lock_wait` seconds (someone else is loading a model) gives up and
+    falls through to the next engine instead of waiting.
     """
 
     label = "worker"
     ready_timeout = 120.0
+    request_timeout = 120.0
+    lock_wait = 5.0
+    start_backoff = 60.0
 
     def __init__(self) -> None:
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
+        self._retry_after = 0.0
 
     def _command(self) -> list[str] | None:
         """The argv to start the process, or None (already logged) when it cannot start."""
@@ -105,67 +117,118 @@ class _JsonLineWorker:
     def _alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
+    def log_path(self) -> Path:
+        """Where the child's stderr accumulates (model load messages, download progress, tracebacks)."""
+        slug = re.sub(r"[^a-z0-9]+", "-", self.label.lower()).strip("-")
+        return TTS_CONFIG_DIR / "workers" / f"{slug}.log"
+
+    def _open_stderr(self):  # noqa: ANN202  (a file object or subprocess.DEVNULL)
+        path = self.log_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists() and path.stat().st_size > 5 * 1024 * 1024:
+                path.write_text("")
+            return open(path, "a")
+        except OSError:
+            return subprocess.DEVNULL
+
+    def _stderr_tail(self, lines: int = 5) -> str:
+        try:
+            tail = self.log_path().read_text(errors="replace").splitlines()[-lines:]
+        except OSError:
+            return ""
+        return (" | " + " / ".join(line.strip() for line in tail if line.strip())) if tail else ""
+
+    @staticmethod
+    def _stop(proc: subprocess.Popen) -> None:
+        """Terminate and reap; kill if it will not go."""
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+        except Exception:
+            pass
+
+    def _fail_start(self, proc: subprocess.Popen | None, why: str) -> bool:
+        if proc is not None:
+            self._stop(proc)
+        self._retry_after = time.monotonic() + self.start_backoff
+        debug(f"{self.label}: {why}; next start attempt in {self.start_backoff:.0f}s{self._stderr_tail()}")
+        return False
+
     def _start(self) -> bool:
+        remaining = self._retry_after - time.monotonic()
+        if remaining > 0:
+            debug(f"{self.label}: last start failed, not trying again for {remaining:.0f}s")
+            return False
         cmd = self._command()
         if cmd is None:
             return False
+        err = self._open_stderr()
         try:
             proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=err,
                 text=True,
                 env=_venv_env(),
             )
-            assert proc.stdout is not None
-            ready = select.select([proc.stdout], [], [], self.ready_timeout)[0]
-            if not ready:
-                debug(f"{self.label}: timed out waiting for ready signal (>{self.ready_timeout:.0f}s)")
-                proc.terminate()
-                return False
-            ready_line = proc.stdout.readline()
-            try:
-                resp = json.loads(ready_line)
-            except (json.JSONDecodeError, TypeError):
-                debug(f"{self.label}: unexpected ready response: {ready_line!r}")
-                proc.terminate()
-                return False
-            if not resp.get("ready"):
-                debug(f"{self.label}: failed to start: {resp.get('error')}")
-                proc.terminate()
-                return False
-            self._proc = proc
-            debug(f"{self.label} started (PID {proc.pid})")
-            return True
         except OSError as e:
-            debug(f"{self.label} start failed: {e}")
-            return False
+            return self._fail_start(None, f"start failed: {e}")
+        finally:
+            if err is not subprocess.DEVNULL:
+                err.close()
+        assert proc.stdout is not None
+        if not select.select([proc.stdout], [], [], self.ready_timeout)[0]:
+            return self._fail_start(proc, f"timed out waiting for ready signal (>{self.ready_timeout:.0f}s)")
+        ready_line = proc.stdout.readline()
+        try:
+            resp = json.loads(ready_line)
+        except (json.JSONDecodeError, TypeError):
+            return self._fail_start(proc, f"unexpected ready response: {ready_line!r}")
+        if not isinstance(resp, dict) or not resp.get("ready"):
+            error = resp.get("error") if isinstance(resp, dict) else resp
+            return self._fail_start(proc, f"failed to start: {error}")
+        self._proc = proc
+        self._retry_after = 0.0
+        debug(f"{self.label} started (PID {proc.pid}); its stderr is {self.log_path()}")
+        return True
 
     def ensure_started(self) -> bool:
         with self._lock:
             return self._alive() or self._start()
 
     def request(self, req: dict) -> dict | None:
-        """Send one request and return its response, or None on any failure."""
-        with self._lock:
+        """Send one request and return its response, or None on any failure or when busy."""
+        if not self._lock.acquire(timeout=self.lock_wait):
+            debug(f"{self.label}: busy for {self.lock_wait:.0f}s (another caller is loading or speaking); giving up this request")
+            return None
+        try:
             if not self._alive() and not self._start():
                 return None
+            proc = self._proc
+            assert proc is not None and proc.stdin is not None and proc.stdout is not None
             try:
-                assert self._proc and self._proc.stdin and self._proc.stdout
-                self._proc.stdin.write(json.dumps(req) + "\n")
-                self._proc.stdin.flush()
-                resp = json.loads(self._proc.stdout.readline())
-                return resp if isinstance(resp, dict) else None
-            except (OSError, json.JSONDecodeError, AssertionError) as e:
-                debug(f"{self.label}: communication error: {e}")
-                if self._proc:
-                    try:
-                        self._proc.terminate()
-                    except Exception:
-                        pass
+                proc.stdin.write(json.dumps(req) + "\n")
+                proc.stdin.flush()
+                if not select.select([proc.stdout], [], [], self.request_timeout)[0]:
+                    debug(f"{self.label}: no response in {self.request_timeout:.0f}s; killing it{self._stderr_tail()}")
+                    self._stop(proc)
                     self._proc = None
+                    return None
+                resp = json.loads(proc.stdout.readline())
+                return resp if isinstance(resp, dict) else None
+            except (OSError, json.JSONDecodeError) as e:
+                debug(f"{self.label}: communication error: {e}{self._stderr_tail()}")
+                self._stop(proc)
+                self._proc = None
                 return None
+        finally:
+            self._lock.release()
 
 
 class _SherpaWorker(_JsonLineWorker):
@@ -206,9 +269,7 @@ _sherpa_workers: dict[str, _SherpaWorker] = {}
 
 
 def _get_sherpa_worker(model_id: str) -> _SherpaWorker:
-    if model_id not in _sherpa_workers:
-        _sherpa_workers[model_id] = _SherpaWorker(model_id)
-    return _sherpa_workers[model_id]
+    return _sherpa_workers.setdefault(model_id, _SherpaWorker(model_id))
 
 
 def warm_sherpa_workers(personas: dict) -> None:
@@ -282,9 +343,10 @@ _mlx_workers: dict[str, _MlxWorker] = {}
 
 
 def _get_mlx_worker(model_id: str) -> _MlxWorker:
-    if model_id not in _mlx_workers:
-        _mlx_workers[model_id] = _MlxWorker(model_id)
-    return _mlx_workers[model_id]
+    # setdefault, not check-then-assign: the warm-up thread and the play loop
+    # may ask for the same model at the same moment, and two workers would
+    # mean two model processes.
+    return _mlx_workers.setdefault(model_id, _MlxWorker(model_id))
 
 
 def warm_mlx_workers(personas: dict) -> list[str]:
@@ -319,12 +381,13 @@ def _generate_mlx(
 ) -> Path | None:
     """Generate speech via the persistent mlx worker (model stays in memory)."""
     if not _mlx_available():
-        debug(f"mlx: venv not bootstrapped at {MLX_VENV_DIR}")
+        _set_last_error(f"mlx backend not enabled at {MLX_VENV_DIR}")
         return None
     worker = _get_mlx_worker(model_id)
     if worker.generate(text, voice=voice, speed=speed, lang_code=lang_code, output_path=output_path):
         if output_path.exists():
             return output_path
+    _set_last_error(f"mlx worker for {model_id} produced no audio (see {worker.log_path()})")
     return None
 
 
@@ -419,6 +482,7 @@ def generate_speech(
     if output_path is None:
         slot = int(time.time()) % 5
         output_path = Path(f"/tmp/claude_tts_{slot}.wav")
+    _set_last_error("")
 
     # Priority 1: Kokoro blend
     if shutil.which("swift-kokoro") and voice_kokoro_blend:
@@ -481,9 +545,11 @@ def generate_speech(
 
     # Priority 5: Piper
     if not shutil.which("piper"):
-        _set_last_error(f"piper not on PATH ({os.environ.get('PATH', '')})")
+        if not last_error():  # an engine asked for above already said what went wrong
+            _set_last_error(f"piper not on PATH ({os.environ.get('PATH', '')})")
     elif not (voice_path and voice_path.exists()):
-        _set_last_error(f"voice model missing: {voice_path}")
+        if not last_error():
+            _set_last_error(f"voice model missing: {voice_path}")
     else:
         cmd = ["piper", "--model", str(voice_path), "--output_file", str(output_path)]
         if speed_method == "length_scale" and speed > 0:
@@ -555,8 +621,10 @@ def speak_direct(text: str, config: TTSConfig) -> None:
     if not method:
         method = "playback" if plat == "macos" else "length_scale"
 
-    # Sherpa applies speed during synthesis — don't also apply it at playback
-    effective_method = "length_scale" if config.voice_sherpa else method
+    # Sherpa applies speed during synthesis, so it is not applied again at
+    # playback; only when sherpa is the engine that actually plays.
+    sherpa_plays = bool(config.voice_sherpa) and not (config.voice_kokoro or config.voice_kokoro_blend or config.voice_mlx)
+    effective_method = "length_scale" if sherpa_plays else method
 
     wav = generate_speech(
         text,
