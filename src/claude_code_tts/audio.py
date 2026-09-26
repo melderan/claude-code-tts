@@ -11,10 +11,12 @@ import secrets
 import select
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
 from claude_code_tts.config import (
+    MLX_VENV_DIR,
     SHERPA_MODELS_DIR,
     SHERPA_VENV_DIR,
     TTS_QUEUE_DIR,
@@ -67,8 +69,8 @@ def _sherpa_available() -> bool:
     return py.is_file()
 
 
-def _sherpa_env() -> dict[str, str]:
-    """Build env with PYTHONPATH so the sherpa venv can find our package."""
+def _venv_env() -> dict[str, str]:
+    """Build env with PYTHONPATH so an isolated venv's Python can find our package."""
     import claude_code_tts as _self_pkg
     pkg_parent = str(Path(_self_pkg.__file__).resolve().parent.parent)
     env = os.environ.copy()
@@ -77,99 +79,127 @@ def _sherpa_env() -> dict[str, str]:
     return env
 
 
-class _SherpaWorker:
-    """Persistent sherpa-onnx subprocess — model loaded once, reused per request.
+_sherpa_env = _venv_env
 
-    Keeps one long-lived Python process alive in the isolated sherpa venv so
-    the ONNX model stays in memory. Each call to generate() sends a JSON-line
-    request and reads a JSON-line response. Auto-restarts if the process dies.
+
+class _JsonLineWorker:
+    """A long-lived helper process in an isolated venv, spoken to in JSON lines.
+
+    The subclass names the command; this class starts it, waits for the
+    ready line, sends one request per line and reads one response per
+    line, and restarts the process when it has died. A lock serialises
+    callers, so a warm-up thread and the play loop never race to start two.
     """
 
-    def __init__(self, model_id: str) -> None:
-        self.model_id = model_id
+    label = "worker"
+    ready_timeout = 120.0
+
+    def __init__(self) -> None:
         self._proc: subprocess.Popen | None = None
+        self._lock = threading.Lock()
+
+    def _command(self) -> list[str] | None:
+        """The argv to start the process, or None (already logged) when it cannot start."""
+        raise NotImplementedError
 
     def _alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
     def _start(self) -> bool:
-        model_dir = SHERPA_MODELS_DIR / self.model_id
-        if not model_dir.is_dir():
-            debug(f"sherpa worker: model dir missing: {model_dir}")
+        cmd = self._command()
+        if cmd is None:
             return False
-        if not _sherpa_available():
-            debug(f"sherpa worker: venv not bootstrapped at {SHERPA_VENV_DIR}")
-            return False
-
         try:
             proc = subprocess.Popen(
-                [
-                    str(_sherpa_python()),
-                    "-m", "claude_code_tts.sherpa_speak",
-                    "--serve",
-                    "--model-dir", str(model_dir),
-                ],
+                cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env=_sherpa_env(),
+                env=_venv_env(),
             )
-            # Wait up to 120s for model load — no-data after that means a hang.
             assert proc.stdout is not None
-            ready = select.select([proc.stdout], [], [], 120.0)[0]
+            ready = select.select([proc.stdout], [], [], self.ready_timeout)[0]
             if not ready:
-                debug("sherpa worker: timed out waiting for ready signal (>120s)")
+                debug(f"{self.label}: timed out waiting for ready signal (>{self.ready_timeout:.0f}s)")
                 proc.terminate()
                 return False
             ready_line = proc.stdout.readline()
             try:
                 resp = json.loads(ready_line)
             except (json.JSONDecodeError, TypeError):
-                debug(f"sherpa worker: unexpected ready response: {ready_line!r}")
+                debug(f"{self.label}: unexpected ready response: {ready_line!r}")
                 proc.terminate()
                 return False
             if not resp.get("ready"):
-                debug(f"sherpa worker: failed to start: {resp.get('error')}")
+                debug(f"{self.label}: failed to start: {resp.get('error')}")
                 proc.terminate()
                 return False
             self._proc = proc
-            debug(f"sherpa worker started for model {self.model_id} (PID {proc.pid})")
+            debug(f"{self.label} started (PID {proc.pid})")
             return True
         except OSError as e:
-            debug(f"sherpa worker start failed: {e}")
+            debug(f"{self.label} start failed: {e}")
             return False
+
+    def ensure_started(self) -> bool:
+        with self._lock:
+            return self._alive() or self._start()
+
+    def request(self, req: dict) -> dict | None:
+        """Send one request and return its response, or None on any failure."""
+        with self._lock:
+            if not self._alive() and not self._start():
+                return None
+            try:
+                assert self._proc and self._proc.stdin and self._proc.stdout
+                self._proc.stdin.write(json.dumps(req) + "\n")
+                self._proc.stdin.flush()
+                resp = json.loads(self._proc.stdout.readline())
+                return resp if isinstance(resp, dict) else None
+            except (OSError, json.JSONDecodeError, AssertionError) as e:
+                debug(f"{self.label}: communication error: {e}")
+                if self._proc:
+                    try:
+                        self._proc.terminate()
+                    except Exception:
+                        pass
+                    self._proc = None
+                return None
+
+
+class _SherpaWorker(_JsonLineWorker):
+    """Persistent sherpa-onnx subprocess: model loaded once, reused per request."""
+
+    label = "sherpa worker"
+
+    def __init__(self, model_id: str) -> None:
+        super().__init__()
+        self.model_id = model_id
+
+    def _command(self) -> list[str] | None:
+        model_dir = SHERPA_MODELS_DIR / self.model_id
+        if not model_dir.is_dir():
+            debug(f"sherpa worker: model dir missing: {model_dir}")
+            return None
+        if not _sherpa_available():
+            debug(f"sherpa worker: venv not bootstrapped at {SHERPA_VENV_DIR}")
+            return None
+        return [
+            str(_sherpa_python()),
+            "-m", "claude_code_tts.sherpa_speak",
+            "--serve",
+            "--model-dir", str(model_dir),
+        ]
 
     def generate(self, text: str, *, speaker: int, speed: float, output_path: Path) -> bool:
-        if not self._alive():
-            if not self._start():
-                return False
-
-        req = json.dumps({
-            "text": text,
-            "output": str(output_path),
-            "speaker": speaker,
-            "speed": speed,
-        })
-        try:
-            assert self._proc and self._proc.stdin and self._proc.stdout
-            self._proc.stdin.write(req + "\n")
-            self._proc.stdin.flush()
-            resp_line = self._proc.stdout.readline()
-            resp = json.loads(resp_line)
-            if resp.get("ok"):
-                return True
-            debug(f"sherpa worker: generation failed: {resp.get('error')}")
+        resp = self.request({"text": text, "output": str(output_path), "speaker": speaker, "speed": speed})
+        if resp is None:
             return False
-        except (OSError, json.JSONDecodeError, AssertionError) as e:
-            debug(f"sherpa worker: communication error: {e}")
-            if self._proc:
-                try:
-                    self._proc.terminate()
-                except Exception:
-                    pass
-                self._proc = None
-            return False
+        if resp.get("ok"):
+            return True
+        debug(f"sherpa worker: generation failed: {resp.get('error')}")
+        return False
 
 
 _sherpa_workers: dict[str, _SherpaWorker] = {}
@@ -197,6 +227,105 @@ def warm_sherpa_workers(personas: dict) -> None:
             if not worker._alive():
                 debug(f"warming sherpa worker for model: {model_id}")
                 worker._start()  # blocks until model is loaded
+
+
+def _mlx_python() -> Path:
+    """Path to the Python interpreter inside the mlx venv."""
+    return MLX_VENV_DIR / "bin" / "python"
+
+
+def _mlx_available() -> bool:
+    """True iff `claude-tts-install --enable-mlx` has run here. Never bootstraps from the speak path."""
+    return _mlx_python().is_file()
+
+
+class _MlxWorker(_JsonLineWorker):
+    """Persistent mlx-audio subprocess: one model held in memory per Hugging Face id.
+
+    The first start of a model not yet in the Hugging Face cache downloads
+    it, which can take minutes; `claude-tts mlx pull <id>` does that ahead
+    of time, so the long ready timeout is a last resort, not the plan.
+    """
+
+    label = "mlx worker"
+    ready_timeout = 600.0
+
+    def __init__(self, model_id: str) -> None:
+        super().__init__()
+        self.model_id = model_id
+
+    def _command(self) -> list[str] | None:
+        if not _mlx_available():
+            debug(f"mlx worker: venv not bootstrapped at {MLX_VENV_DIR} (claude-tts-install --enable-mlx)")
+            return None
+        return [
+            str(_mlx_python()),
+            "-m", "claude_code_tts.mlx_speak",
+            "--serve",
+            "--model", self.model_id,
+        ]
+
+    def generate(self, text: str, *, voice: str, speed: float, lang_code: str, output_path: Path) -> bool:
+        resp = self.request({
+            "text": text, "output": str(output_path),
+            "voice": voice, "speed": speed, "lang_code": lang_code,
+        })
+        if resp is None:
+            return False
+        if resp.get("ok"):
+            return True
+        debug(f"mlx worker: generation failed: {resp.get('error')}")
+        return False
+
+
+_mlx_workers: dict[str, _MlxWorker] = {}
+
+
+def _get_mlx_worker(model_id: str) -> _MlxWorker:
+    if model_id not in _mlx_workers:
+        _mlx_workers[model_id] = _MlxWorker(model_id)
+    return _mlx_workers[model_id]
+
+
+def warm_mlx_workers(personas: dict) -> list[str]:
+    """Start an mlx worker for every persona with voice_mlx set; returns the models that came up.
+
+    Meant for a background thread at daemon start: a model load takes
+    seconds from the cache and minutes on first download, and the play
+    loop must not wait on either.
+    """
+    if not _mlx_available():
+        return []
+    ready: list[str] = []
+    seen: set[str] = set()
+    for persona_config in personas.values():
+        model_id = persona_config.get("voice_mlx", "")
+        if model_id and model_id not in seen:
+            seen.add(model_id)
+            debug(f"warming mlx worker for model: {model_id}")
+            if _get_mlx_worker(model_id).ensure_started():
+                ready.append(model_id)
+    return ready
+
+
+def _generate_mlx(
+    text: str,
+    *,
+    model_id: str,
+    voice: str,
+    speed: float,
+    lang_code: str,
+    output_path: Path,
+) -> Path | None:
+    """Generate speech via the persistent mlx worker (model stays in memory)."""
+    if not _mlx_available():
+        debug(f"mlx: venv not bootstrapped at {MLX_VENV_DIR}")
+        return None
+    worker = _get_mlx_worker(model_id)
+    if worker.generate(text, voice=voice, speed=speed, lang_code=lang_code, output_path=output_path):
+        if output_path.exists():
+            return output_path
+    return None
 
 
 def _generate_sherpa(
@@ -264,6 +393,9 @@ def generate_speech(
     voice_kokoro_blend: str = "",
     voice_sherpa: str = "",
     speaker_sherpa: int = -1,
+    voice_mlx: str = "",
+    speaker_mlx: str = "",
+    lang_mlx: str = "",
     speed: float = 2.0,
     speed_method: str = "",
     speaker: int | None = None,
@@ -314,7 +446,24 @@ def generate_speech(
         except (subprocess.TimeoutExpired, OSError):
             pass
 
-    # Priority 3: Sherpa-onnx (opt-in per persona via voice_sherpa).
+    # Priority 3: mlx-audio (opt-in per persona via voice_mlx; Apple silicon).
+    # Speed follows the Piper rule: synthesised into the audio only when the
+    # persona's speed_method is length_scale, otherwise applied at playback,
+    # because not every mlx model honours a speed argument.
+    if voice_mlx:
+        wav = _generate_mlx(
+            text,
+            model_id=voice_mlx,
+            voice=speaker_mlx,
+            speed=speed if speed_method == "length_scale" and speed > 0 else 1.0,
+            lang_code=lang_mlx,
+            output_path=output_path,
+        )
+        if wav:
+            _apply_pitch_filter(wav, pitch_filter)
+            return wav
+
+    # Priority 4: Sherpa-onnx (opt-in per persona via voice_sherpa).
     # Existing personas have voice_sherpa="" and never enter this branch —
     # they continue to use Piper / Kokoro exactly as before. New personas
     # set voice_sherpa to a model dir name under SHERPA_MODELS_DIR.
@@ -330,7 +479,7 @@ def generate_speech(
             _apply_pitch_filter(wav, pitch_filter)
             return wav
 
-    # Priority 4: Piper
+    # Priority 5: Piper
     if not shutil.which("piper"):
         _set_last_error(f"piper not on PATH ({os.environ.get('PATH', '')})")
     elif not (voice_path and voice_path.exists()):
@@ -416,6 +565,9 @@ def speak_direct(text: str, config: TTSConfig) -> None:
         voice_kokoro_blend=config.voice_kokoro_blend,
         voice_sherpa=config.voice_sherpa,
         speaker_sherpa=config.speaker_sherpa,
+        voice_mlx=config.voice_mlx,
+        speaker_mlx=config.speaker_mlx,
+        lang_mlx=config.lang_mlx,
         speed=config.speed,
         speed_method=effective_method,
         pitch_filter=config.pitch_filter,
@@ -454,6 +606,9 @@ def write_queue_message(text: str, config: TTSConfig) -> Path:
         "voice_kokoro_blend": config.voice_kokoro_blend,
         "voice_sherpa": config.voice_sherpa,
         "speaker_sherpa": config.speaker_sherpa,
+        "voice_mlx": config.voice_mlx,
+        "speaker_mlx": config.speaker_mlx,
+        "lang_mlx": config.lang_mlx,
         "pitch_filter": config.pitch_filter,
     }
 

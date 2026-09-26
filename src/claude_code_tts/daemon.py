@@ -25,7 +25,7 @@ from datetime import datetime
 from io import TextIOWrapper
 from pathlib import Path
 
-from claude_code_tts.audio import detect_player, warm_sherpa_workers
+from claude_code_tts.audio import detect_player, warm_mlx_workers, warm_sherpa_workers
 from claude_code_tts.audio import generate_speech as _generate_speech
 from claude_code_tts.audio import last_error as audio_last_error
 from claude_code_tts.bridge import (
@@ -103,8 +103,9 @@ def resolve_piper_voice(persona: str, persona_config: dict, *, other_engine: boo
 def describe_voice(persona: str, persona_config: dict, voice_kokoro: str = "", voice_kokoro_blend: str = "") -> str:
     """One token naming the engine and voice a message will play with, for the log.
 
-    `kokoro:<voice>`, `sherpa:<model>[#speaker]`, or the Piper voice name,
-    with ` (fallback)` when the default is standing in for a missing model.
+    `kokoro:<voice>`, `mlx:<model>[#voice]`, `sherpa:<model>[#speaker]`, or
+    the Piper voice name, with ` (fallback)` when the default is standing in
+    for a missing model.
     """
     blend = voice_kokoro_blend or persona_config.get("voice_kokoro_blend", "")
     kokoro = voice_kokoro or persona_config.get("voice_kokoro", "")
@@ -112,6 +113,10 @@ def describe_voice(persona: str, persona_config: dict, voice_kokoro: str = "", v
         return f"kokoro:{blend}"
     if kokoro:
         return f"kokoro:{kokoro}"
+    mlx = persona_config.get("voice_mlx", "")
+    if mlx:
+        speaker_mlx = persona_config.get("speaker_mlx", "")
+        return f"mlx:{mlx}" + (f"#{speaker_mlx}" if speaker_mlx else "")
     sherpa = persona_config.get("voice_sherpa", "")
     if sherpa:
         speaker = int(persona_config.get("speaker_sherpa", -1))
@@ -422,9 +427,12 @@ def daemon_generate_speech(
     speed_method = persona_config.get("speed_method", "playback")
     voice_sherpa = persona_config.get("voice_sherpa", "")
     speaker_sherpa = int(persona_config.get("speaker_sherpa", -1))
+    voice_mlx = persona_config.get("voice_mlx", "")
+    speaker_mlx = persona_config.get("speaker_mlx", "")
+    lang_mlx = persona_config.get("lang_mlx", "")
     pitch_filter = persona_config.get("pitch_filter", "")
     voice_name, _ = resolve_piper_voice(
-        persona, persona_config, other_engine=bool(voice_sherpa or kokoro_voice)
+        persona, persona_config, other_engine=bool(voice_sherpa or voice_mlx or kokoro_voice)
     )
     voice_path = VOICES_DIR / f"{voice_name}.onnx"
 
@@ -444,6 +452,9 @@ def daemon_generate_speech(
         voice_kokoro_blend=kokoro_blend,
         voice_sherpa=voice_sherpa,
         speaker_sherpa=speaker_sherpa,
+        voice_mlx=voice_mlx,
+        speaker_mlx=speaker_mlx,
+        lang_mlx=lang_mlx,
         speed=speed,
         speed_method=speed_method,
         output_path=output_file,
@@ -1230,6 +1241,14 @@ def daemon_loop(lockpick: bool = False) -> None:
         log("Pre-warming sherpa worker(s)...")
         warm_sherpa_workers(personas)
         log("Sherpa worker(s) ready")
+    if any(p.get("voice_mlx") for p in personas.values()):
+        # A model load takes seconds from the cache and minutes on a first
+        # download; playback must not wait for it, so warm in the background.
+        def _warm_mlx() -> None:
+            ready = warm_mlx_workers(personas)
+            log(f"mlx worker(s) ready: {', '.join(ready) if ready else 'none (see debug.log)'}")
+
+        threading.Thread(target=_warm_mlx, name="mlx-warm", daemon=True).start()
 
     ledger = PauseLedger()
     if startup_state.get("paused") and startup_state.get("paused_by") != "mic":

@@ -135,6 +135,9 @@ src/claude_code_tts/
   bridge.py                # Opt-in loopback HTTP bridge (browser pages -> queue, timing marks)
   install.py               # Installer (hooks, voices, service)
   release.py               # Release: preflight, gate, signed tag with notes, push, verify on GitHub
+  sherpa_speak.py          # sherpa-onnx worker, run by its isolated venv's Python
+  mlx_speak.py             # mlx-audio worker, run by its isolated venv's Python (Apple silicon)
+  mlx_catalog.py           # Curated mlx models with licenses checked on Hugging Face
 hooks/
   speak-response.sh        # Thin shim -> claude-tts speak --from-hook
   speak-intermediate.sh    # Thin shim -> claude-tts speak --from-hook
@@ -151,6 +154,7 @@ docs/
   voice-notes.md           # Voice compatibility knowledge base
   hotkey-setup.md          # Pause/resume hotkey setup guide
   http-bridge.md           # HTTP bridge contract (routes, marks, threat model)
+  mlx-backend.md           # mlx-audio backend: enable, pull, persona keys, speed rule, licenses
   what-and-why.md          # What the system does and why, with no how; the fixed points for any redesign
 ```
 
