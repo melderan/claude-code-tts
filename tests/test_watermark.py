@@ -352,6 +352,55 @@ class TestAsyncHookClaims:
         assert state.read_text() == "15"
 
 
+class TestTranscriptGrowsDuringHook:
+    """Lines written between the line count and the scan are covered by the watermark.
+
+    Seen 2026-09-26 in the debug log: a PostToolUse hook counted 1833 lines,
+    the scan then read a text at index 1834 and spoke it, and the watermark
+    was written as 1833. The next hook found index 1834 again and spoke it
+    a second time, 20 s later.
+    """
+
+    def _grow_before_scan(self, transcript, monkeypatch):
+        import claude_code_tts.cli as cli
+        real_scan = cli._scan_transcript
+        grown = False
+
+        def scan_after_growth(path, watermark, hook_type):
+            nonlocal grown
+            if not grown:
+                grown = True
+                with open(transcript, "a") as f:
+                    for line in (_assistant_msg("m1", "text written while the hook was counting"),
+                                 _tool_use("m1"), _tool_result()):
+                        f.write(json.dumps(line) + "\n")
+            return real_scan(path, watermark, hook_type)
+
+        monkeypatch.setattr("claude_code_tts.cli._scan_transcript", scan_after_growth)
+
+    def test_post_tool_use_covers_lines_the_scan_read(self, tmp_path, fake_state_dir, monkeypatch):
+        transcript = tmp_path / "projects" / "-Users-dev" / "uuid-G.jsonl"
+        _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
+        _run_hook(transcript, "stop")
+        with open(transcript, "a") as f:
+            f.write(json.dumps(_user("go")) + "\n")
+
+        self._grow_before_scan(transcript, monkeypatch)
+        assert _run_hook(transcript, "post_tool_use") == "text written while the hook was counting"
+        assert _run_hook(transcript, "post_tool_use") is None
+
+    def test_stop_covers_lines_the_scan_read(self, tmp_path, fake_state_dir, monkeypatch):
+        transcript = tmp_path / "projects" / "-Users-dev" / "uuid-H.jsonl"
+        _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
+        _run_hook(transcript, "stop")
+        with open(transcript, "a") as f:
+            f.write(json.dumps(_user("go")) + "\n")
+
+        self._grow_before_scan(transcript, monkeypatch)
+        assert _run_hook(transcript, "stop") == "text written while the hook was counting"
+        assert _run_hook(transcript, "post_tool_use") is None
+
+
 class TestStopSpeaksUnspokenIntermediates:
     def _transcript_with_missed_intermediates(self, tmp_path, name):
         transcript = tmp_path / "projects" / "-Users-dev" / f"{name}.jsonl"
