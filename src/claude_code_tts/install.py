@@ -2385,6 +2385,56 @@ def _verify_mlx_import(venv_python: Path) -> tuple[bool, str]:
         return False, str(e)
 
 
+SPACY_EN_MODEL = "en_core_web_sm"
+
+
+def _spacy_model_present(venv_python: Path) -> bool | None:
+    """Whether spaCy's English model is installed in the venv; None when the probe itself fails."""
+    try:
+        result = subprocess.run(
+            [str(venv_python), "-c",
+             f"import spacy, sys; sys.exit(0 if spacy.util.is_package({SPACY_EN_MODEL!r}) else 1)"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
+
+
+def _ensure_spacy_model(venv_python: Path) -> bool:
+    """Fetch spaCy's English model into the venv unless it is there.
+
+    Kokoro's English text processing (misaki) calls spaCy's downloader for
+    it on first use, and that downloader runs pip, which a bare uv venv
+    lacks; so the venv is seeded with pip and the model is fetched here,
+    where a failure can be seen, not at the first spoken message.
+    """
+    if _spacy_model_present(venv_python):
+        success(f"spaCy {SPACY_EN_MODEL} already present")
+        return True
+    info(f"Fetching spaCy {SPACY_EN_MODEL} for Kokoro's English text processing...")
+    result = None
+    try:
+        result = subprocess.run(
+            [str(venv_python), "-m", "spacy", "download", SPACY_EN_MODEL],
+            capture_output=True, text=True, timeout=900,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        warn(f"spaCy model download did not run: {e}")
+    if result is not None and result.returncode == 0:
+        success(f"spaCy {SPACY_EN_MODEL} installed")
+        return True
+    if result is not None:
+        warn(f"spaCy model download failed (exit {result.returncode}): {(result.stderr or result.stdout).strip()[:300]}")
+    print("  Kokoro English will not work until it is there. Fetch it by hand with:")
+    print(f"    {venv_python} -m spacy download {SPACY_EN_MODEL}")
+    return False
+
+
 def do_enable_mlx(*, assume_yes: bool = False, dry_run: bool = False) -> int:
     """Bootstrap the mlx-audio backend in an isolated venv.
 
@@ -2408,6 +2458,8 @@ def do_enable_mlx(*, assume_yes: bool = False, dry_run: bool = False) -> int:
         ok, info_msg = _verify_mlx_import(venv_py)
         if ok:
             success(f"mlx-audio already installed at {venv_dir} (v{info_msg})")
+            if not dry_run:
+                _ensure_spacy_model(venv_py)
             print()
             print("  Fetch a model:   claude-tts mlx pull kokoro")
             print("  Try a voice:     claude-tts speak --voice-mlx kokoro --speaker-mlx af_heart \"hello\"")
@@ -2429,8 +2481,9 @@ def do_enable_mlx(*, assume_yes: bool = False, dry_run: bool = False) -> int:
         return 3
 
     print("This will:")
-    print(f"  • Create a Python 3.12 venv at {venv_dir}")
+    print(f"  • Create a Python 3.12 venv at {venv_dir} (seeded with pip, which spaCy's downloader needs)")
     print(f"  • Install {' and '.join(MLX_PACKAGES)} into it (a few hundred MB)")
+    print(f"  • Fetch spaCy's {SPACY_EN_MODEL} into it, for Kokoro's English text processing")
     print("  • Touch nothing outside ~/.claude-tts/")
     print("  • Download no models; `claude-tts mlx pull <id>` does that into the Hugging Face cache")
     print()
@@ -2439,8 +2492,9 @@ def do_enable_mlx(*, assume_yes: bool = False, dry_run: bool = False) -> int:
     print()
 
     if dry_run:
-        dry(f"uv venv {venv_dir} --python 3.12")
+        dry(f"uv venv {venv_dir} --python 3.12 --seed")
         dry(f"uv pip install --python {venv_py} {' '.join(MLX_PACKAGES)}")
+        dry(f"{venv_py} -m spacy download {SPACY_EN_MODEL}")
         return 0
 
     if not _ask_yes_no("Proceed with bootstrap?", default_yes=True, assume_yes=assume_yes):
@@ -2451,7 +2505,7 @@ def do_enable_mlx(*, assume_yes: bool = False, dry_run: bool = False) -> int:
     venv_dir.parent.mkdir(parents=True, exist_ok=True)
     try:
         subprocess.run(
-            ["uv", "venv", str(venv_dir), "--python", "3.12"],
+            ["uv", "venv", str(venv_dir), "--python", "3.12", "--seed"],
             check=True, capture_output=True, text=True,
         )
     except subprocess.CalledProcessError as e:
@@ -2473,6 +2527,7 @@ def do_enable_mlx(*, assume_yes: bool = False, dry_run: bool = False) -> int:
         error(f"Bootstrap completed but mlx_audio import failed: {info_msg}")
         return 6
     success(f"mlx-audio {info_msg} installed and verified.")
+    _ensure_spacy_model(venv_py)
 
     print()
     print(f"{Colors.GREEN}Next steps:{Colors.NC}")

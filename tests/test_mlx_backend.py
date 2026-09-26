@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -101,6 +102,37 @@ class TestMlxRouting:
         assert cmd[0] == str(fake_mlx_venv / "bin" / "python")
         assert cmd[1:] == ["-m", "claude_code_tts.mlx_speak", "--serve", "--model", "mlx-community/Kokoro-82M-bf16"]
 
+    def test_get_worker_returns_one_object_per_model(self, fake_mlx_venv):
+        assert audio._get_mlx_worker("m") is audio._get_mlx_worker("m")
+        assert audio._get_mlx_worker("m") is not audio._get_mlx_worker("n")
+
+    def test_failures_leave_an_actionable_last_error(self, tmp_path, monkeypatch, fake_mlx_venv, worker_logs):
+        class FailingWorker:
+            def generate(self, *a, **k):
+                return False
+
+            def log_path(self):
+                return worker_logs / "mlx-worker.log"
+
+        voice = tmp_path / "en_US-hfc_male-medium.onnx"
+        with patch("claude_code_tts.audio._get_mlx_worker", return_value=FailingWorker()), \
+             patch("claude_code_tts.audio.shutil.which", side_effect=lambda n: "/usr/bin/piper" if n == "piper" else None):
+            assert generate_speech("hi", voice_mlx="m", voice_path=None, output_path=tmp_path / "o.wav") is None
+        assert audio.last_error().startswith("mlx worker for m produced no audio")
+        monkeypatch.setattr(audio, "MLX_VENV_DIR", tmp_path / "nowhere")
+        with patch("claude_code_tts.audio.shutil.which", return_value=None):
+            assert generate_speech("hi", voice_mlx="m", voice_path=voice, output_path=tmp_path / "o.wav") is None
+        assert audio.last_error().startswith("mlx backend not enabled")
+
+    def test_speak_direct_keeps_playback_speed_when_mlx_plays(self, fake_mlx_venv):
+        from claude_code_tts.config import TTSConfig
+        cfg = TTSConfig(voice_mlx="m", voice_sherpa="vctk", speed=2.0, speed_method="playback")
+        with patch("claude_code_tts.audio.generate_speech", return_value=Path("/tmp/x.wav")) as gen, \
+             patch("claude_code_tts.audio.play_audio") as play:
+            audio.speak_direct("hi", cfg)
+        assert gen.call_args.kwargs["speed_method"] == "playback"
+        assert play.call_args.kwargs["speed_method"] == "playback"
+
     def test_worker_command_is_none_without_venv(self, tmp_path, monkeypatch):
         monkeypatch.setattr(audio, "MLX_VENV_DIR", tmp_path / "nowhere")
         assert audio._MlxWorker("m")._command() is None
@@ -126,9 +158,10 @@ class TestMlxRouting:
 
 
 STAND_IN = '''
-import json, sys
+import json, sys, time
 args = sys.argv[1:]
 if "--fail-load" in args:
+    sys.stderr.write("Traceback: no such model\\n")
     print(json.dumps({"ready": False, "error": "no such model"}), flush=True); sys.exit(4)
 print(json.dumps({"ready": True, "model": args[args.index("--model") + 1]}), flush=True)
 for line in sys.stdin:
@@ -136,28 +169,87 @@ for line in sys.stdin:
     if req.get("text") == "explode":
         print(json.dumps({"ok": False, "error": "boom"}), flush=True)
         continue
+    if req.get("text") == "hang":
+        time.sleep(30)
+    if req.get("text") == "flood":
+        sys.stderr.write("x" * (5 * 1024 * 1024)); sys.stderr.flush()
     open(req["output"], "wb").write(b"RIFF")
     print(json.dumps({"ok": True, "echo": req}), flush=True)
 '''
 
 
+@pytest.fixture
+def worker_logs(tmp_path, monkeypatch):
+    monkeypatch.setattr(audio, "TTS_CONFIG_DIR", tmp_path / "tts")
+    return tmp_path / "tts" / "workers"
+
+
 class TestJsonLineWorkerProtocol:
     """The parent side of the worker protocol, against a stand-in child."""
 
-    def _worker(self, tmp_path, *extra):
+    def _worker(self, tmp_path, *extra, **overrides):
         script = tmp_path / "stand_in.py"
         script.write_text(STAND_IN)
+        starts = []
 
         class Worker(audio._JsonLineWorker):
             label = "stand-in worker"
             ready_timeout = 10.0
 
             def _command(self):
+                starts.append(time.monotonic())
                 return [sys.executable, str(script), "--model", "demo", *extra]
 
-        return Worker()
+        w = Worker()
+        for k, v in overrides.items():
+            setattr(w, k, v)
+        w.starts = starts  # type: ignore[attr-defined]
+        return w
 
-    def test_request_round_trip_and_restart_after_death(self, tmp_path):
+    def test_child_stderr_goes_to_a_log_file_not_a_pipe(self, tmp_path, worker_logs):
+        """5 MB of stderr in one request: a pipe nobody reads would deadlock here."""
+        w = self._worker(tmp_path)
+        out = tmp_path / "f.wav"
+        resp = w.request({"text": "flood", "output": str(out)})
+        assert resp and resp["ok"]
+        log = worker_logs / "stand-in-worker.log"
+        assert log.exists() and log.stat().st_size >= 5 * 1024 * 1024
+        w._stop(w._proc)
+
+    def test_request_timeout_kills_the_child(self, tmp_path, worker_logs):
+        w = self._worker(tmp_path, request_timeout=0.5)
+        started = time.monotonic()
+        assert w.request({"text": "hang", "output": str(tmp_path / "h.wav")}) is None
+        assert time.monotonic() - started < 5
+        assert w._proc is None
+        assert w.request({"text": "again", "output": str(tmp_path / "a.wav")})["ok"] is True
+        w._stop(w._proc)
+
+    def test_failed_start_backs_off(self, tmp_path, worker_logs):
+        w = self._worker(tmp_path, "--fail-load", start_backoff=0.3)
+        with patch("claude_code_tts.audio.debug") as dbg:
+            assert w.request({"text": "x", "output": "o"}) is None
+            assert w.request({"text": "x", "output": "o"}) is None
+        assert len(w.starts) == 1
+        assert any("not trying again" in str(c) for c in dbg.call_args_list)
+        assert any("Traceback: no such model" in str(c) for c in dbg.call_args_list)  # stderr tail in the log line
+        time.sleep(0.35)
+        assert w.request({"text": "x", "output": "o"}) is None
+        assert len(w.starts) == 2
+
+    def test_busy_worker_gives_up_instead_of_waiting(self, tmp_path, worker_logs):
+        w = self._worker(tmp_path, lock_wait=0.2)
+        w._lock.acquire()
+        try:
+            started = time.monotonic()
+            with patch("claude_code_tts.audio.debug") as dbg:
+                assert w.request({"text": "x", "output": "o"}) is None
+            assert time.monotonic() - started < 2
+            assert any("busy" in str(c) for c in dbg.call_args_list)
+        finally:
+            w._lock.release()
+
+    def test_request_round_trip_and_restart_after_death(self, tmp_path, worker_logs):
         w = self._worker(tmp_path)
         out = tmp_path / "a.wav"
         resp = w.request({"text": "hello", "output": str(out)})
@@ -170,13 +262,13 @@ class TestJsonLineWorkerProtocol:
         assert resp and resp["ok"]
         w._proc.terminate()
 
-    def test_failed_load_is_reported_once_and_returns_none(self, tmp_path):
+    def test_failed_load_is_reported_once_and_returns_none(self, tmp_path, worker_logs):
         w = self._worker(tmp_path, "--fail-load")
         with patch("claude_code_tts.audio.debug") as dbg:
             assert w.request({"text": "x", "output": str(tmp_path / "x.wav")}) is None
         assert any("failed to start: no such model" in str(c) for c in dbg.call_args_list)
 
-    def test_mlx_worker_generate_uses_the_protocol(self, tmp_path, fake_mlx_venv):
+    def test_mlx_worker_generate_uses_the_protocol(self, tmp_path, fake_mlx_venv, worker_logs):
         script = tmp_path / "stand_in.py"
         script.write_text(STAND_IN)
         w = audio._MlxWorker("demo")

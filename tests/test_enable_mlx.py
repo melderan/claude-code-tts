@@ -47,6 +47,8 @@ def _fake_run(version="0.5.6"):
             return MagicMock(returncode=0, stdout="", stderr="")
         if len(cmd_list) >= 3 and cmd_list[1] == "-c" and "mlx_audio" in cmd_list[2]:
             return MagicMock(returncode=0, stdout=f"{version}\n", stderr="")
+        if len(cmd_list) >= 3 and cmd_list[1] == "-c" and "spacy" in cmd_list[2]:
+            return MagicMock(returncode=1, stdout="", stderr="")  # model not present yet
         return MagicMock(returncode=0, stdout="", stderr="")
 
     run.calls = calls  # type: ignore[attr-defined]
@@ -86,11 +88,29 @@ class TestPromptDiscipline:
             assert install.do_enable_mlx(assume_yes=True) == 0
         mock_input.assert_not_called()
         joined = [" ".join(c) for c in run.calls]
-        assert any(s.startswith("uv venv") and s.endswith("--python 3.12") for s in joined)
+        assert any(s.startswith("uv venv") and s.endswith("--python 3.12 --seed") for s in joined)
         assert any("uv pip install" in s and "mlx-audio[tts]" in s and "misaki[en]" in s for s in joined)
+        assert any(s.endswith("-m spacy download en_core_web_sm") for s in joined)
         out = capsys.readouterr().out
         assert "mlx-audio 0.5.6 installed and verified" in out
+        assert "spaCy en_core_web_sm installed" in out
         assert "claude-tts mlx pull kokoro" in out
+
+    def test_spacy_download_failure_warns_but_keeps_exit_zero(self, fake_home, apple_silicon, have_uv, capsys):
+        run = _fake_run()
+        real = run
+
+        def failing_spacy(cmd, **kwargs):
+            cmd_list = list(cmd)
+            if cmd_list[1:4] == ["-m", "spacy", "download"]:
+                run.calls.append(cmd_list)
+                return MagicMock(returncode=1, stdout="", stderr="no network")
+            return real(cmd, **kwargs)
+
+        with patch.object(install.subprocess, "run", side_effect=failing_spacy):
+            assert install.do_enable_mlx(assume_yes=True) == 0
+        out = capsys.readouterr().out
+        assert "spaCy model download failed" in out and "-m spacy download en_core_web_sm" in out
 
     def test_no_aborts_cleanly(self, fake_home, apple_silicon, have_uv):
         with patch.object(install.subprocess, "run") as mock_run, patch("builtins.input", return_value="n"):

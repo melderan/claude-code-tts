@@ -1129,11 +1129,18 @@ def _extract_tarbz2(archive: Path, dest_parent: Path) -> Path | None:
 
 
 def _hf_cache_dir() -> Path:
-    """Where huggingface_hub keeps models: HF_HUB_CACHE, else HF_HOME/hub, else ~/.cache/huggingface/hub."""
+    """Where huggingface_hub keeps models: HF_HUB_CACHE, else HF_HOME/hub, else $XDG_CACHE_HOME/huggingface/hub.
+
+    A launchd daemon does not see variables set in a shell rc, so if any of
+    these are set for the shell only, `mlx pull` and the daemon's worker use
+    different caches and the first message downloads again.
+    """
     if os.environ.get("HF_HUB_CACHE"):
         return Path(os.environ["HF_HUB_CACHE"]).expanduser()
     if os.environ.get("HF_HOME"):
         return Path(os.environ["HF_HOME"]).expanduser() / "hub"
+    if os.environ.get("XDG_CACHE_HOME"):
+        return Path(os.environ["XDG_CACHE_HOME"]).expanduser() / "huggingface" / "hub"
     return Path.home() / ".cache" / "huggingface" / "hub"
 
 
@@ -1156,9 +1163,18 @@ def cmd_mlx(args: argparse.Namespace) -> None:
         apple = platform.system() == "Darwin" and platform.machine() == "arm64"
         print(f"Platform:   {platform.system()} {platform.machine()} ({'Apple silicon, MLX can run' if apple else 'MLX needs Apple silicon'})")
         if venv_py.is_file():
-            from claude_code_tts.install import _verify_mlx_import
+            from claude_code_tts.install import _spacy_model_present, _verify_mlx_import
             ok, msg = _verify_mlx_import(venv_py)
             print(f"mlx venv:   {MLX_VENV_DIR} ({'mlx-audio ' + msg if ok else 'import failed: ' + msg})")
+            if ok:
+                present = _spacy_model_present(venv_py)
+                if present:
+                    state = "present"
+                elif present is False:
+                    state = f"MISSING: {venv_py} -m spacy download en_core_web_sm"
+                else:
+                    state = "unknown"
+                print(f"spaCy en:   en_core_web_sm {state} (Kokoro English text processing)")
         else:
             print("mlx venv:   NOT enabled (run: claude-tts-install --enable-mlx)")
         print(f"HF cache:   {_hf_cache_dir()}")
@@ -1494,6 +1510,12 @@ def _explain_speech_failure() -> str:
     elif reason.startswith("voice model missing"):
         name = Path(reason.split(": ", 1)[1]).stem if ": " in reason else ""
         lines.append(f"  Download it:    claude-tts-install --voice {name}".rstrip())
+    elif reason.startswith("mlx backend not enabled"):
+        lines.append("  Enable it:      claude-tts-install --enable-mlx   (Apple silicon only)")
+    elif reason.startswith("mlx worker for "):
+        model = reason.split("mlx worker for ", 1)[1].split(" ", 1)[0]
+        lines.append(f"  Fetch the model first if you have not: claude-tts mlx pull {model}")
+        lines.append("  Worker log:     ~/.claude-tts/workers/mlx-worker.log")
     lines.append("  Details:        ~/.claude-tts/debug.log")
     return "\n".join(lines)
 
@@ -1611,6 +1633,8 @@ def cmd_speak(args: argparse.Namespace) -> None:
         or args.speaker is not None
         or getattr(args, "voice_sherpa", None)
         or getattr(args, "voice_mlx", None)
+        or getattr(args, "speaker_mlx", "")
+        or getattr(args, "lang_mlx", "")
         or getattr(args, "random", False)
     )
     if cfg.mode == "queue" and not _has_overrides:
@@ -1644,6 +1668,14 @@ def cmd_speak(args: argparse.Namespace) -> None:
         voice_kokoro = ""
         voice_kokoro_blend = ""
         voice_path = None
+    elif voice_mlx and (getattr(args, "speaker_mlx", "") or getattr(args, "lang_mlx", "")):
+        # The persona is already on mlx: the voice and language flags apply to this call.
+        from claude_code_tts.mlx_catalog import default_lang_for
+        if getattr(args, "speaker_mlx", ""):
+            speaker_mlx = args.speaker_mlx
+            lang_mlx = getattr(args, "lang_mlx", "") or default_lang_for(voice_mlx, speaker_mlx)
+        else:
+            lang_mlx = args.lang_mlx
 
     # CLI overrides for sherpa take precedence and disable other backends
     # for this one-shot call.

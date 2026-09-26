@@ -26,12 +26,25 @@ Hugging Face repository (a repository outside the catalog prints a reminder to c
 ## How it runs
 
 The daemon keeps one `mlx_speak.py --serve` process per model, in the venv, with the model in
-memory; requests and answers are JSON lines (the contract is in the module docstring). A model
-not yet in the cache is downloaded on that first start, which is why `mlx pull` comes first: the
-worker waits up to ten minutes for a ready line, and the play loop would wait with it. At daemon
-start, personas with `voice_mlx` are warmed in a background thread so playback never blocks on a
-load; `daemon.log` says `mlx worker(s) ready: ...` when they are up, and `debug.log` carries the
-`mlx worker:` lines when they are not.
+memory; requests and answers are JSON lines (the contract is in the module docstring). The worker
+keeps stdout for the protocol and points file descriptor 1 at stderr, because model code prints
+(Kokoro announces each language pipeline). The child's stderr goes to
+`~/.claude-tts/workers/mlx-worker.log`, truncated past 5 MB: model load times, download progress
+and tracebacks are there.
+
+A model not yet in the cache is downloaded on that first start, which is why `mlx pull` comes
+first: the worker waits up to ten minutes for a ready line. At daemon start, personas with
+`voice_mlx` are warmed in a background thread; `daemon.log` says `mlx worker(s) ready: ...` when
+they are up. A message for an mlx persona that arrives while its model is still loading does not
+wait: after five seconds it gives up on mlx and that one message falls through to the persona's
+Piper voice, with a `mlx worker: busy` line in `debug.log` (the `Speaking for` label still names
+mlx, since it records the intent). A request with no answer in two minutes kills the worker, and
+a failed start is not retried for a minute, so a broken model costs one attempt per minute, not
+ten minutes per message.
+
+`--enable-mlx` seeds the venv with pip and fetches spaCy's `en_core_web_sm`: Kokoro's English text
+processing (misaki) asks spaCy to download it on first use through pip, which a bare venv lacks.
+`claude-tts mlx status` reports whether the model is present.
 
 Persona keys:
 

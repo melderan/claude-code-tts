@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import os
 import struct
 import sys
 import time
@@ -90,12 +91,20 @@ def write_wav(path: Path, samples: Iterable[float], sample_rate: int) -> int:
     Samples are floats in [-1, 1] and are clipped, so a hot model cannot
     wrap around into clicks.
     """
-    frames = bytearray()
-    count = 0
-    for s in samples:
-        v = max(-1.0, min(1.0, s))
-        frames += struct.pack("<h", int(v * 32767))
-        count += 1
+    frames: bytes | bytearray
+    try:
+        import numpy as np  # ty: ignore[unresolved-import]  (present in the mlx venv)
+
+        arr = np.clip(np.asarray(list(samples), dtype="float32"), -1.0, 1.0)
+        frames = (arr * 32767).astype("<i2").tobytes()
+        count = int(arr.size)
+    except ImportError:
+        frames = bytearray()
+        count = 0
+        for s in samples:
+            v = max(-1.0, min(1.0, s))
+            frames += struct.pack("<h", int(v * 32767))
+            count += 1
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), "wb") as w:
         w.setnchannels(1)
@@ -134,17 +143,33 @@ def _load(model_id: str) -> Any:
     return load_model(model_id)
 
 
-def _serve_mode(model_id: str) -> int:
-    """Load the model once, then answer JSON-line requests until stdin closes."""
+def _serve_mode(model_id: str, proto: Any = None) -> int:
+    """Load the model once, then answer JSON-line requests until stdin closes.
+
+    The protocol needs stdout to itself, and model code prints there (Kokoro
+    announces each new language pipeline; a first download shows progress).
+    So the protocol is written to a private copy of the original stdout, and
+    file descriptor 1 is pointed at stderr for everything else, C code and
+    subprocesses included. Tests pass their own `proto` stream instead.
+    """
+    if proto is None:
+        proto = os.fdopen(os.dup(1), "w", buffering=1)
+        os.dup2(2, 1)
+        sys.stdout = sys.stderr
+
+    def send(obj: dict) -> None:
+        proto.write(json.dumps(obj) + "\n")
+        proto.flush()
+
     try:
         started = time.time()
         model = _load(model_id)
         print(f"mlx_speak: loaded {model_id} in {time.time() - started:.1f}s", file=sys.stderr, flush=True)
-    except Exception as e:  # any failure to load is one message to the parent
-        print(json.dumps({"ready": False, "error": f"{type(e).__name__}: {e}"}), flush=True)
+    except BaseException as e:  # any failure to load is one message to the parent
+        send({"ready": False, "error": f"{type(e).__name__}: {e}"})
         return 4
 
-    print(json.dumps({"ready": True, "model": model_id, "sample_rate": int(getattr(model, "sample_rate", 0) or 0)}), flush=True)
+    send({"ready": True, "model": model_id, "sample_rate": int(getattr(model, "sample_rate", 0) or 0)})
 
     for raw_line in sys.stdin:
         line = raw_line.strip()
@@ -153,15 +178,15 @@ def _serve_mode(model_id: str) -> int:
         try:
             req = json.loads(line)
         except json.JSONDecodeError as e:
-            print(json.dumps({"ok": False, "error": f"bad json: {e}"}), flush=True)
+            send({"ok": False, "error": f"bad json: {e}"})
             continue
         text = str(req.get("text", ""))
         output = str(req.get("output", ""))
         if not text.strip():
-            print(json.dumps({"ok": False, "error": "empty text"}), flush=True)
+            send({"ok": False, "error": "empty text"})
             continue
         if not output:
-            print(json.dumps({"ok": False, "error": "no output path"}), flush=True)
+            send({"ok": False, "error": "no output path"})
             continue
         try:
             seconds = synthesize(
@@ -171,9 +196,11 @@ def _serve_mode(model_id: str) -> int:
                 lang_code=str(req.get("lang_code", "")),
                 output=Path(output),
             )
-            print(json.dumps({"ok": True, "seconds": round(seconds, 2)}), flush=True)
-        except Exception as e:
-            print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"}), flush=True)
+            send({"ok": True, "seconds": round(seconds, 2)})
+        except KeyboardInterrupt:
+            return 0
+        except BaseException as e:  # SystemExit included: a library must not take the worker down
+            send({"ok": False, "error": f"{type(e).__name__}: {e}"})
     return 0
 
 

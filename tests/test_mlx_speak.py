@@ -119,7 +119,13 @@ class TestMain:
 
     def test_serve_mode_answers_requests(self, tmp_path, monkeypatch, capsys):
         import io
-        model = _Model([_Chunk([0.1, 0.2])])
+
+        class ChattyModel(_Model):
+            def generate(self, text, **kwargs):
+                print("Creating new KokoroPipeline for language: a")  # what Kokoro really does
+                return super().generate(text, **kwargs)
+
+        model = ChattyModel([_Chunk([0.1, 0.2])])
         monkeypatch.setattr(mlx_speak, "_load", lambda model_id: model)
         out = tmp_path / "s.wav"
         requests = [
@@ -130,8 +136,10 @@ class TestMain:
         ]
         stdin = "\n".join(r if isinstance(r, str) else __import__("json").dumps(r) for r in requests) + "\n"
         monkeypatch.setattr("sys.stdin", io.StringIO(stdin))
-        assert mlx_speak.main(["--model", "m", "--serve"]) == 0
-        lines = [__import__("json").loads(line) for line in capsys.readouterr().out.strip().splitlines()]
+        proto = io.StringIO()
+        assert mlx_speak._serve_mode("m", proto=proto) == 0
+        assert "KokoroPipeline" in capsys.readouterr().out  # the model's print went to the real stdout, not proto
+        lines = [__import__("json").loads(line) for line in proto.getvalue().strip().splitlines()]
         assert lines[0] == {"ready": True, "model": "m", "sample_rate": 24000}
         assert lines[1]["ok"] is True
         assert lines[2] == {"ok": False, "error": "empty text"}
@@ -140,9 +148,70 @@ class TestMain:
         assert model.calls[0]["voice"] == "bm_george" and model.calls[0]["lang_code"] == "b"
         assert Path(out).exists()
 
-    def test_serve_mode_reports_load_failure(self, monkeypatch, capsys):
+    def test_serve_mode_reports_load_failure(self, monkeypatch):
+        import io
+
         def boom(model_id):
-            raise OSError("offline")
+            raise SystemExit(3)  # spaCy's downloader can exit the interpreter
         monkeypatch.setattr(mlx_speak, "_load", boom)
-        assert mlx_speak.main(["--model", "m", "--serve"]) == 4
-        assert capsys.readouterr().out.strip() == '{"ready": false, "error": "OSError: offline"}'
+        proto = io.StringIO()
+        assert mlx_speak._serve_mode("m", proto=proto) == 4
+        assert proto.getvalue().strip() == '{"ready": false, "error": "SystemExit: 3"}'
+
+    def test_serve_mode_survives_a_request_that_exits(self, tmp_path, monkeypatch):
+        import io
+
+        class ExitingModel(_Model):
+            def generate(self, text, **kwargs):
+                raise SystemExit(1)
+        monkeypatch.setattr(mlx_speak, "_load", lambda model_id: ExitingModel([]))
+        req = __import__("json").dumps({"text": "hi", "output": str(tmp_path / "o.wav")})
+        monkeypatch.setattr("sys.stdin", io.StringIO(req + "\n"))
+        proto = io.StringIO()
+        assert mlx_speak._serve_mode("m", proto=proto) == 0
+        assert proto.getvalue().strip().splitlines()[1] == '{"ok": false, "error": "SystemExit: 1"}'
+
+
+FAKE_MLX_AUDIO_UTILS = '''
+import sys
+class Chunk:
+    def __init__(self, audio): self.audio = audio; self.sample_rate = 24000
+class Model:
+    sample_rate = 24000
+    def generate(self, text, voice=None, speed=1.0, lang_code="a"):
+        print("Creating new KokoroPipeline for language:", lang_code)   # stdout, like Kokoro
+        sys.stderr.write("loading voice\\n")
+        yield Chunk([0.0] * 240)
+def load_model(model_path, **kwargs):
+    print("stray stdout during load")
+    return Model()
+'''
+
+
+class TestServeSubprocess:
+    """The real worker process keeps stdout clean even when the model prints to it."""
+
+    def test_stdout_carries_only_protocol_lines(self, tmp_path):
+        import json
+        import os
+        import subprocess
+        import sys
+
+        pkg = tmp_path / "fake" / "mlx_audio" / "tts"
+        pkg.mkdir(parents=True)
+        (tmp_path / "fake" / "mlx_audio" / "__init__.py").write_text("")
+        (pkg / "__init__.py").write_text("")
+        (pkg / "utils.py").write_text(FAKE_MLX_AUDIO_UTILS)
+        src = Path(__file__).resolve().parent.parent / "src"
+        env = dict(os.environ, PYTHONPATH=f"{tmp_path / 'fake'}{os.pathsep}{src}")
+        out = tmp_path / "o.wav"
+        req = json.dumps({"text": "hello", "output": str(out), "voice": "af_heart", "lang_code": "a"})
+        proc = subprocess.run(
+            [sys.executable, "-m", "claude_code_tts.mlx_speak", "--serve", "--model", "demo"],
+            input=req + "\n", capture_output=True, text=True, timeout=60, env=env,
+        )
+        assert proc.returncode == 0, proc.stderr
+        lines = [json.loads(line) for line in proc.stdout.strip().splitlines()]
+        assert lines[0]["ready"] is True and lines[1]["ok"] is True
+        assert "stray stdout during load" in proc.stderr and "KokoroPipeline" in proc.stderr
+        assert out.exists()

@@ -1449,7 +1449,12 @@ def daemon_loop(lockpick: bool = False) -> None:
             pitch_filter_msg = msg.get("pitch_filter", "")
 
             # Sherpa applies speed during synthesis — don't also apply at playback
-            effective_speed_method = "length_scale" if persona_config.get("voice_sherpa") else speed_method
+            sherpa_plays = bool(persona_config.get("voice_sherpa")) and not (
+                voice_kokoro or voice_kokoro_blend
+                or persona_config.get("voice_kokoro") or persona_config.get("voice_kokoro_blend")
+                or persona_config.get("voice_mlx")
+            )
+            effective_speed_method = "length_scale" if sherpa_plays else speed_method
 
             # Apply tone speed factor
             effective_speed = speed * tone.speed_factor

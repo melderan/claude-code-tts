@@ -168,12 +168,38 @@ class TestSpeakVoiceMlx:
             main(["speak", "--voice-mlx", "kokoro", "--speaker-mlx", "bm_george", "--lang-mlx", "a", "hi"])
         assert gen.call_args.kwargs["lang_mlx"] == "a"
 
+    def test_speaker_flag_applies_to_an_mlx_persona(self, tts_home, patched_env):  # noqa: F811
+        main(["persona", "add", "k", "--mlx", "kokoro"])
+        cfg_file = tts_home / ".claude-tts" / "config.json"
+        config = json.loads(cfg_file.read_text())
+        config["active_persona"] = "k"  # global, since the speak path resolves the session on its own
+        cfg_file.write_text(json.dumps(config))
+        with patch("claude_code_tts.audio.generate_speech") as gen, patch("claude_code_tts.audio.play_audio"):
+            gen.return_value = tts_home / "o.wav"
+            main(["speak", "--speaker-mlx", "bf_emma", "hi"])
+        assert gen.call_args.kwargs["voice_mlx"] == "mlx-community/Kokoro-82M-bf16"
+        assert gen.call_args.kwargs["speaker_mlx"] == "bf_emma" and gen.call_args.kwargs["lang_mlx"] == "b"
+
     def test_piper_voice_flag_clears_mlx_from_persona(self, tts_home, patched_env):  # noqa: F811
         main(["persona", "add", "k", "--mlx", "kokoro", "--session"])
         with patch("claude_code_tts.audio.generate_speech") as gen, patch("claude_code_tts.audio.play_audio"):
             gen.return_value = tts_home / "o.wav"
             main(["speak", "--voice", "en_US-joe-medium", "hi"])
         assert gen.call_args.kwargs["voice_mlx"] == ""
+
+
+def test_hf_cache_dir_order(monkeypatch, tmp_path):
+    from claude_code_tts.cli import _hf_cache_dir
+    for var in ("HF_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    assert _hf_cache_dir() == tmp_path / ".cache" / "huggingface" / "hub"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    assert _hf_cache_dir() == tmp_path / "xdg" / "huggingface" / "hub"
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hfhome"))
+    assert _hf_cache_dir() == tmp_path / "hfhome" / "hub"
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    assert _hf_cache_dir() == tmp_path / "hub"
 
 
 def test_describe_voice_names_mlx(tmp_path):
