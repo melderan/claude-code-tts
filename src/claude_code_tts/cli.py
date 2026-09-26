@@ -446,6 +446,19 @@ def _persona_edit(args: argparse.Namespace, config: dict, sid: str) -> None:
     elif args.speaker is not None:
         print("--speaker applies to a sherpa model; give --sherpa MODEL with it")
         sys.exit(2)
+    if args.mlx:
+        from claude_code_tts.mlx_catalog import CATALOG, resolve_model
+        entry["voice_mlx"] = resolve_model(args.mlx)
+        catalog = CATALOG.get(args.mlx)
+        voice = args.mlx_voice or (catalog["default_voice"] if catalog else "")
+        lang = args.mlx_lang or (catalog["default_lang"] if catalog else "")
+        if voice:
+            entry["speaker_mlx"] = voice
+        if lang:
+            entry["lang_mlx"] = lang
+    elif args.mlx_voice or args.mlx_lang:
+        print("--mlx-voice and --mlx-lang apply to an mlx model; give --mlx MODEL with them")
+        sys.exit(2)
 
     personas[target] = entry
     if args.project:
@@ -466,6 +479,12 @@ def _persona_edit(args: argparse.Namespace, config: dict, sid: str) -> None:
         print(f"      Where the daemon runs: claude-tts-install --voice {args.voice}")
     if args.sherpa and not (SHERPA_MODELS_DIR / args.sherpa).is_dir():
         print(f"Note: sherpa model {args.sherpa} is not under {SHERPA_MODELS_DIR} on this machine.")
+    if args.mlx:
+        from claude_code_tts.config import MLX_VENV_DIR
+        if not (MLX_VENV_DIR / "bin" / "python").is_file():
+            print("Note: the mlx backend is not enabled on this machine (claude-tts-install --enable-mlx).")
+        elif not _hf_model_cached(entry["voice_mlx"]):
+            print(f"Note: {entry['voice_mlx']} is not fetched yet: claude-tts mlx pull {args.mlx}")
 
 
 def cmd_intermediate(args: argparse.Namespace) -> None:
@@ -1109,6 +1128,107 @@ def _extract_tarbz2(archive: Path, dest_parent: Path) -> Path | None:
         return None
 
 
+def _hf_cache_dir() -> Path:
+    """Where huggingface_hub keeps models: HF_HUB_CACHE, else HF_HOME/hub, else ~/.cache/huggingface/hub."""
+    if os.environ.get("HF_HUB_CACHE"):
+        return Path(os.environ["HF_HUB_CACHE"]).expanduser()
+    if os.environ.get("HF_HOME"):
+        return Path(os.environ["HF_HOME"]).expanduser() / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _hf_model_cached(repo: str) -> bool:
+    """True when the Hugging Face cache holds a snapshot of `repo`."""
+    snapshots = _hf_cache_dir() / f"models--{repo.replace('/', '--')}" / "snapshots"
+    return snapshots.is_dir() and any(snapshots.iterdir())
+
+
+def cmd_mlx(args: argparse.Namespace) -> None:
+    """Manage the mlx-audio backend: status, curated models, model download."""
+    from claude_code_tts.config import MLX_VENV_DIR
+    from claude_code_tts.mlx_catalog import CATALOG, list_ids, resolve_model
+
+    sub = getattr(args, "mlx_command", None) or "status"
+    venv_py = MLX_VENV_DIR / "bin" / "python"
+
+    if sub == "status":
+        import platform
+        apple = platform.system() == "Darwin" and platform.machine() == "arm64"
+        print(f"Platform:   {platform.system()} {platform.machine()} ({'Apple silicon, MLX can run' if apple else 'MLX needs Apple silicon'})")
+        if venv_py.is_file():
+            from claude_code_tts.install import _verify_mlx_import
+            ok, msg = _verify_mlx_import(venv_py)
+            print(f"mlx venv:   {MLX_VENV_DIR} ({'mlx-audio ' + msg if ok else 'import failed: ' + msg})")
+        else:
+            print("mlx venv:   NOT enabled (run: claude-tts-install --enable-mlx)")
+        print(f"HF cache:   {_hf_cache_dir()}")
+        print()
+        print("Catalog models in the cache:")
+        for entry in CATALOG.values():
+            mark = "cached" if _hf_model_cached(entry["hf_repo"]) else "not fetched"
+            print(f"  {entry['id']:<16} {entry['hf_repo']:<52} {mark}")
+        config = load_raw_config()
+        users = [(n, p.get("voice_mlx"), p.get("speaker_mlx", "")) for n, p in config.get("personas", {}).items() if p.get("voice_mlx")]
+        print()
+        if users:
+            print("Personas on mlx:")
+            for name, model, voice in users:
+                print(f"  {name}: {model}" + (f" voice {voice}" if voice else ""))
+        else:
+            print("No persona uses mlx yet: claude-tts persona add <name> --mlx kokoro --mlx-voice af_heart")
+        return
+
+    if sub == "list-available":
+        print("Curated mlx-audio models. License and size as the Hugging Face model card")
+        print("reported them on the date shown; models must be fetched with `claude-tts mlx pull <id>`.")
+        print()
+        for entry in CATALOG.values():
+            print(f"  {entry['id']}")
+            print(f"      repo:      {entry['hf_repo']}")
+            print(f"      engine:    {entry['engine']}    license: {entry['license_weights']}    size: {entry['size_mb']} MB    checked: {entry['checked']}")
+            print(f"      languages: {entry['languages']}")
+            print(f"      voices:    {entry['voices_hint']}")
+            if entry["default_voice"]:
+                print(f"      default:   --speaker-mlx {entry['default_voice']}" + (f" --lang-mlx {entry['default_lang']}" if entry["default_lang"] else ""))
+            print(f"      {entry['notes']}")
+            print()
+        return
+
+    if sub == "pull":
+        model_id = getattr(args, "model_id", None)
+        if not model_id:
+            print("Usage: claude-tts mlx pull <catalog id or Hugging Face repo>")
+            print("Catalog ids: " + ", ".join(list_ids()))
+            sys.exit(2)
+        repo = resolve_model(model_id)
+        if not venv_py.is_file():
+            print(f"mlx venv not enabled at {MLX_VENV_DIR}; run: claude-tts-install --enable-mlx")
+            sys.exit(2)
+        if _hf_model_cached(repo) and not getattr(args, "force", False):
+            print(f"{repo} is already in {_hf_cache_dir()} (use --force to refresh)")
+            return
+        chosen = CATALOG.get(model_id)
+        if chosen:
+            print(f"Fetching {repo} ({chosen['size_mb']} MB, {chosen['license_weights']}) into {_hf_cache_dir()}")
+        else:
+            print(f"Fetching {repo} into {_hf_cache_dir()} (not in the curated catalog: check its license yourself)")
+        code = (
+            "import sys; from huggingface_hub import snapshot_download; "
+            f"print(snapshot_download({repo!r}))"
+        )
+        result = subprocess.run([str(venv_py), "-c", code], text=True)
+        if result.returncode != 0:
+            print(f"Download failed (exit {result.returncode})")
+            sys.exit(result.returncode)
+        hint = f" --speaker-mlx {chosen['default_voice']}" if chosen and chosen["default_voice"] else ""
+        print(f'Done. Try it: claude-tts speak --voice-mlx {model_id}{hint} "hello there"')
+        return
+
+    print(f"Unknown mlx subcommand: {sub}")
+    print("Available: status, list-available, pull")
+    sys.exit(2)
+
+
 def _sherpa_install(model_id: str, *, assume_yes: bool = False) -> int:
     """Download, verify, and extract a curated sherpa model.
 
@@ -1490,6 +1610,7 @@ def cmd_speak(args: argparse.Namespace) -> None:
         or args.speed
         or args.speaker is not None
         or getattr(args, "voice_sherpa", None)
+        or getattr(args, "voice_mlx", None)
         or getattr(args, "random", False)
     )
     if cfg.mode == "queue" and not _has_overrides:
@@ -1504,9 +1625,25 @@ def cmd_speak(args: argparse.Namespace) -> None:
     voice_kokoro_blend = cfg.voice_kokoro_blend
     voice_sherpa = cfg.voice_sherpa
     speaker_sherpa = cfg.speaker_sherpa
+    voice_mlx = cfg.voice_mlx
+    speaker_mlx = cfg.speaker_mlx
+    lang_mlx = cfg.lang_mlx
     speed = cfg.speed
     speed_method = cfg.speed_method or "playback"
     speaker = None
+
+    # CLI overrides for mlx take precedence and disable other backends for
+    # this one-shot call; a catalog id resolves to its Hugging Face repo.
+    if getattr(args, "voice_mlx", None):
+        from claude_code_tts.mlx_catalog import CATALOG, resolve_model
+        catalog = CATALOG.get(args.voice_mlx)
+        voice_mlx = resolve_model(args.voice_mlx)
+        speaker_mlx = getattr(args, "speaker_mlx", "") or (catalog["default_voice"] if catalog else "")
+        lang_mlx = getattr(args, "lang_mlx", "") or (catalog["default_lang"] if catalog else "")
+        voice_sherpa = ""
+        voice_kokoro = ""
+        voice_kokoro_blend = ""
+        voice_path = None
 
     # CLI overrides for sherpa take precedence and disable other backends
     # for this one-shot call.
@@ -1515,6 +1652,7 @@ def cmd_speak(args: argparse.Namespace) -> None:
         speaker_sherpa = getattr(args, "speaker_sherpa", -1)
         voice_kokoro = ""
         voice_kokoro_blend = ""
+        voice_mlx = ""
         voice_path = None
 
     if args.voice:
@@ -1522,6 +1660,7 @@ def cmd_speak(args: argparse.Namespace) -> None:
         voice_kokoro = ""
         voice_kokoro_blend = ""
         voice_sherpa = ""
+        voice_mlx = ""
     if args.speed:
         speed = args.speed
     if args.speaker is not None:
@@ -1539,7 +1678,9 @@ def cmd_speak(args: argparse.Namespace) -> None:
             except (json.JSONDecodeError, OSError):
                 pass
 
-    if voice_sherpa:
+    if voice_mlx:
+        print(f"Voice: mlx/{voice_mlx}" + (f" {speaker_mlx}" if speaker_mlx else "") + (f" lang {lang_mlx}" if lang_mlx else ""))
+    elif voice_sherpa:
         print(f"Voice: sherpa/{voice_sherpa}")
         if speaker_sherpa >= 0:
             print(f"Speaker: {speaker_sherpa}")
@@ -1557,6 +1698,9 @@ def cmd_speak(args: argparse.Namespace) -> None:
         voice_kokoro_blend=voice_kokoro_blend,
         voice_sherpa=voice_sherpa,
         speaker_sherpa=speaker_sherpa,
+        voice_mlx=voice_mlx,
+        speaker_mlx=speaker_mlx,
+        lang_mlx=lang_mlx,
         speed=speed,
         speed_method=speed_method,
         speaker=speaker,
@@ -2871,6 +3015,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--kokoro", metavar="VOICE", help="add: Kokoro voice for swift-kokoro, e.g. af_heart")
     p.add_argument("--sherpa", metavar="MODEL", help="add: sherpa-onnx model dir name under ~/.claude-tts/sherpa-models")
     p.add_argument("--speaker", type=int, help="add: speaker id in a multi-speaker sherpa model")
+    p.add_argument("--mlx", metavar="MODEL", help="add: mlx-audio model, a catalog id (kokoro) or Hugging Face repo")
+    p.add_argument("--mlx-voice", metavar="NAME", help="add: voice preset for the mlx model, e.g. af_heart")
+    p.add_argument("--mlx-lang", metavar="CODE", help="add: language code for the mlx model, e.g. a (Kokoro American)")
     p.add_argument("--speed", type=float, help="add: speed 0.5-4.0 (default 2.0)")
     p.add_argument("--speed-method", choices=["playback", "length_scale"], help="add: how speed is applied (default playback)")
     p.add_argument("--description", help="add: one line about the voice")
@@ -2935,6 +3082,12 @@ def main(argv: list[str] | None = None) -> None:
                    help="Sherpa-onnx model id (a directory name under ~/.claude-tts/sherpa-models/)")
     p.add_argument("--speaker-sherpa", dest="speaker_sherpa", type=int, default=-1,
                    help="Speaker ID for multi-speaker sherpa models (-1 = model default)")
+    p.add_argument("--voice-mlx", dest="voice_mlx",
+                   help="mlx-audio model: a catalog id (kokoro) or Hugging Face repo; needs --enable-mlx")
+    p.add_argument("--speaker-mlx", dest="speaker_mlx", default="",
+                   help="Voice preset for the mlx model, e.g. af_heart (catalog default when omitted)")
+    p.add_argument("--lang-mlx", dest="lang_mlx", default="",
+                   help="Language code for the mlx model, e.g. a for Kokoro American English")
     p.add_argument("--from-file", metavar="PATH", help="Read and speak a file (zero context tokens)")
     p.add_argument("--preview", action="store_true", help="Show filtered text without speaking (use with --from-file)")
     p.add_argument("--reader", action="store_true", help="Side-by-side view: original | spoken (use with --from-file)")
@@ -3005,6 +3158,17 @@ def main(argv: list[str] | None = None) -> None:
     )
     sp_install.set_defaults(func=cmd_sherpa)
     p.set_defaults(func=cmd_sherpa)
+
+    # --- mlx ---
+    p = subparsers.add_parser("mlx", help="Manage the mlx-audio TTS backend (Apple silicon)")
+    mlx_sub = p.add_subparsers(dest="mlx_command")
+    mlx_sub.add_parser("status", help="Platform, venv, cached models and personas on mlx").set_defaults(func=cmd_mlx)
+    mlx_sub.add_parser("list-available", help="Curated models with their licenses").set_defaults(func=cmd_mlx)
+    mp = mlx_sub.add_parser("pull", help="Download a model into the Hugging Face cache ahead of use")
+    mp.add_argument("model_id", nargs="?", help="Catalog id (kokoro) or Hugging Face repo")
+    mp.add_argument("--force", action="store_true", help="Fetch again even when cached")
+    mp.set_defaults(func=cmd_mlx)
+    p.set_defaults(func=cmd_mlx)
 
     # --- random ---
     p = subparsers.add_parser("random", help="Generate a random TTS persona")

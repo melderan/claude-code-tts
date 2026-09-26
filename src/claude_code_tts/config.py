@@ -28,6 +28,7 @@ VOICES_DIR = HOME / ".local" / "share" / "piper-voices"
 DEFAULT_VOICE = "en_US-hfc_male-medium"
 SHERPA_VENV_DIR = TTS_CONFIG_DIR / "venvs" / "sherpa"
 SHERPA_MODELS_DIR = TTS_CONFIG_DIR / "sherpa-models"
+MLX_VENV_DIR = TTS_CONFIG_DIR / "venvs" / "mlx"
 PROJECTS_DIR = HOME / ".claude" / "projects"
 # The hook-side log lives next to the daemon log so it survives a sandbox
 # rebuild and is visible from every machine that shares ~/.claude-tts.
@@ -81,6 +82,13 @@ class TTSConfig:
     # multi-speaker models; -1 means "use the model's default".
     voice_sherpa: str = ""
     speaker_sherpa: int = -1
+    # mlx-audio backend (additive, opt-in per persona, Apple silicon only).
+    # voice_mlx is a Hugging Face model id ("mlx-community/Kokoro-82M-bf16"),
+    # speaker_mlx that model's voice preset ("af_heart"), lang_mlx its language
+    # code when it takes one (Kokoro: "a" American English, "b" British).
+    voice_mlx: str = ""
+    speaker_mlx: str = ""
+    lang_mlx: str = ""
     pitch_filter: str = ""  # ffmpeg -af filter applied after synthesis (e.g. for pitch shift)
     max_chars: int = 10000
     active_persona: str = "claude-prime"
@@ -299,6 +307,9 @@ def load_config(session_id: str | None = None) -> TTSConfig:
         cfg.voice_kokoro_blend = persona.get("voice_kokoro_blend", "")
         cfg.voice_sherpa = persona.get("voice_sherpa", "")
         cfg.speaker_sherpa = int(persona.get("speaker_sherpa", -1))
+        cfg.voice_mlx = persona.get("voice_mlx", "")
+        cfg.speaker_mlx = persona.get("speaker_mlx", "")
+        cfg.lang_mlx = persona.get("lang_mlx", "")
         cfg.pitch_filter = persona.get("pitch_filter", "")
 
     # Step 3: Determine mute state

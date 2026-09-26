@@ -234,6 +234,20 @@ Assign personas per-project so each repo has its own voice:
 }
 ```
 
+### mlx-audio backend (Apple silicon)
+
+Kokoro and a dozen other engines run natively on Apple silicon through [mlx-audio](https://github.com/Blaizzy/mlx-audio)
+(MIT), in an isolated venv the installer creates. It is opt-in per persona and changes nothing
+for existing voices. Full notes in `docs/mlx-backend.md`.
+
+```bash
+claude-tts-install --enable-mlx                     # Apple silicon only; sherpa runs everywhere
+claude-tts mlx list-available                       # curated models with licenses checked
+claude-tts mlx pull kokoro                          # fetch before the daemon needs it
+claude-tts speak --voice-mlx kokoro --speaker-mlx af_heart "hello there"
+claude-tts persona add lyra --mlx kokoro --mlx-voice bf_emma --mlx-lang b --project
+```
+
 ### Finding Your Voice
 
 ```bash
@@ -444,7 +458,7 @@ Releases created only from tags signed by the maintainer's GPG key, verified in 
 PRs welcome. Areas that could use attention:
 
 - **Voice-to-text integrations** — currently supports Handy; the watcher pattern generalizes to any app that logs recording state
-- **Kokoro TTS support** — partially implemented, needs polish
+- **Kokoro TTS support** — through swift-kokoro, sherpa-onnx, or the mlx-audio backend (`claude-tts-install --enable-mlx`)
 - **More voice models** — Piper has dozens of languages and voices
 - **Linux audio testing** — PulseAudio/PipeWire edge cases
 

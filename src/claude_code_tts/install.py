@@ -2348,6 +2348,143 @@ def do_enable_sherpa(*, assume_yes: bool = False, dry_run: bool = False) -> int:
     return 0
 
 
+# --- mlx-audio backend (additive, opt-in, Apple silicon) ---
+
+MLX_VENV_MIN_FREE_MB = 3000
+# mlx-audio[tts] brings the text front-ends the catalog's larger models need;
+# misaki[en] is Kokoro's English G2P (it depends on espeak-ng, GPLv3, which
+# the operator installs from PyPI here; this project does not redistribute it).
+MLX_PACKAGES = ["mlx-audio[tts]", "misaki[en]"]
+
+
+def _mlx_paths() -> tuple[Path, Path]:
+    """Return (venv_dir, venv_python) for the mlx backend, resolved without importing config."""
+    venv = Path.home() / ".claude-tts" / "venvs" / "mlx"
+    return venv, venv / "bin" / "python"
+
+
+def _mlx_platform_ok() -> bool:
+    """MLX runs on Apple silicon only."""
+    return platform.system() == "Darwin" and platform.machine() == "arm64"
+
+
+def _verify_mlx_import(venv_python: Path) -> tuple[bool, str]:
+    """Verify the venv's mlx-audio is importable. Returns (ok, version_or_error)."""
+    if not venv_python.is_file():
+        return False, "venv python not found"
+    try:
+        result = subprocess.run(
+            [str(venv_python), "-c",
+             "import mlx_audio; from importlib.metadata import version; print(version('mlx-audio'))"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode == 0:
+            return True, result.stdout.strip()
+        return False, result.stderr.strip()[:200]
+    except (subprocess.SubprocessError, OSError) as e:
+        return False, str(e)
+
+
+def do_enable_mlx(*, assume_yes: bool = False, dry_run: bool = False) -> int:
+    """Bootstrap the mlx-audio backend in an isolated venv.
+
+    Returns 0 on success, non-zero on failure; re-runnable, and reports
+    instead of reinstalling when the venv already imports mlx-audio.
+    Models are not downloaded here: `claude-tts mlx pull <id>` does that.
+    """
+    venv_dir, venv_py = _mlx_paths()
+
+    print(f"\n{Colors.MAGENTA}mlx-audio TTS backend{Colors.NC}")
+    print("=" * 60)
+    print("MIT, runs locally on Apple silicon through MLX, additive to existing personas.")
+    print("Existing personas are NOT changed; mlx is opt-in via voice_mlx on a persona.\n")
+
+    if not _mlx_platform_ok():
+        error(f"MLX needs macOS on Apple silicon; this is {platform.system()} {platform.machine()}.")
+        print("  The sherpa-onnx backend (claude-tts-install --enable-sherpa) runs everywhere.")
+        return 7
+
+    if venv_py.is_file():
+        ok, info_msg = _verify_mlx_import(venv_py)
+        if ok:
+            success(f"mlx-audio already installed at {venv_dir} (v{info_msg})")
+            print()
+            print("  Fetch a model:   claude-tts mlx pull kokoro")
+            print("  Try a voice:     claude-tts speak --voice-mlx kokoro --speaker-mlx af_heart \"hello\"")
+            print()
+            return 0
+        warn(f"venv exists at {venv_dir} but mlx_audio import failed: {info_msg}")
+        if not _ask_yes_no("Reinstall?", default_yes=True, assume_yes=assume_yes):
+            return 1
+
+    if not shutil.which("uv"):
+        error("`uv` is required to bootstrap the mlx venv but was not found on PATH.")
+        print("  Install uv: https://docs.astral.sh/uv/getting-started/installation/")
+        return 2
+
+    parent = venv_dir.parent
+    free = _free_mb(parent)
+    if free >= 0 and free < MLX_VENV_MIN_FREE_MB:
+        error(f"Only {free} MB free under {parent}; need at least {MLX_VENV_MIN_FREE_MB} MB.")
+        return 3
+
+    print("This will:")
+    print(f"  • Create a Python 3.12 venv at {venv_dir}")
+    print(f"  • Install {' and '.join(MLX_PACKAGES)} into it (a few hundred MB)")
+    print("  • Touch nothing outside ~/.claude-tts/")
+    print("  • Download no models; `claude-tts mlx pull <id>` does that into the Hugging Face cache")
+    print()
+    if free >= 0:
+        print(f"  Free disk:   {free} MB available")
+    print()
+
+    if dry_run:
+        dry(f"uv venv {venv_dir} --python 3.12")
+        dry(f"uv pip install --python {venv_py} {' '.join(MLX_PACKAGES)}")
+        return 0
+
+    if not _ask_yes_no("Proceed with bootstrap?", default_yes=True, assume_yes=assume_yes):
+        info("Aborted by user. No changes made.")
+        return 0
+
+    info(f"Creating venv at {venv_dir}...")
+    venv_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            ["uv", "venv", str(venv_dir), "--python", "3.12"],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        error(f"`uv venv` failed: {e.stderr.strip()[:300]}")
+        return 4
+
+    info(f"Installing {', '.join(MLX_PACKAGES)} into the venv (this is the slow step)...")
+    try:
+        subprocess.run(
+            ["uv", "pip", "install", "--python", str(venv_py), *MLX_PACKAGES],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        error(f"`uv pip install` failed: {e.stderr.strip()[:300]}")
+        return 5
+
+    ok, info_msg = _verify_mlx_import(venv_py)
+    if not ok:
+        error(f"Bootstrap completed but mlx_audio import failed: {info_msg}")
+        return 6
+    success(f"mlx-audio {info_msg} installed and verified.")
+
+    print()
+    print(f"{Colors.GREEN}Next steps:{Colors.NC}")
+    print("  1. claude-tts mlx list-available            # curated models with licenses")
+    print("  2. claude-tts mlx pull kokoro               # fetch Kokoro (389 MB) before the daemon needs it")
+    print('  3. claude-tts speak --voice-mlx kokoro --speaker-mlx af_heart "hello there"')
+    print("  4. claude-tts persona add <name> --mlx kokoro --mlx-voice af_heart --project")
+    print("  5. claude-tts daemon restart               # the daemon warms mlx workers at start")
+    print()
+    return 0
+
+
 # --- Main ---
 
 def main() -> None:
@@ -2437,6 +2574,11 @@ Examples:
         help="Bootstrap the sherpa-onnx TTS backend in an isolated venv (additive, opt-in)",
     )
     parser.add_argument(
+        "--enable-mlx",
+        action="store_true",
+        help="Bootstrap the mlx-audio TTS backend in an isolated venv (additive, opt-in, Apple silicon)",
+    )
+    parser.add_argument(
         "--no-daemon-restart",
         action="store_true",
         help="Leave the running daemon alone; the caller restarts it (used by `just up`)",
@@ -2462,6 +2604,8 @@ Examples:
         do_check()
     elif args.enable_sherpa:
         sys.exit(do_enable_sherpa(assume_yes=args.yes, dry_run=args.dry_run))
+    elif args.enable_mlx:
+        sys.exit(do_enable_mlx(assume_yes=args.yes, dry_run=args.dry_run))
     elif args.uninstall:
         do_uninstall(dry_run=args.dry_run)
     elif args.bootstrap:
