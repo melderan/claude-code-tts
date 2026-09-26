@@ -1701,8 +1701,12 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
         debug(f"{hook_type}: no new lines since last speak")
         return
 
-    # Scan transcript for assistant text
-    speakable = _speakable_messages(transcript, watermark, hook_type)
+    # Scan transcript for assistant text. Claude Code keeps appending while
+    # this hook runs, so the scan can read lines past `current_lines`; the
+    # watermark written below must cover everything the scan saw, or the
+    # next hook finds the same text again (heard twice, 20 s apart, 2026-09-26).
+    speakable, scanned_lines = _scan_transcript(transcript, watermark, hook_type)
+    current_lines = max(current_lines, scanned_lines)
     if not speakable:
         if hook_type == "stop":
             _write_watermark(state_file, lock_dir, current_lines)
@@ -1885,7 +1889,16 @@ class _MessageGroup:
 
 
 def _speakable_messages(transcript: Path, watermark: int, hook_type: str) -> list[tuple[int, str, str]]:
-    """Return (line_no, source, text) for each assistant message worth speaking.
+    """Return (line_no, source, text) for each assistant message worth speaking (see _scan_transcript)."""
+    return _scan_transcript(transcript, watermark, hook_type)[0]
+
+
+def _scan_transcript(transcript: Path, watermark: int, hook_type: str) -> tuple[list[tuple[int, str, str]], int]:
+    """Return speakable assistant messages and the number of transcript lines read.
+
+    Each message is (line_no, source, text), line_no being the 0-based index
+    of the line it was read from. The line count is what a watermark must be
+    set to so that every line this scan looked at counts as covered.
 
     Claude Code writes one transcript line per content block, so the blocks
     of one API response are grouped by message id here. A message is spoken
@@ -1902,15 +1915,15 @@ def _speakable_messages(transcript: Path, watermark: int, hook_type: str) -> lis
         with open(transcript) as f:
             all_lines = f.readlines()
     except OSError:
-        return []
+        return [], 0
 
     if hook_type == "stop" and watermark == 0:
         # No watermark: scan in reverse for last assistant message with text
         for idx in range(len(all_lines) - 1, -1, -1):
             text = _parse_assistant_text(all_lines[idx])
             if text:
-                return [(idx, "text", text)]
-        return []
+                return [(idx, "text", text)], len(all_lines)
+        return [], len(all_lines)
 
     order: list[str] = []
     groups: dict[str, _MessageGroup] = {}
@@ -1958,7 +1971,7 @@ def _speakable_messages(transcript: Path, watermark: int, hook_type: str) -> lis
             result.append((group.line, "text", " ".join(group.texts)))
         elif group.redacted and group.summaries:
             result.append((group.line, "thinking-summary", " ".join(group.summaries)))
-    return result
+    return result, len(all_lines)
 
 
 def _extract_assistant_text(transcript: Path, watermark: int, hook_type: str) -> str:
