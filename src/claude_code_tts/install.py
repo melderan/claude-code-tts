@@ -2405,24 +2405,56 @@ def _spacy_model_present(venv_python: Path) -> bool | None:
     return None
 
 
+# Printed by the venv's own spaCy, so the model version is the one its
+# compatibility table pairs with the spaCy it will load into.
+_SPACY_URL_PROBE = (
+    "import importlib; from spacy import about; "
+    "m = importlib.import_module('spacy.cli.download'); "
+    f"v = m.get_version({SPACY_EN_MODEL!r}, m.get_compatibility()); "
+    f"print(about.__download_url__ + '/' + m.get_model_filename({SPACY_EN_MODEL!r}, v))"
+)
+
+
+def _spacy_model_url(venv_python: Path) -> str | None:
+    """The wheel URL spaCy itself would download for the venv's spaCy, or None."""
+    try:
+        result = subprocess.run(
+            [str(venv_python), "-c", _SPACY_URL_PROBE],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    url = result.stdout.strip().splitlines()[-1].strip()
+    return url if url.startswith("https://") and url.endswith(".whl") else None
+
+
 def _ensure_spacy_model(venv_python: Path) -> bool:
     """Fetch spaCy's English model into the venv unless it is there.
 
-    Kokoro's English text processing (misaki) calls spaCy's downloader for
-    it on first use, and that downloader runs pip, which a bare uv venv
-    lacks; so the venv is seeded with pip and the model is fetched here,
-    where a failure can be seen, not at the first spoken message.
+    Kokoro's English text processing (misaki) asks spaCy to download it on
+    first use, and spaCy's downloader shells out to pip. pip answers to the
+    machine's pip config, and one that requires hashes (a common corporate
+    default) refuses the wheel, which spaCy publishes without one. So the
+    wheel URL is taken from spaCy's own compatibility table and installed
+    with `uv pip`, the tool that installed mlx-audio, here where a failure
+    can be seen, not at the first spoken message. Without a URL the
+    downloader is the fallback.
     """
     if _spacy_model_present(venv_python):
         success(f"spaCy {SPACY_EN_MODEL} already present")
         return True
     info(f"Fetching spaCy {SPACY_EN_MODEL} for Kokoro's English text processing...")
+    url = _spacy_model_url(venv_python)
+    if url:
+        cmd = ["uv", "pip", "install", "--python", str(venv_python), url]
+    else:
+        warn("spaCy could not name the model wheel; using its own downloader, which runs pip")
+        cmd = [str(venv_python), "-m", "spacy", "download", SPACY_EN_MODEL]
     result = None
     try:
-        result = subprocess.run(
-            [str(venv_python), "-m", "spacy", "download", SPACY_EN_MODEL],
-            capture_output=True, text=True, timeout=900,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     except (subprocess.SubprocessError, OSError) as e:
         warn(f"spaCy model download did not run: {e}")
     if result is not None and result.returncode == 0:
@@ -2431,7 +2463,7 @@ def _ensure_spacy_model(venv_python: Path) -> bool:
     if result is not None:
         warn(f"spaCy model download failed (exit {result.returncode}): {(result.stderr or result.stdout).strip()[:300]}")
     print("  Kokoro English will not work until it is there. Fetch it by hand with:")
-    print(f"    {venv_python} -m spacy download {SPACY_EN_MODEL}")
+    print(f"    {' '.join(cmd)}")
     return False
 
 
@@ -2494,7 +2526,7 @@ def do_enable_mlx(*, assume_yes: bool = False, dry_run: bool = False) -> int:
     if dry_run:
         dry(f"uv venv {venv_dir} --python 3.12 --seed")
         dry(f"uv pip install --python {venv_py} {' '.join(MLX_PACKAGES)}")
-        dry(f"{venv_py} -m spacy download {SPACY_EN_MODEL}")
+        dry(f"uv pip install --python {venv_py} <{SPACY_EN_MODEL} wheel named by spaCy's compatibility table>")
         return 0
 
     if not _ask_yes_no("Proceed with bootstrap?", default_yes=True, assume_yes=assume_yes):

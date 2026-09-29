@@ -1171,7 +1171,7 @@ def cmd_mlx(args: argparse.Namespace) -> None:
                 if present:
                     state = "present"
                 elif present is False:
-                    state = f"MISSING: {venv_py} -m spacy download en_core_web_sm"
+                    state = "MISSING: rerun claude-tts-install --enable-mlx to fetch it"
                 else:
                     state = "unknown"
                 print(f"spaCy en:   en_core_web_sm {state} (Kokoro English text processing)")

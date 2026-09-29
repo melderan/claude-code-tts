@@ -42,9 +42,11 @@ mlx, since it records the intent). A request with no answer in two minutes kills
 a failed start is not retried for a minute, so a broken model costs one attempt per minute, not
 ten minutes per message.
 
-`--enable-mlx` seeds the venv with pip and fetches spaCy's `en_core_web_sm`: Kokoro's English text
-processing (misaki) asks spaCy to download it on first use through pip, which a bare venv lacks.
-`claude-tts mlx status` reports whether the model is present.
+`--enable-mlx` fetches spaCy's `en_core_web_sm`: Kokoro's English text processing (misaki) asks spaCy
+to download it on first use, and spaCy's downloader runs pip, which answers to the machine's pip config
+(a require-hashes default refuses the wheel, which spaCy publishes without a hash). So the installer
+asks the venv's spaCy which wheel it wants and installs it with `uv pip`, the way mlx-audio went in.
+`claude-tts mlx status` reports whether the model is present; rerun `--enable-mlx` to fetch it.
 
 Persona keys:
 

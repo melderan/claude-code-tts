@@ -34,6 +34,9 @@ def have_uv(monkeypatch):
     monkeypatch.setattr(install.shutil, "which", lambda name: "/usr/local/bin/uv" if name == "uv" else real_which(name))
 
 
+SPACY_WHEEL = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
+
+
 def _fake_run(version="0.5.6"):
     calls: list[list[str]] = []
 
@@ -47,8 +50,11 @@ def _fake_run(version="0.5.6"):
             return MagicMock(returncode=0, stdout="", stderr="")
         if len(cmd_list) >= 3 and cmd_list[1] == "-c" and "mlx_audio" in cmd_list[2]:
             return MagicMock(returncode=0, stdout=f"{version}\n", stderr="")
-        if len(cmd_list) >= 3 and cmd_list[1] == "-c" and "spacy" in cmd_list[2]:
+        if len(cmd_list) >= 3 and cmd_list[1] == "-c" and "is_package" in cmd_list[2]:
             return MagicMock(returncode=1, stdout="", stderr="")  # model not present yet
+        if len(cmd_list) >= 3 and cmd_list[1] == "-c" and "get_model_filename" in cmd_list[2]:
+            # spaCy names the wheel; a FutureWarning on stderr, as torch prints one, must not matter
+            return MagicMock(returncode=0, stdout=SPACY_WHEEL + "\n", stderr="FutureWarning: torch.jit\n")
         return MagicMock(returncode=0, stdout="", stderr="")
 
     run.calls = calls  # type: ignore[attr-defined]
@@ -90,7 +96,10 @@ class TestPromptDiscipline:
         joined = [" ".join(c) for c in run.calls]
         assert any(s.startswith("uv venv") and s.endswith("--python 3.12 --seed") for s in joined)
         assert any("uv pip install" in s and "mlx-audio[tts]" in s and "misaki[en]" in s for s in joined)
-        assert any(s.endswith("-m spacy download en_core_web_sm") for s in joined)
+        # The model goes in through uv pip, not spaCy's downloader: pip obeys a
+        # require-hashes pip config and the wheel has no hash (seen 2026-09-29).
+        assert any(s.startswith("uv pip install --python") and s.endswith(SPACY_WHEEL) for s in joined)
+        assert not any("-m spacy download" in s for s in joined)
         out = capsys.readouterr().out
         assert "mlx-audio 0.5.6 installed and verified" in out
         assert "spaCy en_core_web_sm installed" in out
@@ -102,7 +111,7 @@ class TestPromptDiscipline:
 
         def failing_spacy(cmd, **kwargs):
             cmd_list = list(cmd)
-            if cmd_list[1:4] == ["-m", "spacy", "download"]:
+            if cmd_list[:3] == ["uv", "pip", "install"] and cmd_list[-1] == SPACY_WHEEL:
                 run.calls.append(cmd_list)
                 return MagicMock(returncode=1, stdout="", stderr="no network")
             return real(cmd, **kwargs)
@@ -110,7 +119,25 @@ class TestPromptDiscipline:
         with patch.object(install.subprocess, "run", side_effect=failing_spacy):
             assert install.do_enable_mlx(assume_yes=True) == 0
         out = capsys.readouterr().out
-        assert "spaCy model download failed" in out and "-m spacy download en_core_web_sm" in out
+        assert "spaCy model download failed" in out
+        assert "uv pip install --python" in out and SPACY_WHEEL in out  # the by-hand command is the one that failed
+
+    def test_spacy_without_a_wheel_url_falls_back_to_its_downloader(self, fake_home, apple_silicon, have_uv, capsys):
+        run = _fake_run()
+        real = run
+
+        def no_url(cmd, **kwargs):
+            cmd_list = list(cmd)
+            if len(cmd_list) >= 3 and cmd_list[1] == "-c" and "get_model_filename" in cmd_list[2]:
+                run.calls.append(cmd_list)
+                return MagicMock(returncode=1, stdout="", stderr="ModuleNotFoundError: spacy")
+            return real(cmd, **kwargs)
+
+        with patch.object(install.subprocess, "run", side_effect=no_url):
+            assert install.do_enable_mlx(assume_yes=True) == 0
+        joined = [" ".join(c) for c in run.calls]
+        assert any(s.endswith("-m spacy download en_core_web_sm") for s in joined)
+        assert "could not name the model wheel" in capsys.readouterr().out
 
     def test_no_aborts_cleanly(self, fake_home, apple_silicon, have_uv):
         with patch.object(install.subprocess, "run") as mock_run, patch("builtins.input", return_value="n"):
