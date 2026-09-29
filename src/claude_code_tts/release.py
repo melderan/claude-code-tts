@@ -198,9 +198,16 @@ def verify_on_github(slug: str, plan: Plan, wait_s: int = RELEASE_WAIT_S) -> str
         print("could not ask GitHub about the commit signature (gh api failed)")
     deadline = time.monotonic() + wait_s
     while time.monotonic() < deadline:
-        rc, out = _gh("release", "view", plan.tag, "--json", "url", "--jq", ".url")
+        # release.yml creates the release as a draft first, and GitHub answers for a
+        # draft with an "untagged-..." URL; only a published release counts.
+        rc, out = _gh("release", "view", plan.tag, "--json", "url,isDraft")
         if rc == 0 and out:
-            return out
+            try:
+                view = json.loads(out)
+            except json.JSONDecodeError:
+                view = {}
+            if view.get("url") and not view.get("isDraft"):
+                return str(view["url"])
         rc, out = _gh(
             "run", "list", "--workflow", "release.yml", "--branch", plan.tag,
             "--json", "status,conclusion,url", "--limit", "1",

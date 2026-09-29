@@ -164,3 +164,36 @@ class TestMain:
             rel.main([])
         assert e.value.code == 1
         assert git(repo, "tag", "-l", "v1.3.0") == ""
+
+
+class TestVerifyOnGithub:
+    """The wait loop returns the release URL only once GitHub has published it."""
+
+    def test_waits_past_the_draft(self, monkeypatch):
+        # Seen 2026-09-29: the tool printed .../releases/tag/untagged-aa1264c8... because
+        # release.yml had created the draft and not yet published it.
+        answers = iter([
+            (0, "true"),  # commit signature
+            (0, '{"url":"https://github.com/o/r/releases/tag/untagged-aa1264c8","isDraft":true}'),
+            (0, "[]"),    # run list while waiting
+            (0, '{"url":"https://github.com/o/r/releases/tag/v1.2.3","isDraft":false}'),
+        ])
+        calls = []
+
+        def fake_gh(*args):
+            calls.append(args)
+            return next(answers)
+
+        monkeypatch.setattr(rel, "_gh", fake_gh)
+        monkeypatch.setattr(rel.time, "sleep", lambda _s: None)
+        plan = type("P", (), {"tag": "v1.2.3", "sha": "abc1234"})()
+        assert rel.verify_on_github("o/r", plan, wait_s=60) == "https://github.com/o/r/releases/tag/v1.2.3"
+        assert sum(1 for c in calls if c[:2] == ("release", "view")) == 2
+
+    def test_gives_up_on_a_draft_that_never_publishes(self, monkeypatch):
+        monkeypatch.setattr(rel, "_gh", lambda *a: (0, "true") if a[0] == "api" else (0, '{"url":"u","isDraft":true}') if a[0] == "release" else (0, "[]"))
+        monkeypatch.setattr(rel.time, "sleep", lambda _s: None)
+        clock = iter(range(0, 10_000, 30))
+        monkeypatch.setattr(rel.time, "monotonic", lambda: float(next(clock)))
+        plan = type("P", (), {"tag": "v1.2.3", "sha": "abc1234"})()
+        assert rel.verify_on_github("o/r", plan, wait_s=60) is None
