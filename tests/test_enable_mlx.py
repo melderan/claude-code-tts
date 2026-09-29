@@ -35,6 +35,7 @@ def have_uv(monkeypatch):
 
 
 SPACY_HF_WHEEL = "https://huggingface.co/spacy/en_core_web_sm/resolve/main/en_core_web_sm-any-py3-none-any.whl"
+SPACY_LOCAL_WHEEL = "en_core_web_sm-3.8.0-py3-none-any.whl"
 SPACY_WHEEL = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
 
 
@@ -53,6 +54,10 @@ def _fake_run(version="0.5.6"):
             return MagicMock(returncode=0, stdout=f"{version}\n", stderr="")
         if len(cmd_list) >= 3 and cmd_list[1] == "-c" and "is_package" in cmd_list[2]:
             return MagicMock(returncode=1, stdout="", stderr="")  # model not present yet
+        if cmd_list[:1] == ["curl"]:
+            dest = Path(cmd_list[cmd_list.index("-o") + 1])
+            dest.write_text('{"version": "3.8.0"}' if dest.name == "meta.json" else "wheel bytes")
+            return MagicMock(returncode=0, stdout="", stderr="")
         if len(cmd_list) >= 3 and cmd_list[1] == "-c" and "get_model_filename" in cmd_list[2]:
             # spaCy names the wheel; a FutureWarning on stderr, as torch prints one, must not matter
             return MagicMock(returncode=0, stdout=SPACY_WHEEL + "\n", stderr="FutureWarning: torch.jit\n")
@@ -99,7 +104,9 @@ class TestPromptDiscipline:
         assert any("uv pip install" in s and "mlx-audio[tts]" in s and "misaki[en]" in s for s in joined)
         # The model goes in through uv pip, not spaCy's downloader: pip obeys a
         # require-hashes pip config and the wheel has no hash (seen 2026-09-29).
-        assert any(s.startswith("uv pip install --python") and s.endswith(SPACY_WHEEL) for s in joined)
+        # curl fetches it (curl trusts the macOS keychain, uv does not) and uv installs the local file.
+        assert any(s.startswith("curl -fsSL") and s.endswith(SPACY_WHEEL) for s in joined)
+        assert any(s.startswith("uv pip install --python") and s.endswith("/" + SPACY_LOCAL_WHEEL) for s in joined)
         assert not any("-m spacy download" in s for s in joined)
         out = capsys.readouterr().out
         assert "mlx-audio 0.5.6 installed and verified" in out
@@ -112,22 +119,20 @@ class TestPromptDiscipline:
 
         def github_blocked(cmd, **kwargs):
             cmd_list = list(cmd)
-            if cmd_list[:3] == ["uv", "pip", "install"] and cmd_list[-1] == SPACY_WHEEL:
+            if cmd_list[:1] == ["curl"] and cmd_list[-1] == SPACY_WHEEL:
                 run.calls.append(cmd_list)
-                # uv's shape, seen 2026-09-29: the reason is on indented cause lines, not the first line
-                return MagicMock(returncode=2, stdout="", stderr=(
-                    "Using Python 3.12.14 environment at: /x/venvs/mlx\n"
-                    "error: Failed to download `en-core-web-sm @ https://github.com/...whl`\n"
-                    "  cause: Failed to fetch: `https://github.com/explosion/...`\n"
-                    "  cause: error sending request\n"))
+                return MagicMock(returncode=60, stdout="", stderr="curl: (60) SSL certificate problem: unable to get local issuer certificate")
             return real(cmd, **kwargs)
 
         with patch.object(install.subprocess, "run", side_effect=github_blocked):
             assert install.do_enable_mlx(assume_yes=True) == 0
         joined = [" ".join(c) for c in run.calls]
-        assert any(s.startswith("uv pip install --python") and s.endswith(SPACY_HF_WHEEL) for s in joined)
+        # meta.json names the version, and the versionless wheel is installed under its proper name
+        assert any(s.startswith("curl -fsSL") and s.endswith("/main/meta.json") for s in joined)
+        assert any(s.startswith("curl -fsSL") and s.endswith(SPACY_HF_WHEEL) for s in joined)
+        assert any(s.startswith("uv pip install --python") and s.endswith("/" + SPACY_LOCAL_WHEEL) for s in joined)
         out = capsys.readouterr().out
-        assert "error sending request" in out  # the cause reaches the operator
+        assert "SSL certificate problem" in out  # the cause reaches the operator
         assert "installed from the Hugging Face copy" in out
 
     def test_both_sources_failing_warns_and_keeps_exit_zero(self, fake_home, apple_silicon, have_uv, capsys):
@@ -136,16 +141,35 @@ class TestPromptDiscipline:
 
         def failing(cmd, **kwargs):
             cmd_list = list(cmd)
-            if cmd_list[:3] == ["uv", "pip", "install"] and cmd_list[-1].endswith(".whl"):
+            if cmd_list[:1] == ["curl"]:
                 run.calls.append(cmd_list)
-                return MagicMock(returncode=1, stdout="", stderr="no network")
+                return MagicMock(returncode=6, stdout="", stderr="curl: (6) Could not resolve host")
             return real(cmd, **kwargs)
 
         with patch.object(install.subprocess, "run", side_effect=failing):
             assert install.do_enable_mlx(assume_yes=True) == 0
+        joined = [" ".join(c) for c in run.calls]
+        assert not any(s.startswith("uv pip install") and s.endswith(".whl") for s in joined)  # nothing to install
         out = capsys.readouterr().out
         assert "from spaCy's release on GitHub failed" in out and "from the Hugging Face copy failed" in out
-        assert SPACY_WHEEL in out and SPACY_HF_WHEEL in out  # both by-hand commands are the ones that failed
+        assert f"curl -fsSL -o /tmp/{SPACY_LOCAL_WHEEL} {SPACY_WHEEL}" in out  # the by-hand command
+        assert "--enable-mlx" in out
+
+    def test_uv_refusing_the_local_wheel_is_reported(self, fake_home, apple_silicon, have_uv, capsys):
+        run = _fake_run()
+        real = run
+
+        def uv_refuses(cmd, **kwargs):
+            cmd_list = list(cmd)
+            if cmd_list[:3] == ["uv", "pip", "install"] and cmd_list[-1].endswith(".whl"):
+                run.calls.append(cmd_list)
+                return MagicMock(returncode=2, stdout="", stderr="error: The wheel filename has an invalid version")
+            return real(cmd, **kwargs)
+
+        with patch.object(install.subprocess, "run", side_effect=uv_refuses):
+            assert install.do_enable_mlx(assume_yes=True) == 0
+        out = capsys.readouterr().out
+        assert out.count("invalid version") == 2  # both sources tried, both reported
 
     def test_spacy_without_a_wheel_url_falls_back_to_its_downloader(self, fake_home, apple_silicon, have_uv, capsys):
         run = _fake_run()

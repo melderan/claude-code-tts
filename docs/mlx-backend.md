@@ -45,11 +45,13 @@ ten minutes per message.
 `--enable-mlx` fetches spaCy's `en_core_web_sm`: Kokoro's English text processing (misaki) asks spaCy
 to download it on first use, and spaCy's downloader runs pip, which answers to the machine's pip config
 (a require-hashes default refuses the wheel, which spaCy publishes without a hash). So the installer
-asks the venv's spaCy which wheel it wants and installs it with `uv pip`, the way mlx-audio went in.
-If GitHub will not serve the release asset (its redirect to objects.githubusercontent.com is blocked
-on some networks), the installer tries spaCy's Hugging Face copy of the model, which is the latest
-model version, unpinned. `claude-tts mlx status` reports whether the model is present; rerun
-`--enable-mlx` to fetch it.
+asks the venv's spaCy which wheel it wants, downloads it with curl, and installs the local file with
+`uv pip`, the way mlx-audio went in. curl rather than uv for the download because curl trusts the
+macOS keychain: on a network that inspects TLS with its own CA, uv fails with `invalid peer
+certificate: UnknownIssuer` while curl succeeds. If GitHub will not serve the release asset, the
+installer takes spaCy's Hugging Face copy of the model (the latest model version; its meta.json names
+the version, which the wheel is renamed to, since uv rejects the versionless filename there).
+`claude-tts mlx status` reports whether the model is present; rerun `--enable-mlx` to fetch it.
 
 Persona keys:
 

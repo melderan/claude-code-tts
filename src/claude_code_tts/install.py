@@ -24,6 +24,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -2430,11 +2431,11 @@ def _spacy_model_url(venv_python: Path) -> str | None:
     return url if url.startswith("https://") and url.endswith(".whl") else None
 
 
-# spaCy publishes each model to a Hugging Face repo too. This copy is the latest
-# model version, unpinned; it is the second source when the GitHub release asset
-# cannot be fetched (its redirect to objects.githubusercontent.com is blocked on
-# some networks).
-SPACY_HF_WHEEL = "https://huggingface.co/spacy/{model}/resolve/main/{model}-any-py3-none-any.whl"
+# spaCy publishes each model to a Hugging Face repo too, as the latest model
+# version with a versionless filename that uv rejects; meta.json there names
+# the version, so the wheel is renamed before it is installed. It is the
+# second source when the GitHub release asset cannot be fetched.
+SPACY_HF_REPO = "https://huggingface.co/spacy/{model}/resolve/main"
 
 
 def _install_failure_summary(result: "subprocess.CompletedProcess[str]") -> str:
@@ -2445,6 +2446,49 @@ def _install_failure_summary(result: "subprocess.CompletedProcess[str]") -> str:
     return " | ".join(why or lines[-4:])[:600]
 
 
+def _download(url: str, dest: Path) -> str | None:
+    """Fetch url to dest with curl. Returns None on success, else the reason.
+
+    curl, not uv or urllib: on macOS it trusts the system keychain, so a
+    network that inspects TLS with its own CA (uv saw "invalid peer
+    certificate: UnknownIssuer" on one) still works, with no flag to know.
+    """
+    if not shutil.which("curl"):
+        return "curl is not installed"
+    try:
+        result = subprocess.run(
+            ["curl", "-fsSL", "--retry", "2", "--max-time", "600", "-o", str(dest), url],
+            capture_output=True, text=True, timeout=900,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        return str(e)[:300]
+    if result.returncode == 0 and dest.is_file():
+        return None
+    return (result.stderr.strip() or f"curl exit {result.returncode}")[:300]
+
+
+def _spacy_hf_wheel(model: str, workdir: Path) -> tuple[Path | None, str]:
+    """Download the Hugging Face copy of a spaCy model under its proper wheel name.
+
+    Returns (path, "") or (None, reason).
+    """
+    meta = workdir / "meta.json"
+    reason = _download(f"{SPACY_HF_REPO.format(model=model)}/meta.json", meta)
+    if reason:
+        return None, f"meta.json: {reason}"
+    try:
+        version = str(json.loads(meta.read_text()).get("version") or "")
+    except (OSError, ValueError) as e:
+        return None, f"meta.json unreadable: {e}"
+    if not version or not version[0].isdigit():
+        return None, f"meta.json names no version ({version!r})"
+    wheel = workdir / f"{model}-{version}-py3-none-any.whl"
+    reason = _download(f"{SPACY_HF_REPO.format(model=model)}/{model}-any-py3-none-any.whl", wheel)
+    if reason:
+        return None, reason
+    return wheel, ""
+
+
 def _ensure_spacy_model(venv_python: Path) -> bool:
     """Fetch spaCy's English model into the venv unless it is there.
 
@@ -2452,7 +2496,8 @@ def _ensure_spacy_model(venv_python: Path) -> bool:
     first use, and spaCy's downloader shells out to pip. pip answers to the
     machine's pip config, and one that requires hashes (a common corporate
     default) refuses the wheel, which spaCy publishes without one. So the
-    wheel URL is taken from spaCy's own compatibility table and installed
+    wheel URL is taken from spaCy's own compatibility table, downloaded
+    with curl (which trusts the keychain) and installed as a local file
     with `uv pip`, the tool that installed mlx-audio, here where a failure
     can be seen, not at the first spoken message. If GitHub will not serve
     the asset, the Hugging Face copy is tried. Without a URL at all, the
@@ -2463,29 +2508,55 @@ def _ensure_spacy_model(venv_python: Path) -> bool:
         return True
     info(f"Fetching spaCy {SPACY_EN_MODEL} for Kokoro's English text processing...")
     url = _spacy_model_url(venv_python)
-    attempts: list[tuple[str, list[str]]] = []
-    if url:
-        uv_install = ["uv", "pip", "install", "--python", str(venv_python)]
-        attempts.append(("spaCy's release on GitHub", [*uv_install, url]))
-        attempts.append(("the Hugging Face copy", [*uv_install, SPACY_HF_WHEEL.format(model=SPACY_EN_MODEL)]))
-    else:
+    if not url:
         warn("spaCy could not name the model wheel; using its own downloader, which runs pip")
-        attempts.append(("spaCy's downloader", [str(venv_python), "-m", "spacy", "download", SPACY_EN_MODEL]))
-    for n, (where, cmd) in enumerate(attempts):
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-        except (subprocess.SubprocessError, OSError) as e:
-            warn(f"spaCy model download from {where} did not run: {e}")
-            continue
-        if result.returncode == 0:
-            success(f"spaCy {SPACY_EN_MODEL} installed from {where}")
+        cmd = [str(venv_python), "-m", "spacy", "download", SPACY_EN_MODEL]
+        return _run_spacy_install(cmd, "spaCy's downloader", by_hand=[" ".join(cmd)])
+
+    by_hand = [
+        f"curl -fsSL -o /tmp/{Path(url).name} {url} && "
+        f"uv pip install --python {venv_python} /tmp/{Path(url).name}",
+        "claude-tts-install --enable-mlx    # retries both sources",
+    ]
+    with tempfile.TemporaryDirectory(prefix="claude-tts-spacy-") as td:
+        workdir = Path(td)
+        wheel = workdir / Path(url).name
+        reason = _download(url, wheel)
+        if reason is None:
+            if _run_spacy_install(["uv", "pip", "install", "--python", str(venv_python), str(wheel)],
+                                  "spaCy's release on GitHub", by_hand=None):
+                return True
+        else:
+            warn(f"spaCy model download from spaCy's release on GitHub failed: {reason}")
+        info("Trying the Hugging Face copy instead...")
+        hf_wheel, reason = _spacy_hf_wheel(SPACY_EN_MODEL, workdir)
+        if hf_wheel is None:
+            warn(f"spaCy model download from the Hugging Face copy failed: {reason}")
+        elif _run_spacy_install(["uv", "pip", "install", "--python", str(venv_python), str(hf_wheel)],
+                                "the Hugging Face copy", by_hand=None):
             return True
-        warn(f"spaCy model download from {where} failed (exit {result.returncode}): {_install_failure_summary(result)}")
-        if n + 1 < len(attempts):
-            info(f"Trying {attempts[n + 1][0]} instead...")
-    print("  Kokoro English will not work until it is there. Fetch it by hand with one of:")
-    for _, cmd in attempts:
-        print(f"    {' '.join(cmd)}")
+    print("  Kokoro English will not work until it is there. Fetch it by hand with:")
+    for line in by_hand:
+        print(f"    {line}")
+    return False
+
+
+def _run_spacy_install(cmd: list[str], where: str, *, by_hand: list[str] | None) -> bool:
+    """Run one install attempt, report it, and print by_hand when given and it failed."""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    except (subprocess.SubprocessError, OSError) as e:
+        warn(f"spaCy model install from {where} did not run: {e}")
+        result = None
+    if result is not None and result.returncode == 0:
+        success(f"spaCy {SPACY_EN_MODEL} installed from {where}")
+        return True
+    if result is not None:
+        warn(f"spaCy model install from {where} failed (exit {result.returncode}): {_install_failure_summary(result)}")
+    if by_hand:
+        print("  Kokoro English will not work until it is there. Fetch it by hand with:")
+        for line in by_hand:
+            print(f"    {line}")
     return False
 
 
@@ -2548,7 +2619,7 @@ def do_enable_mlx(*, assume_yes: bool = False, dry_run: bool = False) -> int:
     if dry_run:
         dry(f"uv venv {venv_dir} --python 3.12 --seed")
         dry(f"uv pip install --python {venv_py} {' '.join(MLX_PACKAGES)}")
-        dry(f"uv pip install --python {venv_py} <{SPACY_EN_MODEL} wheel named by spaCy's compatibility table>")
+        dry(f"curl -fsSL -o <{SPACY_EN_MODEL} wheel named by spaCy's compatibility table>; uv pip install --python {venv_py} <it>")
         return 0
 
     if not _ask_yes_no("Proceed with bootstrap?", default_yes=True, assume_yes=assume_yes):
