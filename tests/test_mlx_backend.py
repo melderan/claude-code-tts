@@ -262,6 +262,29 @@ class TestJsonLineWorkerProtocol:
         assert resp and resp["ok"]
         w._proc.terminate()
 
+    def test_idle_worker_is_unloaded_and_reloads_on_demand(self, tmp_path, worker_logs):
+        """JMO, 2026-09-29: the model stays loaded unless unused for thirty minutes."""
+        w = self._worker(tmp_path)
+        out = tmp_path / "a.wav"
+        assert w.request({"text": "hello", "output": str(out)})["ok"]
+        assert w.stop_if_idle(1800) is False  # just used: stays resident
+        assert w.stop_if_idle(0) is False     # 0 means never unload
+        w.last_used -= 1801
+        assert w.stop_if_idle(1800) is True
+        assert not w._alive()
+        resp = w.request({"text": "again", "output": str(out)})  # next request reloads
+        assert resp and resp["ok"] and len(w.starts) == 2
+        w._proc.terminate()
+
+    def test_busy_worker_is_not_unloaded(self, tmp_path, worker_logs):
+        w = self._worker(tmp_path)
+        assert w.ensure_started()
+        w.last_used -= 10_000
+        with w._lock:  # a request in flight holds this
+            assert w.stop_if_idle(60) is False
+        assert w._alive()
+        w._proc.terminate()
+
     def test_failed_load_is_reported_once_and_returns_none(self, tmp_path, worker_logs):
         w = self._worker(tmp_path, "--fail-load")
         with patch("claude_code_tts.audio.debug") as dbg:
@@ -277,6 +300,115 @@ class TestJsonLineWorkerProtocol:
         assert w.generate("hi", voice="af_heart", speed=1.0, lang_code="a", output_path=out) is True
         assert out.exists()
         w._proc.terminate()
+
+
+class TestIdleReaper:
+    def _resident(self, worker, age_s):
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.pid = 4242
+        worker._proc = proc
+        worker.last_used = time.monotonic() - age_s
+        return proc
+
+    def test_reap_names_the_models_it_unloaded(self, fake_mlx_venv, monkeypatch, worker_logs):
+        old = audio._MlxWorker("mlx-community/Kokoro-82M-bf16")
+        fresh = audio._MlxWorker("other")
+        sherpa = audio._SherpaWorker("vctk")
+        self._resident(old, 3600)
+        self._resident(fresh, 10)
+        self._resident(sherpa, 3600)
+        monkeypatch.setattr(audio, "_mlx_workers", {old.model_id: old, fresh.model_id: fresh})
+        monkeypatch.setattr(audio, "_sherpa_workers", {"vctk": sherpa})
+        assert audio.reap_idle_workers(1800) == ["sherpa:vctk", "mlx:mlx-community/Kokoro-82M-bf16"]
+        assert old._proc is None and sherpa._proc is None and fresh._proc is not None
+        assert audio.reap_idle_workers(1800) == []  # nothing left to unload
+
+
+class TestDaemonHonoursMessageMlx:
+    """A message that chose mlx for itself plays it; hook messages leave the persona in charge."""
+
+    def test_queue_config_default_is_thirty_minutes(self, monkeypatch):
+        from claude_code_tts import daemon
+        monkeypatch.setattr(daemon, "load_raw_config", lambda: {})
+        assert daemon.get_queue_config()["worker_idle_unload_s"] == 1800
+
+    def test_describe_voice_prefers_the_message_mlx(self):
+        from claude_code_tts.daemon import describe_voice
+        persona = {"voice_kokoro": "af_bella", "voice_mlx": "p-model", "speaker_mlx": "p-voice"}
+        assert describe_voice("x", persona) == "kokoro:af_bella"
+        assert describe_voice("x", persona, voice_mlx="m", speaker_mlx="v") == "mlx:m#v"
+        assert describe_voice("x", persona, voice_mlx="m") == "mlx:m"
+
+    def test_generate_override_sets_kokoro_and_sherpa_aside(self, monkeypatch):
+        from claude_code_tts import daemon
+        persona = {"voice": "en_US-lessac-medium", "voice_kokoro": "af_bella", "voice_sherpa": "vctk", "speed": 1.5}
+        monkeypatch.setattr(daemon, "get_persona_config", lambda _n: persona)
+        with patch.object(daemon, "_generate_speech", return_value=Path("/tmp/x.wav")) as gen:
+            assert daemon.daemon_generate_speech(
+                "hi", "x", Path("/tmp/x.wav"),
+                voice_mlx_override="m", speaker_mlx_override="v", lang_mlx_override="a",
+            )
+        kw = gen.call_args.kwargs
+        assert (kw["voice_mlx"], kw["speaker_mlx"], kw["lang_mlx"]) == ("m", "v", "a")
+        assert kw["voice_kokoro"] == "" and kw["voice_sherpa"] == ""
+        with patch.object(daemon, "_generate_speech", return_value=Path("/tmp/x.wav")) as gen:
+            daemon.daemon_generate_speech("hi", "x", Path("/tmp/x.wav"))
+        assert gen.call_args.kwargs["voice_kokoro"] == "af_bella"  # no override: persona as before
+
+    def test_message_mlx_fields_are_ignored_without_engine(self, tmp_path, monkeypatch):
+        """Hook messages carry the persona's mlx fields; only "engine": "mlx" makes them an override."""
+        from claude_code_tts.config import TTSConfig
+        monkeypatch.setattr(audio, "TTS_QUEUE_DIR", tmp_path / "queue")
+        cfg = TTSConfig(voice_mlx="m", session_id="s", project_name="p")
+        plain = json.loads(audio.write_queue_message("hello", cfg).read_text())
+        chosen = json.loads(audio.write_queue_message("hello", cfg, engine="mlx").read_text())
+        assert "engine" not in plain and chosen["engine"] == "mlx"
+
+
+class TestSpeakRidesTheQueue:
+    def _args(self, **over):
+        import argparse
+        base = {
+            "from_hook": False, "from_file": None, "text": "hello there", "voice": None, "speed": None,
+            "speaker": None, "voice_sherpa": None, "speaker_sherpa": -1, "voice_mlx": "kokoro",
+            "speaker_mlx": "", "lang_mlx": "", "random": False, "reader": False, "preview": False,
+        }
+        base.update(over)
+        return argparse.Namespace(**base)
+
+    def test_voice_mlx_in_queue_mode_goes_to_the_daemon(self, tmp_path, monkeypatch, capsys):
+        from claude_code_tts import cli
+        from claude_code_tts.config import TTSConfig
+        from claude_code_tts.mlx_catalog import CATALOG, resolve_model
+        monkeypatch.setattr(audio, "TTS_QUEUE_DIR", tmp_path / "queue")
+        cfg = TTSConfig(mode="queue", voice_kokoro="af_bella", session_id="s", project_name="p", active_persona="x", speed=2.0)
+        monkeypatch.setattr(cli, "load_config", lambda *a, **k: cfg)
+        with patch("claude_code_tts.audio.daemon_healthy", return_value=True), \
+             patch("claude_code_tts.audio.generate_speech") as direct:
+            cli.cmd_speak(self._args())
+        direct.assert_not_called()
+        msgs = list((tmp_path / "queue").glob("*.json"))
+        assert len(msgs) == 1
+        msg = json.loads(msgs[0].read_text())
+        assert msg["engine"] == "mlx"
+        assert msg["voice_mlx"] == resolve_model("kokoro")
+        assert msg["speaker_mlx"] == CATALOG["kokoro"]["default_voice"]
+        assert msg["voice_kokoro"] == ""
+        assert "keeps the model loaded" in capsys.readouterr().out
+
+    def test_daemon_down_falls_back_to_direct(self, tmp_path, monkeypatch):
+        from claude_code_tts import cli
+        from claude_code_tts.config import TTSConfig
+        monkeypatch.setattr(audio, "TTS_QUEUE_DIR", tmp_path / "queue")
+        cfg = TTSConfig(mode="queue", session_id="s", project_name="p", active_persona="x")
+        monkeypatch.setattr(cli, "load_config", lambda *a, **k: cfg)
+        with patch("claude_code_tts.audio.daemon_healthy", return_value=False), \
+             patch("claude_code_tts.audio.generate_speech", return_value=Path("/tmp/x.wav")) as direct, \
+             patch("claude_code_tts.audio.play_audio"):
+            cli.cmd_speak(self._args())
+        assert direct.call_args.kwargs["voice_mlx"]
+        assert not (tmp_path / "queue").exists()
 
 
 class TestMlxConfigPlumbing:

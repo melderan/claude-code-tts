@@ -53,6 +53,21 @@ installer takes spaCy's Hugging Face copy of the model (the latest model version
 the version, which the wheel is renamed to, since uv rejects the versionless filename there).
 `claude-tts mlx status` reports whether the model is present; rerun `--enable-mlx` to fetch it.
 
+## Model residency
+
+The daemon holds one worker process per mlx model. The model loads once (Kokoro in well under a
+second from the cache, plus a few seconds of runtime start) and stays resident between messages.
+A worker unused for `queue.worker_idle_unload_s` seconds (default 1800, thirty minutes) is
+unloaded, logged as `Unloaded mlx:<model> worker`, and reloads on the next message that needs it;
+`0` keeps it for the daemon's life. The same rule covers sherpa workers.
+
+`claude-tts speak --voice-mlx ...` in queue mode, with the daemon healthy, hands the text to the
+daemon with `"engine": "mlx"` in the message, so the resident model speaks it and the CLI process
+loads nothing. The daemon then plays the message's mlx model, voice and language instead of the
+persona's, and the persona's kokoro or sherpa voice stands aside for that one message. In direct
+mode, or with the daemon down, the CLI still synthesises in its own process, loading the model
+for that call.
+
 Persona keys:
 
 | key | meaning | Kokoro example |

@@ -109,6 +109,7 @@ class _JsonLineWorker:
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self._retry_after = 0.0
+        self.last_used = time.monotonic()
 
     def _command(self) -> list[str] | None:
         """The argv to start the process, or None (already logged) when it cannot start."""
@@ -195,8 +196,32 @@ class _JsonLineWorker:
             return self._fail_start(proc, f"failed to start: {error}")
         self._proc = proc
         self._retry_after = 0.0
+        self.last_used = time.monotonic()
         debug(f"{self.label} started (PID {proc.pid}); its stderr is {self.log_path()}")
         return True
+
+    def stop_if_idle(self, idle_s: float) -> bool:
+        """Unload the child when nothing has used it for idle_s seconds; True if it did.
+
+        A model stays resident between messages (a load costs seconds) and
+        is released only after a long silence, so an afternoon away does not
+        pin hundreds of MB. A child mid-request holds the lock and is in use
+        by definition. The next request starts it again. idle_s <= 0 never unloads.
+        """
+        if idle_s <= 0 or not self._alive() or time.monotonic() - self.last_used < idle_s:
+            return False
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            proc = self._proc
+            if proc is None or proc.poll() is not None or time.monotonic() - self.last_used < idle_s:
+                return False
+            debug(f"{self.label}: idle for {idle_s / 60:.0f} min; unloading (PID {proc.pid})")
+            self._stop(proc)
+            self._proc = None
+            return True
+        finally:
+            self._lock.release()
 
     def ensure_started(self) -> bool:
         with self._lock:
@@ -221,6 +246,7 @@ class _JsonLineWorker:
                     self._proc = None
                     return None
                 resp = json.loads(proc.stdout.readline())
+                self.last_used = time.monotonic()
                 return resp if isinstance(resp, dict) else None
             except (OSError, json.JSONDecodeError) as e:
                 debug(f"{self.label}: communication error: {e}{self._stderr_tail()}")
@@ -347,6 +373,18 @@ def _get_mlx_worker(model_id: str) -> _MlxWorker:
     # may ask for the same model at the same moment, and two workers would
     # mean two model processes.
     return _mlx_workers.setdefault(model_id, _MlxWorker(model_id))
+
+
+def reap_idle_workers(idle_s: float) -> list[str]:
+    """Unload every sherpa and mlx worker idle for idle_s seconds; returns the ones unloaded."""
+    unloaded: list[str] = []
+    for model_id, sherpa in list(_sherpa_workers.items()):
+        if sherpa.stop_if_idle(idle_s):
+            unloaded.append(f"sherpa:{model_id}")
+    for model_id, mlx in list(_mlx_workers.items()):
+        if mlx.stop_if_idle(idle_s):
+            unloaded.append(f"mlx:{model_id}")
+    return unloaded
 
 
 def warm_mlx_workers(personas: dict) -> list[str]:
@@ -651,8 +689,14 @@ def speak_direct(text: str, config: TTSConfig) -> None:
         )
 
 
-def write_queue_message(text: str, config: TTSConfig) -> Path:
-    """Write a queue message JSON file for the daemon."""
+def write_queue_message(text: str, config: TTSConfig, *, engine: str = "") -> Path:
+    """Write a queue message JSON file for the daemon.
+
+    engine names the engine the caller chose for this one message ("mlx"):
+    the daemon then plays the message's voice fields for that engine instead
+    of the persona's, so `claude-tts speak --voice-mlx ...` uses the daemon's
+    resident model rather than loading its own.
+    """
     TTS_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
 
     timestamp = f"{time.time():.6f}"
@@ -679,6 +723,8 @@ def write_queue_message(text: str, config: TTSConfig) -> Path:
         "lang_mlx": config.lang_mlx,
         "pitch_filter": config.pitch_filter,
     }
+    if engine:
+        message["engine"] = engine
 
     # Write-then-rename so the daemon never globs a half-written file.
     tmp_file = queue_file.with_suffix(".tmp")

@@ -1697,6 +1697,27 @@ def cmd_speak(args: argparse.Namespace) -> None:
         speed = args.speed
     if args.speaker is not None:
         speaker = args.speaker
+    # An mlx voice chosen on the command line goes through the daemon in queue
+    # mode: its worker already holds the model, where a one-shot process would
+    # load it again for every call and throw it away.
+    mlx_chosen = bool(getattr(args, "voice_mlx", None)) or bool(
+        voice_mlx and (getattr(args, "speaker_mlx", "") or getattr(args, "lang_mlx", ""))
+    )
+    if mlx_chosen and not args.voice and not getattr(args, "voice_sherpa", None) and cfg.mode == "queue":
+        from dataclasses import replace
+
+        from claude_code_tts.audio import daemon_healthy, write_queue_message
+        if daemon_healthy():
+            queued = replace(
+                cfg, voice_mlx=voice_mlx, speaker_mlx=speaker_mlx, lang_mlx=lang_mlx,
+                voice_kokoro="", voice_kokoro_blend="", voice_sherpa="", speed=speed, speed_method=speed_method,
+            )
+            write_queue_message(text, queued, engine="mlx")
+            print(f"Voice: mlx/{voice_mlx}" + (f" {speaker_mlx}" if speaker_mlx else "") + (f" lang {lang_mlx}" if lang_mlx else ""))
+            print(f"Speed: {speed}x ({speed_method})")
+            print("Queued to the daemon, whose mlx worker keeps the model loaded.")
+            return
+
     if getattr(args, "random", False) and voice_path is not None:
         # Random speaker from multi-speaker model
         voice_json = voice_path.with_suffix(".onnx.json")

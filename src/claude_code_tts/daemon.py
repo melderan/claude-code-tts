@@ -25,7 +25,12 @@ from datetime import datetime
 from io import TextIOWrapper
 from pathlib import Path
 
-from claude_code_tts.audio import detect_player, warm_mlx_workers, warm_sherpa_workers
+from claude_code_tts.audio import (
+    detect_player,
+    reap_idle_workers,
+    warm_mlx_workers,
+    warm_sherpa_workers,
+)
 from claude_code_tts.audio import generate_speech as _generate_speech
 from claude_code_tts.audio import last_error as audio_last_error
 from claude_code_tts.bridge import (
@@ -60,6 +65,8 @@ LOG_MAX_BYTES = 5 * 1024 * 1024
 HEARTBEAT_INTERVAL_S = 1.0
 PLAYING_LOG_INTERVAL_S = 30.0
 HEARTBEAT_FILE = TTS_CONFIG_DIR / "daemon.heartbeat"
+# How often the loop looks for model workers idle past worker_idle_unload_s.
+WORKER_REAP_EVERY_S = 30.0
 PLAYBACK_STATE_FILE = TTS_CONFIG_DIR / "playback.json"
 VERSION_FILE = TTS_CONFIG_DIR / "daemon.version"
 RESPAWN_MARKER = TTS_CONFIG_DIR / "daemon.respawn"
@@ -100,13 +107,23 @@ def resolve_piper_voice(persona: str, persona_config: dict, *, other_engine: boo
     return DEFAULT_VOICE, True
 
 
-def describe_voice(persona: str, persona_config: dict, voice_kokoro: str = "", voice_kokoro_blend: str = "") -> str:
+def describe_voice(
+    persona: str,
+    persona_config: dict,
+    voice_kokoro: str = "",
+    voice_kokoro_blend: str = "",
+    voice_mlx: str = "",
+    speaker_mlx: str = "",
+) -> str:
     """One token naming the engine and voice a message will play with, for the log.
 
     `kokoro:<voice>`, `mlx:<model>[#voice]`, `sherpa:<model>[#speaker]`, or
     the Piper voice name, with ` (fallback)` when the default is standing in
     for a missing model.
     """
+    if voice_mlx:
+        # The message chose mlx for itself (engine "mlx"): its voice, not the persona's.
+        return f"mlx:{voice_mlx}" + (f"#{speaker_mlx}" if speaker_mlx else "")
     blend = voice_kokoro_blend or persona_config.get("voice_kokoro_blend", "")
     kokoro = voice_kokoro or persona_config.get("voice_kokoro", "")
     if blend:
@@ -379,6 +396,9 @@ def get_queue_config() -> dict:
         "speaker_transition": "chime",
         "coalesce_rapid_ms": 500,
         "idle_poll_ms": 100,
+        # A loaded model (sherpa, mlx) stays resident between messages and is
+        # unloaded after this long unused; 0 keeps it for the daemon's life.
+        "worker_idle_unload_s": 1800,
     }
     return {**defaults, **config.get("queue", {})}
 
@@ -406,8 +426,15 @@ def daemon_generate_speech(
     voice_kokoro_override: str = "",
     voice_kokoro_blend_override: str = "",
     tone: ToneParams | None = None,
+    voice_mlx_override: str = "",
+    speaker_mlx_override: str = "",
+    lang_mlx_override: str = "",
 ) -> bool:
     """Generate speech for daemon playback, resolving persona config.
+
+    A non-empty voice_mlx_override means the message chose mlx for itself
+    (`claude-tts speak --voice-mlx`): its model, voice and language play,
+    and the persona's kokoro and sherpa voices stand aside for this call.
 
     If tone is provided, Piper's expressiveness parameters (noise_scale,
     noise_w_scale, sentence_silence) are set from the tone preset.
@@ -430,6 +457,9 @@ def daemon_generate_speech(
     voice_mlx = persona_config.get("voice_mlx", "")
     speaker_mlx = persona_config.get("speaker_mlx", "")
     lang_mlx = persona_config.get("lang_mlx", "")
+    if voice_mlx_override:
+        voice_mlx, speaker_mlx, lang_mlx = voice_mlx_override, speaker_mlx_override, lang_mlx_override
+        kokoro_voice = kokoro_blend = voice_sherpa = ""
     pitch_filter = persona_config.get("pitch_filter", "")
     voice_name, _ = resolve_piper_voice(
         persona, persona_config, other_engine=bool(voice_sherpa or voice_mlx or kokoro_voice)
@@ -475,6 +505,9 @@ def synthesize_message(
     voice_kokoro_override: str = "",
     voice_kokoro_blend_override: str = "",
     tone: ToneParams | None = None,
+    voice_mlx_override: str = "",
+    speaker_mlx_override: str = "",
+    lang_mlx_override: str = "",
 ) -> tuple[bool, dict | None]:
     """Generate the WAV for one queue message, with timing marks if asked.
 
@@ -488,6 +521,9 @@ def synthesize_message(
         voice_kokoro=voice_kokoro_override,
         voice_kokoro_blend=voice_kokoro_blend_override,
         tone=tone,
+        voice_mlx=voice_mlx_override,
+        speaker_mlx=speaker_mlx_override,
+        lang_mlx=lang_mlx_override,
     )
 
     playback_speed = speed if speed_method == "playback" else 1.0
@@ -625,6 +661,9 @@ def sentence_generator(
     voice_kokoro: str = "",
     voice_kokoro_blend: str = "",
     tone: ToneParams | None = None,
+    voice_mlx: str = "",
+    speaker_mlx: str = "",
+    lang_mlx: str = "",
 ) -> Callable[[str, Path], bool]:
     """Bind a persona and voice overrides into the generate(sentence, path) call."""
 
@@ -636,6 +675,9 @@ def sentence_generator(
             voice_kokoro_override=voice_kokoro,
             voice_kokoro_blend_override=voice_kokoro_blend,
             tone=tone,
+            voice_mlx_override=voice_mlx,
+            speaker_mlx_override=speaker_mlx,
+            lang_mlx_override=lang_mlx,
         )
 
     return gen
@@ -1259,9 +1301,15 @@ def daemon_loop(lockpick: bool = False) -> None:
         except (TypeError, ValueError):
             ledger.mark(True)
         log("Started paused; holding the queue since the pause")
+    last_reap = time.monotonic()
     while not _shutdown_requested:
         try:
             write_heartbeat()
+            if time.monotonic() - last_reap >= WORKER_REAP_EVERY_S:
+                last_reap = time.monotonic()
+                idle_s = float(config.get("worker_idle_unload_s", 1800))
+                for name in reap_idle_workers(idle_s):
+                    log(f"Unloaded {name} worker: unused for {idle_s / 60:.0f} min; it reloads on the next message")
             state = read_playback_state()
             was_paused = ledger.paused
             ledger.mark(bool(state.get("paused")))
@@ -1289,6 +1337,9 @@ def daemon_loop(lockpick: bool = False) -> None:
                 )
                 i_voice_kokoro = interrupted.get("voice_kokoro", "")
                 i_voice_blend = interrupted.get("voice_kokoro_blend", "")
+                i_voice_mlx = interrupted.get("voice_mlx", "")
+                i_speaker_mlx = interrupted.get("speaker_mlx", "")
+                i_lang_mlx = interrupted.get("lang_mlx", "")
                 prev_audio_pos = interrupted.get("audio_position", 0.0)
                 i_job_id = interrupted.get("id") if interrupted.get("source") else None
 
@@ -1304,6 +1355,9 @@ def daemon_loop(lockpick: bool = False) -> None:
                             voice_kokoro=i_voice_kokoro,
                             voice_kokoro_blend=i_voice_blend,
                             tone=i_tone,
+                            voice_mlx=i_voice_mlx,
+                            speaker_mlx=i_speaker_mlx,
+                            lang_mlx=i_lang_mlx,
                         ),
                         start_index=int(interrupted.get("sentence_index", 0)),
                     )
@@ -1321,6 +1375,9 @@ def daemon_loop(lockpick: bool = False) -> None:
                     speed_method=i_speed_method,
                     voice_kokoro_override=i_voice_kokoro,
                     voice_kokoro_blend_override=i_voice_blend,
+                    voice_mlx_override=i_voice_mlx,
+                    speaker_mlx_override=i_speaker_mlx,
+                    lang_mlx_override=i_lang_mlx,
                 )
                 if i_ok:
                     wav_duration = get_wav_duration(audio_file)
@@ -1442,15 +1499,21 @@ def daemon_loop(lockpick: bool = False) -> None:
             speed_method = msg.get("speed_method", persona_config.get("speed_method", "playback"))
             voice_kokoro = msg.get("voice_kokoro", "")
             voice_kokoro_blend = msg.get("voice_kokoro_blend", "")
+            # Hook messages carry the persona's mlx fields too, and the persona
+            # is the authority for those; only a message that chose mlx for
+            # itself ("engine": "mlx", from `speak --voice-mlx`) overrides.
+            voice_mlx = msg.get("voice_mlx", "") if msg.get("engine") == "mlx" else ""
+            speaker_mlx = msg.get("speaker_mlx", "") if voice_mlx else ""
+            lang_mlx = msg.get("lang_mlx", "") if voice_mlx else ""
             # The line `daemon stats` counts messages by; the bracket says which
             # voice is about to play, so the log can answer that without an ear.
-            voice_label = describe_voice(persona, persona_config, voice_kokoro, voice_kokoro_blend)
+            voice_label = describe_voice(persona, persona_config, voice_kokoro, voice_kokoro_blend, voice_mlx, speaker_mlx)
             log(f"Speaking for {project} [{persona}, {voice_label}]: {text[:50]}...")
             pitch_filter_msg = msg.get("pitch_filter", "")
 
             # Sherpa applies speed during synthesis — don't also apply at playback
             sherpa_plays = bool(persona_config.get("voice_sherpa")) and not (
-                voice_kokoro or voice_kokoro_blend
+                voice_kokoro or voice_kokoro_blend or voice_mlx
                 or persona_config.get("voice_kokoro") or persona_config.get("voice_kokoro_blend")
                 or persona_config.get("voice_mlx")
             )
@@ -1468,6 +1531,9 @@ def daemon_loop(lockpick: bool = False) -> None:
                 "speed_method": effective_speed_method,
                 "voice_kokoro": voice_kokoro,
                 "voice_kokoro_blend": voice_kokoro_blend,
+                "voice_mlx": voice_mlx,
+                "speaker_mlx": speaker_mlx,
+                "lang_mlx": lang_mlx,
                 "pitch_filter": pitch_filter_msg,
             }
             if job_id:
@@ -1494,6 +1560,9 @@ def daemon_loop(lockpick: bool = False) -> None:
                         voice_kokoro=voice_kokoro,
                         voice_kokoro_blend=voice_kokoro_blend,
                         tone=tone,
+                        voice_mlx=voice_mlx,
+                        speaker_mlx=speaker_mlx,
+                        lang_mlx=lang_mlx,
                     ),
                     msg_file=msg_file,
                 )
@@ -1510,6 +1579,9 @@ def daemon_loop(lockpick: bool = False) -> None:
                 voice_kokoro_override=voice_kokoro,
                 voice_kokoro_blend_override=voice_kokoro_blend,
                 tone=tone,
+                voice_mlx_override=voice_mlx,
+                speaker_mlx_override=speaker_mlx,
+                lang_mlx_override=lang_mlx,
             )
             if not ok:
                 log(f"Failed to generate speech for message from {project}: {audio_last_error()}", "ERROR")
