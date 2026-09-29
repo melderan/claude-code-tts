@@ -46,7 +46,10 @@ ten minutes per message.
 to download it on first use, and spaCy's downloader runs pip, which answers to the machine's pip config
 (a require-hashes default refuses the wheel, which spaCy publishes without a hash). So the installer
 asks the venv's spaCy which wheel it wants and installs it with `uv pip`, the way mlx-audio went in.
-`claude-tts mlx status` reports whether the model is present; rerun `--enable-mlx` to fetch it.
+If GitHub will not serve the release asset (its redirect to objects.githubusercontent.com is blocked
+on some networks), the installer tries spaCy's Hugging Face copy of the model, which is the latest
+model version, unpinned. `claude-tts mlx status` reports whether the model is present; rerun
+`--enable-mlx` to fetch it.
 
 Persona keys:
 

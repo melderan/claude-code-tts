@@ -34,6 +34,7 @@ def have_uv(monkeypatch):
     monkeypatch.setattr(install.shutil, "which", lambda name: "/usr/local/bin/uv" if name == "uv" else real_which(name))
 
 
+SPACY_HF_WHEEL = "https://huggingface.co/spacy/en_core_web_sm/resolve/main/en_core_web_sm-any-py3-none-any.whl"
 SPACY_WHEEL = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
 
 
@@ -105,22 +106,46 @@ class TestPromptDiscipline:
         assert "spaCy en_core_web_sm installed" in out
         assert "claude-tts mlx pull kokoro" in out
 
-    def test_spacy_download_failure_warns_but_keeps_exit_zero(self, fake_home, apple_silicon, have_uv, capsys):
+    def test_github_blocked_falls_back_to_hugging_face(self, fake_home, apple_silicon, have_uv, capsys):
         run = _fake_run()
         real = run
 
-        def failing_spacy(cmd, **kwargs):
+        def github_blocked(cmd, **kwargs):
             cmd_list = list(cmd)
             if cmd_list[:3] == ["uv", "pip", "install"] and cmd_list[-1] == SPACY_WHEEL:
+                run.calls.append(cmd_list)
+                # uv's shape, seen 2026-09-29: the reason is on indented cause lines, not the first line
+                return MagicMock(returncode=2, stdout="", stderr=(
+                    "Using Python 3.12.14 environment at: /x/venvs/mlx\n"
+                    "error: Failed to download `en-core-web-sm @ https://github.com/...whl`\n"
+                    "  cause: Failed to fetch: `https://github.com/explosion/...`\n"
+                    "  cause: error sending request\n"))
+            return real(cmd, **kwargs)
+
+        with patch.object(install.subprocess, "run", side_effect=github_blocked):
+            assert install.do_enable_mlx(assume_yes=True) == 0
+        joined = [" ".join(c) for c in run.calls]
+        assert any(s.startswith("uv pip install --python") and s.endswith(SPACY_HF_WHEEL) for s in joined)
+        out = capsys.readouterr().out
+        assert "error sending request" in out  # the cause reaches the operator
+        assert "installed from the Hugging Face copy" in out
+
+    def test_both_sources_failing_warns_and_keeps_exit_zero(self, fake_home, apple_silicon, have_uv, capsys):
+        run = _fake_run()
+        real = run
+
+        def failing(cmd, **kwargs):
+            cmd_list = list(cmd)
+            if cmd_list[:3] == ["uv", "pip", "install"] and cmd_list[-1].endswith(".whl"):
                 run.calls.append(cmd_list)
                 return MagicMock(returncode=1, stdout="", stderr="no network")
             return real(cmd, **kwargs)
 
-        with patch.object(install.subprocess, "run", side_effect=failing_spacy):
+        with patch.object(install.subprocess, "run", side_effect=failing):
             assert install.do_enable_mlx(assume_yes=True) == 0
         out = capsys.readouterr().out
-        assert "spaCy model download failed" in out
-        assert "uv pip install --python" in out and SPACY_WHEEL in out  # the by-hand command is the one that failed
+        assert "from spaCy's release on GitHub failed" in out and "from the Hugging Face copy failed" in out
+        assert SPACY_WHEEL in out and SPACY_HF_WHEEL in out  # both by-hand commands are the ones that failed
 
     def test_spacy_without_a_wheel_url_falls_back_to_its_downloader(self, fake_home, apple_silicon, have_uv, capsys):
         run = _fake_run()

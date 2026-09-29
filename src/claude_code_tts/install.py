@@ -2430,6 +2430,21 @@ def _spacy_model_url(venv_python: Path) -> str | None:
     return url if url.startswith("https://") and url.endswith(".whl") else None
 
 
+# spaCy publishes each model to a Hugging Face repo too. This copy is the latest
+# model version, unpinned; it is the second source when the GitHub release asset
+# cannot be fetched (its redirect to objects.githubusercontent.com is blocked on
+# some networks).
+SPACY_HF_WHEEL = "https://huggingface.co/spacy/{model}/resolve/main/{model}-any-py3-none-any.whl"
+
+
+def _install_failure_summary(result: "subprocess.CompletedProcess[str]") -> str:
+    """Why an install failed: uv's `error:` and `cause:` lines, else the output's tail."""
+    text = (result.stderr or result.stdout or "").strip()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    why = [line for line in lines if line.lower().startswith(("error", "cause", "caused by"))]
+    return " | ".join(why or lines[-4:])[:600]
+
+
 def _ensure_spacy_model(venv_python: Path) -> bool:
     """Fetch spaCy's English model into the venv unless it is there.
 
@@ -2439,7 +2454,8 @@ def _ensure_spacy_model(venv_python: Path) -> bool:
     default) refuses the wheel, which spaCy publishes without one. So the
     wheel URL is taken from spaCy's own compatibility table and installed
     with `uv pip`, the tool that installed mlx-audio, here where a failure
-    can be seen, not at the first spoken message. Without a URL the
+    can be seen, not at the first spoken message. If GitHub will not serve
+    the asset, the Hugging Face copy is tried. Without a URL at all, the
     downloader is the fallback.
     """
     if _spacy_model_present(venv_python):
@@ -2447,23 +2463,29 @@ def _ensure_spacy_model(venv_python: Path) -> bool:
         return True
     info(f"Fetching spaCy {SPACY_EN_MODEL} for Kokoro's English text processing...")
     url = _spacy_model_url(venv_python)
+    attempts: list[tuple[str, list[str]]] = []
     if url:
-        cmd = ["uv", "pip", "install", "--python", str(venv_python), url]
+        uv_install = ["uv", "pip", "install", "--python", str(venv_python)]
+        attempts.append(("spaCy's release on GitHub", [*uv_install, url]))
+        attempts.append(("the Hugging Face copy", [*uv_install, SPACY_HF_WHEEL.format(model=SPACY_EN_MODEL)]))
     else:
         warn("spaCy could not name the model wheel; using its own downloader, which runs pip")
-        cmd = [str(venv_python), "-m", "spacy", "download", SPACY_EN_MODEL]
-    result = None
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-    except (subprocess.SubprocessError, OSError) as e:
-        warn(f"spaCy model download did not run: {e}")
-    if result is not None and result.returncode == 0:
-        success(f"spaCy {SPACY_EN_MODEL} installed")
-        return True
-    if result is not None:
-        warn(f"spaCy model download failed (exit {result.returncode}): {(result.stderr or result.stdout).strip()[:300]}")
-    print("  Kokoro English will not work until it is there. Fetch it by hand with:")
-    print(f"    {' '.join(cmd)}")
+        attempts.append(("spaCy's downloader", [str(venv_python), "-m", "spacy", "download", SPACY_EN_MODEL]))
+    for n, (where, cmd) in enumerate(attempts):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        except (subprocess.SubprocessError, OSError) as e:
+            warn(f"spaCy model download from {where} did not run: {e}")
+            continue
+        if result.returncode == 0:
+            success(f"spaCy {SPACY_EN_MODEL} installed from {where}")
+            return True
+        warn(f"spaCy model download from {where} failed (exit {result.returncode}): {_install_failure_summary(result)}")
+        if n + 1 < len(attempts):
+            info(f"Trying {attempts[n + 1][0]} instead...")
+    print("  Kokoro English will not work until it is there. Fetch it by hand with one of:")
+    for _, cmd in attempts:
+        print(f"    {' '.join(cmd)}")
     return False
 
 
