@@ -15,7 +15,8 @@ claude-tts mlx list-available            # curated models, license and size as c
 claude-tts mlx pull kokoro               # 389 MB into the Hugging Face cache, before the daemon needs it
 claude-tts speak --voice-mlx kokoro --speaker-mlx af_heart "hello there"     # one-shot ear test
 claude-tts persona add lyra --mlx kokoro --mlx-voice bf_emma --mlx-lang b --project
-claude-tts daemon restart                # the daemon warms one worker per mlx model at start
+# No restart needed: the persona is live at once and its first message loads the model (seconds).
+# A daemon restart only moves that load to daemon start, which warms one worker per mlx model.
 claude-tts mlx status                    # platform, venv, which models are cached, who uses mlx
 ```
 

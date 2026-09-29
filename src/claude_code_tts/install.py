@@ -2661,7 +2661,8 @@ def do_enable_mlx(*, assume_yes: bool = False, dry_run: bool = False) -> int:
     print("  2. claude-tts mlx pull kokoro               # fetch Kokoro (389 MB) before the daemon needs it")
     print('  3. claude-tts speak --voice-mlx kokoro --speaker-mlx af_heart "hello there"')
     print("  4. claude-tts persona add <name> --mlx kokoro --mlx-voice af_heart --project")
-    print("  5. claude-tts daemon restart               # the daemon warms mlx workers at start")
+    print("  (no daemon restart: a new persona is live at once; its first message loads the model,")
+    print("   a few seconds, and a restart only moves that load to daemon start)")
     print()
     return 0
 
