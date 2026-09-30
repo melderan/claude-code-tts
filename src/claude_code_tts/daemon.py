@@ -78,6 +78,10 @@ from claude_code_tts.tone import DEFAULT_TONE, ToneParams, classify_tone
 # --- Daemon path constants (the state files live in state.py) ---
 
 LOG_FILE = TTS_CONFIG_DIR / "daemon.log"
+# Where the daemon keeps the WAVs it is about to play. One constant so a test can point it at
+# its own directory: through 9.36.3 every path here said /tmp, and the startup sweep below
+# deleted the WAVs of any other test run on the machine (the "flaky" sentence-stream test).
+AUDIO_TMP_DIR = Path("/tmp")
 # Rotate once to daemon.log.1 past this size; the daemon is meant to run for weeks.
 LOG_MAX_BYTES = 5 * 1024 * 1024
 # While audio plays: refresh the heartbeat this often, and say so in the log this often.
@@ -166,6 +170,15 @@ _shutdown_requested = False
 _daemon_mode = False
 # log() is called from the synth, bridge and mic-watcher threads too.
 _log_lock = threading.Lock()
+
+
+def clear_leftover_wavs() -> int:
+    """Delete the WAVs a previous daemon left behind (killed mid-message or mid-prefetch)."""
+    removed = 0
+    for leftover in AUDIO_TMP_DIR.glob("tts_queue_*.wav"):
+        leftover.unlink(missing_ok=True)
+        removed += 1
+    return removed
 
 
 # --- Logging ---
@@ -794,7 +807,7 @@ def stream_message(
     job_id = msg_info.get("id") if msg_info.get("source") else None
     sentences = split_sentences(msg_info.get("text", ""))
     n = len(sentences)
-    audio_file = Path(f"/tmp/tts_queue_{session_id}.wav")
+    audio_file = AUDIO_TMP_DIR / f"tts_queue_{session_id}.wav"
     played_before = float(msg_info.get("played_s", 0.0))
 
     msg_info = dict(msg_info)
@@ -893,7 +906,7 @@ def speaker_transition(
         play_chime()
     elif transition == "announce":
         log(f"Announcing speaker: {project}")
-        announce_file = Path("/tmp/tts_announce.wav")
+        announce_file = AUDIO_TMP_DIR / "tts_announce.wav"
         if daemon_generate_speech(f"{project} says:", persona, announce_file):
             if speed_method == "playback":
                 daemon_play_audio(announce_file, speed)
@@ -927,7 +940,7 @@ def play_chime() -> None:
 
 def speak_announcement(text: str, persona: str = "claude-prime") -> None:
     """Speak a short announcement (daemon lifecycle messages)."""
-    audio_file = Path("/tmp/tts_daemon_announce.wav")
+    audio_file = AUDIO_TMP_DIR / "tts_daemon_announce.wav"
     if daemon_generate_speech(text, persona, audio_file):
         persona_config = get_persona_config(persona)
         speed = persona_config.get("speed", 2.0)
@@ -1254,7 +1267,7 @@ def prepare_message(msg: dict, raw_config: dict) -> PreparedMessage:
     tag = "".join(ch for ch in str(msg.get("id") or "") if ch.isalnum())[:12] or secrets.token_hex(
         4
     )
-    audio_file = Path(f"/tmp/tts_queue_{session_id}_{tag}.wav")
+    audio_file = AUDIO_TMP_DIR / f"tts_queue_{session_id}_{tag}.wav"
 
     current_msg_info = {
         "session_id": session_id,
@@ -1430,9 +1443,7 @@ def daemon_loop(lockpick: bool = False) -> None:
         sys.exit(1)
 
     _shutdown_by_signal = False
-    # WAVs a previous daemon left behind (killed mid-message, or mid-prefetch).
-    for leftover in Path("/tmp").glob("tts_queue_*.wav"):
-        leftover.unlink(missing_ok=True)
+    clear_leftover_wavs()
 
     def handle_shutdown(signum: int, _frame: object) -> None:
         global _shutdown_requested
@@ -1661,7 +1672,7 @@ def daemon_loop(lockpick: bool = False) -> None:
 
                 # Regenerate the full WAV, sentence by sentence if the page
                 # wants marks, so its offsets line up with the first pass.
-                audio_file = Path(f"/tmp/tts_queue_{session_id}.wav")
+                audio_file = AUDIO_TMP_DIR / f"tts_queue_{session_id}.wav"
                 i_ok, _ = synthesize_message(
                     interrupted.get("text", ""),
                     persona,
