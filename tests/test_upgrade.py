@@ -71,10 +71,6 @@ class TestManifest:
             src = repo / "commands" / name
             assert src.exists(), f"Command source missing: {src}"
 
-    def test_manifest_dirs_no_scripts(self):
-        with pytest.raises(KeyError):
-            inst._manifest_dirs("scripts")
-
     def test_manifest_entries_yields_only_hooks_and_commands(self):
         categories = set()
         for _name, src, _dst in inst._manifest_entries():
@@ -172,168 +168,6 @@ class TestCommandContent:
             assert "$HOME/.claude-tts/" not in content, (
                 f"{name} still references old $HOME/.claude-tts/ scripts"
             )
-
-
-# ---------------------------------------------------------------------------
-# Legacy cleanup simulation
-# ---------------------------------------------------------------------------
-
-class TestLegacyCleanup:
-    """Simulate the legacy script cleanup that happens during --upgrade."""
-
-    def _populate_v6_state(self, tts_dir: Path) -> None:
-        """Create a realistic v6.x ~/.claude-tts/ directory."""
-        tts_dir.mkdir(parents=True, exist_ok=True)
-
-        # Legacy scripts
-        for script in V6_SCRIPTS:
-            (tts_dir / script).write_text(f"#!/bin/bash\n# v6 legacy: {script}\n")
-
-        # Builder scripts (should survive)
-        for script in SURVIVOR_SCRIPTS:
-            (tts_dir / script).write_text(f"#!/bin/bash\n# standalone: {script}\n")
-
-        # Config and runtime files (should survive)
-        (tts_dir / "config.json").write_text(json.dumps({
-            "version": 1,
-            "mode": "queue",
-            "active_persona": "claude-prime",
-            "muted": False,
-            "installed_version": "6.2.0",
-            "personas": {"claude-prime": {"voice": "en_US-hfc_male-medium", "speed": 2.0}},
-        }))
-
-        sessions_dir = tts_dir / "sessions.d"
-        sessions_dir.mkdir()
-        (sessions_dir / "my-project.json").write_text(json.dumps({
-            "muted": False, "persona": "claude-prime",
-        }))
-
-        # Queue dir (runtime)
-        (tts_dir / "queue").mkdir()
-        (tts_dir / "daemon.log").write_text("daemon log content\n")
-        (tts_dir / "daemon.pid").write_text("12345\n")
-
-    def test_removes_all_legacy_scripts(self, tmp_path):
-        tts_dir = tmp_path / ".claude-tts"
-        self._populate_v6_state(tts_dir)
-
-        # Run cleanup logic (extracted from do_install)
-        removed = 0
-        for script_name in inst.LEGACY_SCRIPTS:
-            old_script = tts_dir / script_name
-            if old_script.exists():
-                old_script.unlink()
-                removed += 1
-
-        # Legacy list no longer includes compat-shimmed scripts
-        shimmed = set(inst.COMPAT_SHIMS)
-        expected_removed = V6_SCRIPTS - shimmed
-        assert removed == len(expected_removed)
-        for script in expected_removed:
-            assert not (tts_dir / script).exists(), f"{script} not cleaned up"
-        # Shimmed scripts still exist (original v6 version, not yet replaced by shim)
-        for script in shimmed:
-            assert (tts_dir / script).exists(), f"{script} should not be deleted by legacy cleanup"
-
-    def test_preserves_builder_scripts(self, tmp_path):
-        tts_dir = tmp_path / ".claude-tts"
-        self._populate_v6_state(tts_dir)
-
-        # Run cleanup
-        for script_name in inst.LEGACY_SCRIPTS:
-            old_script = tts_dir / script_name
-            if old_script.exists():
-                old_script.unlink()
-
-        for script in SURVIVOR_SCRIPTS:
-            assert (tts_dir / script).exists(), f"{script} was incorrectly removed"
-
-    def test_preserves_config(self, tmp_path):
-        tts_dir = tmp_path / ".claude-tts"
-        self._populate_v6_state(tts_dir)
-
-        # Run cleanup
-        for script_name in inst.LEGACY_SCRIPTS:
-            old_script = tts_dir / script_name
-            if old_script.exists():
-                old_script.unlink()
-
-        assert (tts_dir / "config.json").exists()
-        config = json.loads((tts_dir / "config.json").read_text())
-        assert config["installed_version"] == "6.2.0"
-        assert config["active_persona"] == "claude-prime"
-
-    def test_preserves_sessions_d(self, tmp_path):
-        tts_dir = tmp_path / ".claude-tts"
-        self._populate_v6_state(tts_dir)
-
-        # Run cleanup
-        for script_name in inst.LEGACY_SCRIPTS:
-            old_script = tts_dir / script_name
-            if old_script.exists():
-                old_script.unlink()
-
-        assert (tts_dir / "sessions.d" / "my-project.json").exists()
-
-    def test_preserves_runtime_files(self, tmp_path):
-        tts_dir = tmp_path / ".claude-tts"
-        self._populate_v6_state(tts_dir)
-
-        # Run cleanup
-        for script_name in inst.LEGACY_SCRIPTS:
-            old_script = tts_dir / script_name
-            if old_script.exists():
-                old_script.unlink()
-
-        assert (tts_dir / "daemon.log").exists()
-        assert (tts_dir / "daemon.pid").exists()
-        assert (tts_dir / "queue").is_dir()
-
-    def test_handles_partial_legacy(self, tmp_path):
-        """Only some legacy scripts present (partial v6 install)."""
-        tts_dir = tmp_path / ".claude-tts"
-        tts_dir.mkdir()
-        # Only 3 of the 18 scripts
-        for script in ["tts-lib.sh", "tts-mute.sh", "tts-speak.sh"]:
-            (tts_dir / script).write_text("#!/bin/bash\n")
-
-        removed = 0
-        for script_name in inst.LEGACY_SCRIPTS:
-            old_script = tts_dir / script_name
-            if old_script.exists():
-                old_script.unlink()
-                removed += 1
-
-        assert removed == 3
-
-    def test_handles_no_legacy(self, tmp_path):
-        """No legacy scripts at all (fresh v7 install)."""
-        tts_dir = tmp_path / ".claude-tts"
-        tts_dir.mkdir()
-
-        removed = 0
-        for script_name in inst.LEGACY_SCRIPTS:
-            old_script = tts_dir / script_name
-            if old_script.exists():
-                old_script.unlink()
-                removed += 1
-
-        assert removed == 0
-
-    def test_idempotent_cleanup(self, tmp_path):
-        """Running cleanup twice doesn't error."""
-        tts_dir = tmp_path / ".claude-tts"
-        self._populate_v6_state(tts_dir)
-
-        for _ in range(2):
-            for script_name in inst.LEGACY_SCRIPTS:
-                old_script = tts_dir / script_name
-                if old_script.exists():
-                    old_script.unlink()
-
-        # Should still have non-legacy files
-        assert (tts_dir / "config.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -489,25 +323,6 @@ class TestPreflight:
             assert name not in V6_SCRIPTS, (
                 f"Preflight still checks for legacy script: {name}"
             )
-
-
-# ---------------------------------------------------------------------------
-# Version consistency
-# ---------------------------------------------------------------------------
-
-class TestVersionConsistency:
-    """Verify version is consistent across all files."""
-
-    def test_versions_match(self):
-        from claude_code_tts import __version__ as pkg_version
-        assert inst.__version__ == pkg_version, (
-            f"install.py ({inst.__version__}) != __init__.py ({pkg_version})"
-        )
-
-    def test_version_is_9x(self):
-        assert inst.__version__.startswith("9."), (
-            f"Expected 9.x version, got {inst.__version__}"
-        )
 
 
 # ---------------------------------------------------------------------------

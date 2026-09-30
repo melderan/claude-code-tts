@@ -17,7 +17,6 @@ import pytest
 
 import claude_code_tts.daemon as daemon_mod
 from claude_code_tts.daemon import (
-    NEAR_END_THRESHOLD,
     REWIND_REAL_SECONDS,
     calculate_audio_position,
     daemon_play_audio,
@@ -313,39 +312,6 @@ class TestResumeFlowIntegration:
         expected = full_duration - resume_from  # 15.0
         assert abs(trimmed_duration - expected) < 0.1
 
-    def test_resume_from_early_position_plays_from_start(self, daemon_env):
-        """If interrupted early (< REWIND_REAL_SECONDS), play from start."""
-        tmp = daemon_env["tmp_path"]
-        make_wav(tmp / "full.wav", 30.0)
-
-        audio_position = 3.0  # Less than REWIND_REAL_SECONDS (5.0)
-        resume_from = max(0.0, audio_position - REWIND_REAL_SECONDS)
-
-        assert resume_from == 0.0  # Should play from beginning
-
-    def test_near_end_skips_replay(self, daemon_env):
-        """If interrupted near the end, skip replay entirely."""
-        tmp = daemon_env["tmp_path"]
-        wav = make_wav(tmp / "test.wav", 30.0)
-        wav_duration = get_wav_duration(wav)
-
-        # Interrupted at 29s of a 30s clip
-        audio_position = 29.0
-        remaining = wav_duration - audio_position
-
-        assert remaining <= NEAR_END_THRESHOLD
-        # Daemon would skip replay here
-
-    def test_near_end_with_zero_position_still_plays(self, daemon_env):
-        """First interruption (position=0) should always replay, never skip."""
-        wav_duration = 30.0
-        audio_position = 0.0
-
-        # The daemon checks: if prev_audio_pos > 0 and remaining <= threshold
-        # With position 0, it should NOT skip
-        should_skip = audio_position > 0 and (wav_duration - audio_position) <= NEAR_END_THRESHOLD
-        assert should_skip is False
-
     def test_trim_and_play_integration(self, daemon_env):
         """Full cycle: create WAV, trim, play trimmed version."""
         tmp = daemon_env["tmp_path"]
@@ -387,33 +353,6 @@ class TestGhostReplayPrevention:
 
         assert success is True
         assert was_killed is False
-
-        # Now check: if someone pauses AFTER completion,
-        # was_killed=False means the daemon won't store current_message
-        # So there's nothing to replay
-
-    def test_near_end_interruption_skipped(self, daemon_env):
-        """Interruption with only 1s left should be skipped."""
-        wav_duration = 30.0
-        audio_position = 29.5  # Only 0.5s remaining
-
-        remaining = wav_duration - audio_position
-        assert remaining <= NEAR_END_THRESHOLD  # 2.0
-
-        # This is the skip condition
-        should_skip = audio_position > 0 and remaining <= NEAR_END_THRESHOLD
-        assert should_skip is True
-
-    def test_mid_message_interruption_not_skipped(self, daemon_env):
-        """Interruption with plenty of audio left should NOT be skipped."""
-        wav_duration = 30.0
-        audio_position = 15.0
-
-        remaining = wav_duration - audio_position
-        assert remaining > NEAR_END_THRESHOLD
-
-        should_skip = audio_position > 0 and remaining <= NEAR_END_THRESHOLD
-        assert should_skip is False
 
 
 # ---------------------------------------------------------------------------

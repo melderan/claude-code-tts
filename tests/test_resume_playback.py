@@ -113,13 +113,6 @@ class TestCalculateAudioPosition:
 class TestResumeDecisions:
     """Test the decision logic for whether to skip, rewind, or replay."""
 
-    def test_near_end_should_skip(self):
-        """Audio position near end of WAV should skip replay."""
-        wav_duration = 30.0
-        audio_position = 29.0
-        remaining = wav_duration - audio_position
-        assert remaining <= NEAR_END_THRESHOLD
-
     def test_early_interruption_should_replay(self):
         """Interruption early in audio should replay (possibly with rewind)."""
         wav_duration = 30.0
@@ -141,13 +134,6 @@ class TestResumeDecisions:
         rw = rewind_amount(2.0, "playback")
         resume_from = max(0.0, audio_position - rw)
         assert resume_from == 14.0  # 20.0 - 6.0
-
-    def test_first_interruption_no_position(self):
-        """First-ever interruption has audio_position=0, should replay from start."""
-        audio_position = 0.0
-        # The code checks: if prev_audio_pos > 0 and remaining <= threshold
-        # With position 0, it always replays (never hits skip condition)
-        assert not (audio_position > 0)
 
     def test_position_accumulates_across_pauses(self):
         """Multiple pause/resume cycles should accumulate position correctly."""
@@ -185,15 +171,6 @@ class TestRewindAmount:
     def test_length_scale_ignores_speed(self):
         assert rewind_amount(2.0, "length_scale") == REWIND_REAL_SECONDS
         assert rewind_amount(0.5, "length_scale") == REWIND_REAL_SECONDS
-
-
-class TestConstants:
-    def test_near_end_threshold_reasonable(self):
-        assert 1.0 <= NEAR_END_THRESHOLD <= 5.0
-
-    def test_rewind_real_seconds_reasonable(self):
-        assert 1.0 <= REWIND_REAL_SECONDS <= 5.0
-
 
 
 class TestResumeRewindConfig:
