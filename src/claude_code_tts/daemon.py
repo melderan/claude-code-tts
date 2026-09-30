@@ -26,6 +26,7 @@ from io import TextIOWrapper
 from pathlib import Path
 from typing import Any
 
+from claude_code_tts import __version__
 from claude_code_tts.audio import _set_last_error as audio_set_last_error
 from claude_code_tts.audio import (
     detect_player,
@@ -237,6 +238,19 @@ def release_lock() -> None:
 
 
 # --- Heartbeat ---
+
+
+def write_release_marker() -> Path:
+    """Record which release this daemon is, next to the protocol marker.
+
+    daemon.version holds the control-protocol tag ("control-v1"), not a release,
+    so `just up --if-changed` compared 9.x against it and never skipped. The
+    release goes in daemon.release, derived from VERSION_FILE so tests that
+    redirect one redirect both.
+    """
+    path = VERSION_FILE.with_name("daemon.release")
+    path.write_text(__version__)
+    return path
 
 
 def write_heartbeat() -> None:
@@ -1603,6 +1617,7 @@ def daemon_loop(lockpick: bool = False) -> None:
     )
 
     VERSION_FILE.write_text("control-v1")
+    write_release_marker()
 
     # Loopback HTTP bridge for browser pages (off unless http.enabled in config).
     bridge: Bridge | None = None

@@ -81,9 +81,12 @@ def installed_version() -> str:
 
 
 def daemon_version() -> str:
-    """The version the running daemon wrote at start, or "" when unknown."""
+    """The release the running daemon wrote at start (daemon.release), or "" when unknown.
+
+    Not daemon.version: that file is the control-protocol tag, "control-v1".
+    """
     try:
-        return (TTS_DIR / "daemon.version").read_text().strip()
+        return (TTS_DIR / "daemon.release").read_text().strip()
     except OSError:
         return ""
 

@@ -44,3 +44,28 @@ def test_installed_version_parses_the_cli_line(monkeypatch: pytest.MonkeyPatch) 
 def test_unknown_argument_is_refused(capsys: pytest.CaptureFixture[str]) -> None:
     assert up.main(["--bogus"]) == 2
     assert "--if-changed" in capsys.readouterr().err
+
+
+def test_daemon_version_reads_the_release_marker_not_the_protocol_tag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(up, "TTS_DIR", tmp_path)
+    (tmp_path / "daemon.version").write_text("control-v1")
+    assert up.daemon_version() == "", (
+        "no release marker yet: never report the protocol tag as a version"
+    )
+    (tmp_path / "daemon.release").write_text("9.32.1\n")
+    assert up.daemon_version() == "9.32.1"
+
+
+def test_daemon_writes_a_release_marker_the_script_can_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import claude_code_tts.daemon as d
+    from claude_code_tts import __version__
+
+    monkeypatch.setattr(d, "VERSION_FILE", tmp_path / "daemon.version")
+    written = d.write_release_marker()
+    assert written == tmp_path / "daemon.release" and written.read_text() == __version__
+    monkeypatch.setattr(up, "TTS_DIR", tmp_path)
+    assert up.daemon_version() == __version__
