@@ -687,3 +687,64 @@ class TestDaemonLoopMessageFlow:
         # Message should be cleared (skipped, not stuck)
         state = read_playback_state()
         assert state.get("current_message") is None
+
+    @pytest.mark.parametrize("odd_text", [123, ["a", "b"], {"k": "v"}])
+    def test_poison_files_are_dropped_and_the_next_message_plays(self, daemon_env, odd_text):
+        """A `[]` or `null` file, or a message whose text is not a string, must not wedge the loop.
+
+        Before the fix `[]` raised in scan and cleanup on every pass, and a text of 123 raised
+        at the loop's `text[:50]`; the file stayed, "Error in daemon loop" repeated and nothing
+        after it played.
+        """
+        tmp = daemon_env["tmp_path"]
+        queue_dir = daemon_env["queue_dir"]
+        fake = make_fake_player(tmp, duration=0.1)
+        now = time.time()
+        (queue_dir / f"{now - 3:.6f}_list.json").write_text("[]")
+        (queue_dir / f"{now - 2:.6f}_null.json").write_text("null")
+        odd = queue_dir / f"{now - 1:.6f}_odd.json"
+        odd.write_text(json.dumps({"id": "odd", "timestamp": now - 1, "text": odd_text}))
+        good = self._enqueue_message(queue_dir, "Hello after the poison")
+        spoken: list = []
+
+        def fake_generate(text, persona, output_file, **kw):
+            spoken.append(text)
+            make_wav(output_file, 0.5)
+            return True
+
+        with patch.object(daemon_mod, "detect_player", return_value=[str(fake)]), \
+             patch.object(daemon_mod, "daemon_generate_speech", side_effect=fake_generate), \
+             patch.object(daemon_mod, "acquire_lock", return_value=True), \
+             patch.object(daemon_mod, "release_lock"), \
+             patch.object(daemon_mod, "speak_announcement"), \
+             patch.object(daemon_mod, "get_queue_config", return_value={
+                 "max_depth": 20, "max_age_seconds": 300,
+                 "speaker_transition": "none", "coalesce_rapid_ms": 500,
+                 "idle_poll_ms": 50,
+             }), \
+             patch.object(daemon_mod, "load_raw_config", return_value={}):
+
+            def run_daemon():
+                daemon_mod._shutdown_requested = False
+                daemon_mod._daemon_mode = True
+                daemon_mod.daemon_loop()
+
+            def stop_after_processing():
+                for _ in range(50):
+                    time.sleep(0.1)
+                    if not good.exists():
+                        break
+                time.sleep(0.3)
+                daemon_mod._shutdown_requested = True
+
+            stopper = threading.Thread(target=stop_after_processing)
+            runner = threading.Thread(target=run_daemon, daemon=True)
+            stopper.start()
+            runner.start()
+            stopper.join(timeout=10)
+            runner.join(timeout=3)
+
+        assert list(queue_dir.glob("*.json")) == []
+        assert spoken == ["Hello after the poison"]
+        log_text = daemon_env["log_file"].read_text()
+        assert "Error in daemon loop" not in log_text

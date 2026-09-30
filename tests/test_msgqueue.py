@@ -8,6 +8,7 @@ module and nowhere else carries a copy, so a patch aimed at the old home fails l
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import time
@@ -106,3 +107,124 @@ def test_no_package_module_shadows_the_standard_library() -> None:
     """queue.py would have shadowed stdlib queue for any script run from the package directory."""
     clashes = sorted(p.stem for p in SRC.glob("*.py") if p.stem in sys.stdlib_module_names)
     assert clashes == [], clashes
+
+
+# --- A queue file that is valid JSON but not an object (a poison pill before this fix) ---
+
+
+@pytest.mark.parametrize("body", ["[]", "null", '"text"', "5", "[1, 2]"])
+def test_scan_deletes_json_that_is_not_an_object_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+) -> None:
+    """`[]` or `null` raised TypeError at msg["_file"] and wedged the loop for good."""
+    monkeypatch.setattr(mq, "QUEUE_DIR", tmp_path)
+    bad = tmp_path / "1.0_bad.json"
+    bad.write_text(body)
+    (tmp_path / "2.0_ok.json").write_text('{"timestamp": 2.0, "text": "fine"}')
+    said: list[str] = []
+    msgs = mq.scan(log=lambda m, level: said.append(level))
+    assert [m["text"] for m in msgs] == ["fine"]
+    assert not bad.exists() and said == ["WARN"]
+
+
+@pytest.mark.parametrize("body", ["[]", "null", '"text"', "5"])
+def test_cleanup_deletes_json_that_is_not_an_object_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+) -> None:
+    """`[]` or `null` raised AttributeError at msg.get; the loop logged an error every pass."""
+    monkeypatch.setattr(mq, "QUEUE_DIR", tmp_path)
+    bad = tmp_path / "1.0_bad.json"
+    bad.write_text(body)
+    now = time.time()
+    ok = tmp_path / f"{now:.6f}_ok.json"
+    ok.write_text(f'{{"timestamp": {now}, "text": "fine"}}')
+    said: list[str] = []
+    assert mq.cleanup_old_messages(300, log=lambda m, level: said.append(level)) == 1
+    assert not bad.exists() and ok.exists() and said == ["WARN"]
+
+
+@pytest.mark.parametrize("text", [5, None, ["a"], {"a": 1}])
+def test_text_of_reads_anything_that_is_not_a_string_as_empty(text: object) -> None:
+    assert mq.text_of({"text": text}) == ""
+    assert mq.text_of({}) == ""
+    assert mq.text_of({"text": " hi "}) == " hi "
+
+
+def test_next_speakable_skips_a_message_whose_text_is_not_a_string(tmp_path: Path) -> None:
+    """Prefetch would hand it to prepare_message; the loop skips it as empty instead."""
+    cur, odd, good = tmp_path / "a", tmp_path / "b", tmp_path / "c"
+    msgs = [{"_file": cur, "text": "now"}, {"_file": odd, "text": 123}, {"_file": good, "text": "next"}]
+    assert mq.next_speakable(msgs, cur) is msgs[2]
+
+
+# --- Ageing and trimming tell the caller what they removed, so bridge jobs settle ---
+
+
+def _write(dir_: Path, ts: float, **fields: object) -> Path:
+    msg = {"timestamp": ts, "text": "x", **fields}
+    path = dir_ / f"{ts:.6f}_{fields.get('id', 'm')}.json"
+    path.write_text(json.dumps(msg))
+    return path
+
+
+def test_cleanup_reports_each_message_it_ages_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mq, "QUEUE_DIR", tmp_path)
+    _write(tmp_path, 1.0, id="old", source="page")
+    _write(tmp_path, time.time(), id="new", source="page")
+    removed: list[dict] = []
+    assert mq.cleanup_old_messages(60, on_removed=removed.append) == 1
+    assert [m["id"] for m in removed] == ["old"]
+
+
+def test_enforce_max_depth_reports_each_message_it_trims(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mq, "QUEUE_DIR", tmp_path)
+    now = time.time()
+    for i, name in enumerate(["a", "b", "c"]):
+        _write(tmp_path, now + i, id=name, source="page")
+    removed: list[dict] = []
+    assert mq.enforce_max_depth(1, on_removed=removed.append) == 2
+    assert [m["id"] for m in removed] == ["a", "b"]
+
+
+@pytest.mark.parametrize("which", ["cleanup", "depth"])
+def test_daemon_wrappers_cancel_the_job_of_a_bridge_message_they_remove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str
+) -> None:
+    """A page polling GET /jobs/<id> saw "queued" forever, and evict_finished never evicted it."""
+    monkeypatch.setattr(mq, "QUEUE_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "LOG_FILE", tmp_path / "daemon.log")
+    registry = bridge_mod.JobRegistry()
+    monkeypatch.setattr(daemon_mod, "JOBS", registry)
+    registry.create("gone", source="page")
+    registry.create("hook-id")  # a hook message's id is not a job; it must stay untouched
+    if which == "cleanup":
+        _write(tmp_path, 1.0, id="gone", source="page")
+        _write(tmp_path, 2.0, id="hook-id")
+        assert daemon_mod.cleanup_old_messages(60) == 2
+    else:
+        now = time.time()
+        _write(tmp_path, now, id="gone", source="page")
+        _write(tmp_path, now + 1, id="hook-id")
+        _write(tmp_path, now + 2, id="kept", source="page")
+        assert daemon_mod.enforce_max_depth(1) == 2
+    job = registry.get("gone")
+    assert job is not None and job["state"] == "cancelled" and job["position_ms"] == 0
+    assert registry.state("hook-id") == "queued"
+
+
+# --- Depth trimming never drops a control message ---
+
+
+def test_enforce_max_depth_keeps_control_messages_and_does_not_count_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart from `claude-tts daemon restart` older than the overflow was trimmed; no restart."""
+    monkeypatch.setattr(mq, "QUEUE_DIR", tmp_path)
+    now = time.time()
+    control = _write(tmp_path, now, id="ctl", type="control", post_action="restart")
+    for i, name in enumerate(["a", "b", "c"]):
+        _write(tmp_path, now + 1 + i, id=name)
+    assert mq.enforce_max_depth(2) == 1
+    left = sorted(m["id"] for m in mq.scan())
+    assert control.exists() and left == ["b", "c", "ctl"]
+    assert mq.enforce_max_depth(2) == 0

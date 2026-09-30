@@ -52,7 +52,7 @@ from claude_code_tts.config import (
 from claude_code_tts.handy import AnalyzerThread, save_speech_wav
 from claude_code_tts.level import normalize as normalize_level
 from claude_code_tts.mic_watcher import MicWatcher
-from claude_code_tts.msgqueue import PauseLedger, next_speakable, play_order
+from claude_code_tts.msgqueue import PauseLedger, next_speakable, play_order, text_of
 from claude_code_tts.state import (
     UNSET,
     acquire_lock,
@@ -979,7 +979,7 @@ def handle_control_message(msg: dict) -> None:
     """Handle a control message with pre_action, speech, and post_action."""
     pre_action = msg.get("pre_action")
     post_action = msg.get("post_action")
-    text = msg.get("text", "")
+    text = text_of(msg)
     persona = msg.get("persona", "claude-prime")
 
     log(f"Control message: pre={pre_action}, post={post_action}, text={text[:50]!r}")
@@ -1034,14 +1034,25 @@ def get_queue_messages() -> list[dict]:
     return msgqueue.scan(log=log)
 
 
+def _cancel_removed_job(msg: dict) -> None:
+    """Settle the job of a bridge message the queue dropped unplayed, as flush_source does.
+
+    Without it the page polling GET /jobs/<id> reads "queued" forever, and evict_finished,
+    which only evicts terminal states, never removes the job. A hook message has no
+    source and its id is not a job, so it is left alone.
+    """
+    if msg.get("source"):
+        JOBS.update(msg.get("id"), state="cancelled", position_ms=0)
+
+
 def cleanup_old_messages(max_age_seconds: int, ledger: PauseLedger | None = None) -> int:
     """Remove messages older than max_age, not counting paused time. Returns count removed."""
-    return msgqueue.cleanup_old_messages(max_age_seconds, ledger, log=log)
+    return msgqueue.cleanup_old_messages(max_age_seconds, ledger, log=log, on_removed=_cancel_removed_job)
 
 
 def enforce_max_depth(max_depth: int, ledger: PauseLedger | None = None) -> int:
-    """Remove oldest messages if queue exceeds max depth; held messages are exempt."""
-    return msgqueue.enforce_max_depth(max_depth, ledger, log=log)
+    """Remove oldest messages if queue exceeds max depth; held and control messages are exempt."""
+    return msgqueue.enforce_max_depth(max_depth, ledger, log=log, on_removed=_cancel_removed_job)
 
 
 DEFAULT_NORMALIZE_DBFS = -16.0
@@ -1112,7 +1123,7 @@ def prepare_message(msg: dict, raw_config: dict) -> PreparedMessage:
     """Resolve a queue message against its persona and the daemon config."""
     session_id = msg.get("session_id", "unknown")
     project = msg.get("project", "unknown")
-    text = msg.get("text", "")
+    text = text_of(msg)
     persona = msg.get("persona", "claude-prime")
     # Bridge messages carry a source; their id is a job the page polls.
     job_id = msg.get("id") if msg.get("source") else None
@@ -1666,7 +1677,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 msg_file.unlink(missing_ok=True)
                 continue
 
-            if not str(msg.get("text", "")).strip():
+            if not text_of(msg).strip():
                 log(f"Empty message from {msg.get('project', 'unknown')}, skipping")
                 msg_file.unlink(missing_ok=True)
                 JOBS.update(
