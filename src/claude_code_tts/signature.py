@@ -240,6 +240,20 @@ class Spread:
     zcr_rel: float = 0.0
     runs: int = 0
     notes: list[str] = field(default_factory=list)
+    version: int = VERSION
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), indent=1)
+
+    @classmethod
+    def from_json(cls, text: str) -> Spread | None:
+        """A Spread from its JSON, or None when it was measured by another signature version
+        (its fields would not mean the same thing; measure again)."""
+        data = json.loads(text)
+        if data.get("version") != VERSION:
+            return None
+        names = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in names})
 
     def tolerance(self, margin: float = 2.0, base: Tolerance | None = None) -> Tolerance:
         """A Tolerance no tighter than `base` and at least `margin` times the spread seen."""

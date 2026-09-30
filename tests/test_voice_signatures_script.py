@@ -141,3 +141,35 @@ def test_long_baselines_are_skipped_and_short_ones_come_first(vs):
     both = vs.load_baselines(None)
     assert [b["signature"]["seconds"] for b in both] == sorted(b["signature"]["seconds"] for b in both)
     assert vs.load_baselines(None, max_seconds=both[0]["signature"]["seconds"]) == [both[0]]
+
+
+def test_capture_retires_old_baselines_whose_wav_is_gone_and_keeps_refreshable_ones(vs, capsys):
+    vs.cmd_capture(_args(limit=50, refresh=False))
+    a, b = sorted((vs.BASELINE_DIR / "test-voice").glob("*.json"))
+    for p in (a, b):
+        d = json.loads(p.read_text())
+        d["signature"]["version"] = 1
+        p.write_text(json.dumps(d))
+    gone = json.loads(a.read_text())["source"]
+    (vs.HISTORY_DIR / gone).unlink()
+    a.with_suffix(".spread.json").write_text("{}")
+    vs.cmd_capture(_args(limit=50, refresh=False))
+    out = capsys.readouterr().out
+    assert "retire" in out and "1 retired" in out
+    assert not a.exists() and not a.with_suffix(".spread.json").exists()
+    assert json.loads(b.read_text())["signature"]["version"] == vs.VERSION
+
+
+def test_verify_survives_a_spread_file_from_an_older_version(vs, monkeypatch, capsys):
+    vs.cmd_capture(_args(limit=50, refresh=False))
+    for p in (vs.BASELINE_DIR / "test-voice").glob("*.json"):
+        p.with_suffix(".spread.json").write_text(json.dumps({"envelope_r": 0.9, "zcr_r": 0.8, "runs": 3}))
+
+    def same(text, persona, out):
+        write(out, voice(words=len(text.split()), seed=5))
+        return True
+
+    monkeypatch.setattr(vs, "synthesize", same)
+    assert vs.cmd_verify(_args(limit=50, persona=None, max_seconds=30.0)) == 0
+    out = capsys.readouterr().out
+    assert "older signature version" in out and "2 ok" in out

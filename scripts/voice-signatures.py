@@ -39,6 +39,7 @@ if sys.version_info < (3, 10):  # noqa: UP036  the point is to run on an older i
 from claude_code_tts.signature import (  # noqa: E402
     VERSION,
     Signature,
+    Spread,
     Tolerance,
     compare,
     sign,
@@ -89,6 +90,7 @@ def load_baselines(persona: str | None, max_seconds: float | None = None) -> lis
 
 def cmd_capture(args: argparse.Namespace) -> int:
     added = skipped = 0
+    retired = retire_unrefreshable()
     for row in history_rows(args.limit):
         s = sign(row["file"], text=row["text"], voice=row["persona"])
         if s is None:
@@ -109,8 +111,31 @@ def cmd_capture(args: argparse.Namespace) -> int:
         added += 1
         print(f"baseline {row['persona']}/{s.text_sha}: {s.seconds:.1f}s, speech {s.speech_dbfs:.1f} dBFS, "
               f"{s.pauses} pauses  {row['text'][:60]!r}")
-    print(f"capture: {added} added, {skipped} already known, baseline in {BASELINE_DIR}")
+    print(f"capture: {added} added, {skipped} already known, {retired} retired, baseline in {BASELINE_DIR}")
     return 0
+
+
+def retire_unrefreshable() -> int:
+    """Drop baselines of an older signature version whose source WAV has left the history.
+
+    The history keeps a rolling window of WAVs, so a baseline captured a while ago cannot be
+    re-signed once its WAV is gone; at an older version it can no longer be compared either.
+    Its spread file goes with it. Returns how many were retired.
+    """
+    retired = 0
+    for path in sorted(BASELINE_DIR.glob("*/*.json")):
+        if path.name.endswith(".spread.json"):
+            continue
+        b = json.loads(path.read_text())
+        if b["signature"].get("version", 1) == VERSION:
+            continue
+        if (HISTORY_DIR / b.get("source", "")).exists():
+            continue  # capture will refresh it from the WAV
+        path.unlink()
+        path.with_suffix(".spread.json").unlink(missing_ok=True)
+        retired += 1
+        print(f"retire {path.parent.name}/{path.stem}: older signature version and its WAV has left the history")
+    return retired
 
 
 def synthesize(text: str, persona: str, out: Path) -> bool:
@@ -140,7 +165,7 @@ def cmd_spread(args: argparse.Namespace) -> int:
                 continue
             sp = spread(sigs)
             path = baseline_path(b["persona"], b["signature"]["text_sha"]).with_suffix(".spread.json")
-            path.write_text(json.dumps(sp.__dict__, indent=1))
+            path.write_text(sp.to_json())
             tol = sp.tolerance()
             worst = Tolerance(
                 seconds_rel=max(worst.seconds_rel, tol.seconds_rel), seconds_abs=worst.seconds_abs,
@@ -159,13 +184,13 @@ def cmd_spread(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    passed = drifted = advisory = failed = 0
+    passed = drifted = advisory = failed = skipped = 0
     with tempfile.TemporaryDirectory(prefix="voice-verify-") as tmp:
         for b in load_baselines(args.persona, args.max_seconds)[: args.limit]:
             sha = b["signature"]["text_sha"]
             if b["signature"].get("version", 1) != VERSION:
-                failed += 1
-                print(f"FAIL {b['persona']}/{sha}: older signature version, run `just voices-capture` to refresh")
+                skipped += 1
+                print(f"skip  {b['persona']}/{sha}: older signature version, `just voices-capture` refreshes or retires it")
                 continue
             expected = Signature.from_json(json.dumps(b["signature"]))
             wav = Path(tmp) / f"{sha}.wav"
@@ -181,10 +206,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
             tol = Tolerance()
             deterministic = False  # only a measured spread can say so
             sp_path = baseline_path(b["persona"], sha).with_suffix(".spread.json")
-            if sp_path.exists():
-                from claude_code_tts.signature import Spread
-
-                sp = Spread(**json.loads(sp_path.read_text()))
+            sp = Spread.from_json(sp_path.read_text()) if sp_path.exists() else None
+            if sp_path.exists() and sp is None:
+                print(f"note  {b['persona']}/{sha}: spread is from an older signature version, run `just voices-spread`")
+            if sp is not None:
                 tol = sp.tolerance()
                 deterministic = sp.runs >= 2 and sp.seconds_rel == 0.0 and sp.envelope_dtw_db < 0.5
             diffs = compare(expected, actual, tol)
@@ -197,7 +222,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             else:
                 advisory += 1
                 print(f"note  {b['persona']}/{sha} (engine jitters, advisory): " + "; ".join(diffs))
-    print(f"verify: {passed} ok, {drifted} drifted, {advisory} advisory, {failed} failed")
+    print(f"verify: {passed} ok, {drifted} drifted, {advisory} advisory, {failed} failed, {skipped} skipped")
     return 1 if drifted or failed else 0
 
 
