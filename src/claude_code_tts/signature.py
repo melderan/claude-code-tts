@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import wave
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
@@ -68,6 +69,7 @@ class Tolerance:
     pauses: int = 1
     envelope_r: float = 0.85  # Pearson correlation floor
     zcr_r: float = 0.80
+    zcr_rel: float = 0.15  # mean zero-crossing rate, relative: a pitch or brightness change
 
 
 def text_sha(text: str) -> str:
@@ -135,7 +137,10 @@ def sign_samples(samples, rate: int, channels: int = 1, *, text: str = "", voice
 
 def sign(path: Path, *, text: str = "", voice: str = "") -> Signature | None:
     """Signature of a 16-bit PCM WAV; None for other formats or an empty file."""
-    read = _read(path)
+    try:
+        read = _read(path)
+    except (wave.Error, EOFError, OSError):
+        return None
     if read is None:
         return None
     samples, params = read
@@ -183,7 +188,14 @@ def compare(expected: Signature, actual: Signature, tol: Tolerance | None = None
     r = _pearson(expected.zcr, actual.zcr)
     if r < t.zcr_r:
         out.append(f"zero-crossing correlation {r:.2f} < {t.zcr_r}")
+    ea, aa = _mean(expected.zcr), _mean(actual.zcr)
+    if ea and abs(ea - aa) / ea > t.zcr_rel:
+        out.append(f"brightness (mean zero-crossing rate) {ea:.2f} vs {aa:.2f} kHz")
     return out
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
 
 
 @dataclass
@@ -197,6 +209,7 @@ class Spread:
     pauses: int = 0
     envelope_r: float = 1.0  # the lowest pairwise correlation seen
     zcr_r: float = 1.0
+    zcr_rel: float = 0.0
     runs: int = 0
     notes: list[str] = field(default_factory=list)
 
@@ -212,6 +225,7 @@ class Spread:
             pauses=max(b.pauses, self.pauses),
             envelope_r=min(b.envelope_r, 1.0 - (1.0 - self.envelope_r) * margin),
             zcr_r=min(b.zcr_r, 1.0 - (1.0 - self.zcr_r) * margin),
+            zcr_rel=max(b.zcr_rel, self.zcr_rel * margin),
         )
 
 
@@ -228,6 +242,8 @@ def spread(signatures: list[Signature]) -> Spread:
     trail = [x.trail_silence_s for x in signatures]
     s.silence_s = max(max(lead) - min(lead), max(trail) - min(trail))
     s.pauses = max(x.pauses for x in signatures) - min(x.pauses for x in signatures)
+    means = [_mean(x.zcr) for x in signatures]
+    s.zcr_rel = (max(means) - min(means)) / max(means) if max(means) else 0.0
     for i, a in enumerate(signatures):
         for b in signatures[i + 1 :]:
             s.envelope_r = min(s.envelope_r, _pearson(a.envelope, b.envelope))

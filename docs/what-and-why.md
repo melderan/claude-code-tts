@@ -22,7 +22,7 @@ Voice is a conversation, not a broadcast. Both sides can speak and listen. When 
 
 ## What Must Stay True
 
-- **Default silence:** New sessions start muted so voice never surprises someone opening Claude Code for the first time. Opt-in, not opt-out.
+- **Voice by default, silence in one command:** New sessions speak (since 9.23.0), because a voice you have to discover is a voice nobody hears. `claude-tts mute --all` flips the default to silent for every session at once, and one session can be muted on its own. Whichever default is chosen, changing it is one command, never a config edit.
 
 - **Degradation over failure:** If the speaking service fails, speech still works slower in direct mode. If a voice model isn't installed, a fallback plays. If text filtering breaks on edge cases, the system speaks raw text rather than crashing.
 

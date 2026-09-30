@@ -63,6 +63,18 @@ private-sync:
 test-audit *ARGS:
     uv run --with pytest --with pytest-cov scripts/test-audit.py {{ARGS}}
 
+# Voice signatures on the machine that owns the engines: baseline from the daemon's own speech
+# history, measure run-to-run spread, re-synthesize and compare (exit 1 on drift). Baseline
+# stays in ~/.claude-tts/signatures/, never in the repo, because it holds spoken text.
+voices-capture *ARGS:
+    uv run scripts/voice-signatures.py capture {{ARGS}}
+
+voices-spread *ARGS:
+    uv run scripts/voice-signatures.py spread {{ARGS}}
+
+voices-verify *ARGS:
+    uv run scripts/voice-signatures.py verify {{ARGS}}
+
 # Point git at .githooks: pre-commit runs the fast gate, pre-push the full one
 hooks:
     git config core.hooksPath .githooks

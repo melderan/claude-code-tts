@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""voice-signatures.py - baseline and re-check what the real engines sound like (`just voices-*`).
+
+Runs on the machine that owns the daemon and its engines. Baselines come from what the daemon
+already keeps: every spoken WAV in ~/.claude-tts/speech_history with its text, persona and
+speed in handy_analysis.db. Nothing here leaves the machine; the baseline holds the spoken
+text, so it lives under ~/.claude-tts/signatures/, never in the repository.
+
+    just voices-capture            sign every history WAV not yet in the baseline
+    just voices-spread             synthesize each baseline utterance 3 times; record the spread
+    just voices-verify             synthesize each baseline utterance once; compare to its baseline
+
+`verify` is the check to run before and after a release that touches the speech path: a
+refactor that keeps every test green and still comes out quieter, faster, clipped or with a
+pause missing fails here. Tolerances are the defaults widened by twice the spread `spread`
+measured for that utterance, so an engine that samples noise per run does not fail itself.
+Exit 1 when any utterance drifts. Standard library plus this package.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+from claude_code_tts.signature import Signature, Tolerance, compare, sign, spread
+
+TTS_DIR = Path.home() / ".claude-tts"
+HISTORY_DIR = TTS_DIR / "speech_history"
+HISTORY_DB = TTS_DIR / "handy_analysis.db"
+BASELINE_DIR = TTS_DIR / "signatures"
+
+
+def history_rows(limit: int) -> list[dict]:
+    if not HISTORY_DB.exists():
+        sys.exit(f"no speech history database at {HISTORY_DB}")
+    db = sqlite3.connect(f"file:{HISTORY_DB}?vfs=unix-dotfile&mode=ro", uri=True)
+    rows = db.execute(
+        "select file_name, persona, text, speed, created_at from speech_history "
+        "where text is not null and persona is not null order by created_at desc limit ?",
+        (limit,),
+    ).fetchall()
+    return [
+        {"file": HISTORY_DIR / f, "persona": p, "text": t, "speed": s, "created_at": c}
+        for f, p, t, s, c in rows
+        if (HISTORY_DIR / f).exists()
+    ]
+
+
+def baseline_path(persona: str, sha: str) -> Path:
+    return BASELINE_DIR / persona / f"{sha}.json"
+
+
+def load_baselines(persona: str | None) -> list[dict]:
+    out = []
+    for p in sorted(BASELINE_DIR.glob("*/*.json")):
+        if p.name.endswith(".spread.json"):
+            continue
+        if persona and p.parent.name != persona:
+            continue
+        out.append(json.loads(p.read_text()))
+    return out
+
+
+def cmd_capture(args: argparse.Namespace) -> int:
+    added = skipped = 0
+    for row in history_rows(args.limit):
+        s = sign(row["file"], text=row["text"], voice=row["persona"])
+        if s is None:
+            print(f"skip {row['file'].name}: not a 16-bit WAV")
+            continue
+        path = baseline_path(row["persona"], s.text_sha)
+        if path.exists():
+            skipped += 1
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "persona": row["persona"], "speed": row["speed"], "text": row["text"],
+            "captured_at": time.time(), "source": row["file"].name,
+            "signature": json.loads(s.to_json()),
+        }, indent=1))
+        added += 1
+        print(f"baseline {row['persona']}/{s.text_sha}: {s.seconds:.1f}s, speech {s.speech_dbfs:.1f} dBFS, "
+              f"{s.pauses} pauses  {row['text'][:60]!r}")
+    print(f"capture: {added} added, {skipped} already known, baseline in {BASELINE_DIR}")
+    return 0
+
+
+def synthesize(text: str, persona: str, out: Path) -> bool:
+    from claude_code_tts.daemon import daemon_generate_speech
+
+    return daemon_generate_speech(text, persona, out)
+
+
+def cmd_spread(args: argparse.Namespace) -> int:
+    worst = Tolerance()
+    done = 0
+    with tempfile.TemporaryDirectory(prefix="voice-spread-") as tmp:
+        for b in load_baselines(args.persona)[: args.limit]:
+            sigs = []
+            for i in range(args.runs):
+                wav = Path(tmp) / f"{b['signature']['text_sha']}-{i}.wav"
+                if not synthesize(b["text"], b["persona"], wav):
+                    print(f"skip {b['persona']}/{b['signature']['text_sha']}: synthesis failed")
+                    break
+                s = sign(wav, text=b["text"], voice=b["persona"])
+                if s:
+                    sigs.append(s)
+            if len(sigs) < 2:
+                continue
+            sp = spread(sigs)
+            path = baseline_path(b["persona"], b["signature"]["text_sha"]).with_suffix(".spread.json")
+            path.write_text(json.dumps(sp.__dict__, indent=1))
+            tol = sp.tolerance()
+            worst = Tolerance(
+                seconds_rel=max(worst.seconds_rel, tol.seconds_rel), seconds_abs=worst.seconds_abs,
+                speech_db=max(worst.speech_db, tol.speech_db), peak_db=max(worst.peak_db, tol.peak_db),
+                silence_s=max(worst.silence_s, tol.silence_s), pauses=max(worst.pauses, tol.pauses),
+                envelope_r=min(worst.envelope_r, tol.envelope_r), zcr_r=min(worst.zcr_r, tol.zcr_r),
+                zcr_rel=max(worst.zcr_rel, tol.zcr_rel),
+            )
+            done += 1
+            print(f"spread {b['persona']}/{b['signature']['text_sha']}: length {sp.seconds_rel:.1%}, "
+                  f"speech {sp.speech_db:.2f} dB, envelope r>={sp.envelope_r:.3f}, zcr r>={sp.zcr_r:.3f}")
+    print(f"spread: {done} utterances x {args.runs} runs; widest tolerance needed: {worst}")
+    return 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    passed = drifted = failed = 0
+    with tempfile.TemporaryDirectory(prefix="voice-verify-") as tmp:
+        for b in load_baselines(args.persona)[: args.limit]:
+            sha = b["signature"]["text_sha"]
+            expected = Signature.from_json(json.dumps(b["signature"]))
+            wav = Path(tmp) / f"{sha}.wav"
+            if not synthesize(b["text"], b["persona"], wav):
+                failed += 1
+                print(f"FAIL {b['persona']}/{sha}: synthesis failed")
+                continue
+            actual = sign(wav, text=b["text"], voice=b["persona"])
+            if actual is None:
+                failed += 1
+                print(f"FAIL {b['persona']}/{sha}: no WAV")
+                continue
+            tol = Tolerance()
+            sp_path = baseline_path(b["persona"], sha).with_suffix(".spread.json")
+            if sp_path.exists():
+                from claude_code_tts.signature import Spread
+
+                tol = Spread(**json.loads(sp_path.read_text())).tolerance()
+            diffs = compare(expected, actual, tol)
+            if diffs:
+                drifted += 1
+                print(f"DRIFT {b['persona']}/{sha}: " + "; ".join(diffs) + f"  {b['text'][:50]!r}")
+            else:
+                passed += 1
+                print(f"ok    {b['persona']}/{sha}: {actual.seconds:.1f}s, speech {actual.speech_dbfs:.1f} dBFS")
+    print(f"verify: {passed} ok, {drifted} drifted, {failed} failed")
+    return 1 if drifted or failed else 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("capture", help="sign history WAVs into the baseline")
+    p.add_argument("--limit", type=int, default=200)
+    p.set_defaults(fn=cmd_capture)
+    p = sub.add_parser("spread", help="measure run-to-run spread per baseline utterance")
+    p.add_argument("--runs", type=int, default=3)
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--persona")
+    p.set_defaults(fn=cmd_spread)
+    p = sub.add_parser("verify", help="re-synthesize each baseline utterance and compare")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--persona")
+    p.set_defaults(fn=cmd_verify)
+    args = ap.parse_args()
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

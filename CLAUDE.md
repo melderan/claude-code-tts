@@ -141,6 +141,7 @@ src/claude_code_tts/
   daemon.py                # Queue daemon (pause/resume, heartbeat)
   bridge.py                # Opt-in loopback HTTP bridge (browser pages -> queue, timing marks)
   install.py               # Installer (hooks, voices, service)
+  signature.py             # Voice signatures: tolerant shape of a WAV, compared with tolerances, not by ear
   release.py               # Release: preflight, gate, signed tag with notes, push, verify on GitHub
   sherpa_speak.py          # sherpa-onnx worker, run by its isolated venv's Python
   mlx_speak.py             # mlx-audio worker, run by its isolated venv's Python (Apple silicon)
@@ -156,6 +157,7 @@ scripts/
   up.py                    # `just up`: rebuild, install, restart, verify, log to .logs/just/
   gate.py                  # `just gate` and the git hooks: lint, mypy, ty, version, tests [, build]
   test-audit.py            # `just test-audit`: per-test mutation audit, which tests would notice a change
+  voice-signatures.py      # `just voices-capture|spread|verify`: does the real speech path still sound the same
   build-check.sh           # `just build`: wheel + cold-install proof
   tts-builder.py           # Voice builder TUI (Textual, standalone)
 docs/
@@ -249,7 +251,12 @@ real exit codes, and `just hooks` installs it as the pre-commit (fast) and pre-p
 code wins and a failure disappears, which is how a flaky test once reached a signed commit. `just test-audit` answers a different question: which tests
 would notice a one-line change to the source. It mutates every covered line and runs each mutant
 against the tests that cover it; the tests that never kill anything are listed for a reader to
-judge (9.32.2 pruned 42 that re-implemented the logic they claimed to test). `just up` is the operator side: it rebuilds, installs,
+judge (9.32.2 pruned 42 that re-implemented the logic they claimed to test). Voice signatures answer a third: does it still sound the
+same. `tests/signatures/pipeline/` holds committed signatures of what the speech path produces
+from a fake engine (regenerate on purpose with `UPDATE_SIGNATURES=1`, read the diff); on the
+machine with the engines, `just voices-capture`, `voices-spread` and `voices-verify` baseline the
+real voices from the daemon's own speech history and fail on drift. docs/redesign-10.md is the
+10.x plan and the list of open decisions. `just up` is the operator side: it rebuilds, installs,
 restarts the daemon, verifies the heartbeat, writes the full output of the run to
 `.logs/just/up-<time>-<git ref>.log`, and appends one line (time, version, git ref, branch, daemon,
 bridge and mic state, run file) to `.logs/just/timeline.log`, which `just timeline` prints. The
