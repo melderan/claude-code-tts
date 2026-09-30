@@ -1,4 +1,4 @@
-"""Tests for the loopback HTTP bridge: auth, CORS, queue writes, jobs, stop, marks."""
+"""Tests for the loopback HTTP bridge: auth, CORS, queue writes, jobs, stop, pause, marks."""
 
 from __future__ import annotations
 
@@ -43,8 +43,12 @@ def tts_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     config = {
         "active_persona": "claude-connery",
         "personas": {
-            "claude-connery": {"description": "warm", "speed": 1.8, "speed_method": "playback",
-                               "max_chars": 60},
+            "claude-connery": {
+                "description": "warm",
+                "speed": 1.8,
+                "speed_method": "playback",
+                "max_chars": 60,
+            },
         },
     }
     monkeypatch.setattr(bridge_mod, "load_raw_config", lambda: config)
@@ -66,23 +70,38 @@ class FakeState:
         self.cleared += 1
         self.state["current_message"] = None
 
+    def set_paused(self, paused: bool) -> dict:
+        # Mirrors daemon.set_paused: a release always clears paused_by.
+        self.state["paused"] = paused
+        self.state["paused_by"] = "user" if paused else None
+        return dict(self.state)
+
 
 @pytest.fixture
 def server(tts_home: Path):
     fake = FakeState()
     logs: list[str] = []
-    b = Bridge(log_fn=logs.append, read_playback_state=fake.read,
-               clear_current_message=fake.clear)
-    assert b.start({"bind": "127.0.0.1", "port": 0,
-                    "allowed_origins": ["https://ok.example"]})
+    b = Bridge(
+        log_fn=logs.append,
+        read_playback_state=fake.read,
+        clear_current_message=fake.clear,
+        set_paused=fake.set_paused,
+    )
+    assert b.start({"bind": "127.0.0.1", "port": 0, "allowed_origins": ["https://ok.example"]})
     b.fake = fake  # type: ignore[attr-defined]
     b.logs = logs  # type: ignore[attr-defined]
     yield b
     b.stop()
 
 
-def call(server: Bridge, method: str, path: str, body: dict | None = None,
-         token: str | None = "auto", origin: str | None = None) -> tuple[int, dict, dict]:
+def call(
+    server: Bridge,
+    method: str,
+    path: str,
+    body: dict | None = None,
+    token: str | None = "auto",
+    origin: str | None = None,
+) -> tuple[int, dict, dict]:
     url = f"http://127.0.0.1:{server.port}{path}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
@@ -177,9 +196,12 @@ def test_voices_lists_personas(server: Bridge) -> None:
 
 
 def test_speak_writes_queue_file_and_job(server: Bridge, tts_home: Path) -> None:
-    status, body, _ = call(server, "POST", "/speak",
-                           {"text": "Hello there.", "source": "artifact",
-                            "label": "cascade", "want_marks": True})
+    status, body, _ = call(
+        server,
+        "POST",
+        "/speak",
+        {"text": "Hello there.", "source": "artifact", "label": "cascade", "want_marks": True},
+    )
     assert status == 202
     job_id = body["id"]
     files = list((tts_home / "queue").glob("*.json"))
@@ -224,8 +246,11 @@ def test_stop_flushes_only_its_source(server: Bridge, tts_home: Path) -> None:
     _, b, _ = call(server, "POST", "/speak", {"text": "two", "source": "artifact"})
     # A room's message, written like a hook does, has no source.
     room = tts_home / "queue" / "9.0_room.json"
-    room.write_text(json.dumps({"id": "room", "timestamp": 9.0, "text": "room",
-                                "session_id": "s", "project": "p"}))
+    room.write_text(
+        json.dumps(
+            {"id": "room", "timestamp": 9.0, "text": "room", "session_id": "s", "project": "p"}
+        )
+    )
     status, body, _ = call(server, "POST", "/stop", {"source": "artifact"})
     assert status == 200
     assert body == {"flushed": 2, "stopped_current": False}
@@ -265,6 +290,62 @@ def test_stop_leaves_a_room_message_alone(server: Bridge) -> None:
     _, body, _ = call(server, "POST", "/stop", {"source": "artifact"})
     assert body["stopped_current"] is False
     assert fake.cleared == 0
+
+
+# ---------------------------------------------------------------------------
+# Pause
+# ---------------------------------------------------------------------------
+
+
+def test_pause_get_reports_the_hold(server: Bridge) -> None:
+    status, body, _ = call(server, "GET", "/pause")
+    assert status == 200
+    assert body == {"paused": False, "paused_by": None, "speaking": False, "current": {}}
+    server.fake.state.update(  # type: ignore[attr-defined]
+        paused=True,
+        paused_by="mic",
+        audio_pid=None,
+        current_message={"id": "abc", "source": "page", "project": "page:brief", "text": "x"},
+    )
+    status, body, _ = call(server, "GET", "/pause")
+    assert status == 200
+    assert body["paused"] is True and body["paused_by"] == "mic"
+    assert body["current"] == {"id": "abc", "source": "page", "project": "page:brief"}
+
+
+def test_pause_post_without_body_toggles(server: Bridge) -> None:
+    status, body, _ = call(server, "POST", "/pause", {})
+    assert status == 200
+    assert body["paused"] is True and body["paused_by"] == "user" and body["changed"] is True
+    assert server.fake.state["paused"] is True  # type: ignore[attr-defined]
+    status, body, _ = call(server, "POST", "/pause", {})
+    assert body["paused"] is False and body["paused_by"] is None and body["changed"] is True
+    assert any("Bridge paused" in line for line in server.logs)  # type: ignore[attr-defined]
+    assert any("Bridge resumed" in line for line in server.logs)  # type: ignore[attr-defined]
+
+
+def test_pause_post_sets_and_reports_no_change(server: Bridge) -> None:
+    status, body, _ = call(server, "POST", "/pause", {"paused": True})
+    assert body["paused"] is True and body["changed"] is True
+    status, body, _ = call(server, "POST", "/pause", {"paused": True})
+    assert status == 200
+    assert body["paused"] is True and body["changed"] is False
+    status, body, _ = call(server, "POST", "/pause", {"paused": "yes"})
+    assert status == 400
+
+
+def test_pause_resume_releases_a_mic_hold(server: Bridge) -> None:
+    server.fake.state.update(paused=True, paused_by="mic")  # type: ignore[attr-defined]
+    status, body, _ = call(server, "POST", "/pause", {"paused": False})
+    assert status == 200
+    assert body["paused"] is False and body["paused_by"] is None
+    assert server.fake.state["paused_by"] is None  # type: ignore[attr-defined]
+
+
+def test_pause_needs_token(server: Bridge) -> None:
+    status, _, _ = call(server, "POST", "/pause", {}, token=None)
+    assert status == 401
+    assert server.fake.state["paused"] is False  # type: ignore[attr-defined]
 
 
 def test_flush_source_direct(tts_home: Path) -> None:

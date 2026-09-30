@@ -50,8 +50,8 @@ class TestPrepareMessage:
 
     def test_bridge_job_and_mlx_override_carry_through(self, monkeypatch):
         monkeypatch.setattr(daemon_mod, "get_persona_config", lambda _n: {"voice_kokoro": "af_bella"})
-        p = prepare_message(_msg(source="hear", want_marks=True, engine="mlx", voice_mlx="m", speaker_mlx="v", lang_mlx="a"), {})
-        assert p.job_id == p.msg["id"] and p.current_msg_info["source"] == "hear" and p.want_marks
+        p = prepare_message(_msg(source="page", want_marks=True, engine="mlx", voice_mlx="m", speaker_mlx="v", lang_mlx="a"), {})
+        assert p.job_id == p.msg["id"] and p.current_msg_info["source"] == "page" and p.want_marks
         assert (p.voice_mlx, p.speaker_mlx, p.lang_mlx) == ("m", "v", "a") and p.voice_label == "mlx:m#v"
         plain = prepare_message(_msg(voice_mlx="m"), {})  # a hook message: persona stays in charge
         assert plain.voice_mlx == "" and plain.voice_label == "kokoro:af_bella"
@@ -101,8 +101,8 @@ class TestPrefetchSlot:
     def test_start_does_not_relabel_a_cancelled_bridge_job(self, tmp_path):
         """Review finding 2026-09-29: a /stop between the queue read and start() must win."""
         from claude_code_tts.bridge import JOBS
-        p = self._prepared(tmp_path, "a", source="hear")
-        JOBS.create(p.job_id, source="hear")
+        p = self._prepared(tmp_path, "a", source="page")
+        JOBS.create(p.job_id, source="page")
         JOBS.update(p.job_id, state="cancelled", position_ms=0)
         pf = Prefetch()
         with patch.object(daemon_mod, "synthesize_prepared", side_effect=self._synth_ok) as synth:
@@ -112,10 +112,10 @@ class TestPrefetchSlot:
 
     def test_discard_puts_a_live_job_back_to_queued_and_a_gone_one_to_cancelled(self, tmp_path):
         from claude_code_tts.bridge import JOBS
-        live = self._prepared(tmp_path, "live", source="hear")
-        gone = self._prepared(tmp_path, "gone", source="hear")
+        live = self._prepared(tmp_path, "live", source="page")
+        gone = self._prepared(tmp_path, "gone", source="page")
         for q in (live, gone):
-            JOBS.create(q.job_id, source="hear")
+            JOBS.create(q.job_id, source="page")
         pf = Prefetch()
         with patch.object(daemon_mod, "synthesize_prepared", side_effect=self._synth_ok):
             pf.start(live)

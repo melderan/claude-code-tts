@@ -77,7 +77,9 @@ RESPAWN_MARKER = TTS_CONFIG_DIR / "daemon.respawn"
 _missing_voice_warned: set[tuple[str, str]] = set()
 
 
-def resolve_piper_voice(persona: str, persona_config: dict, *, other_engine: bool = False) -> tuple[str, bool]:
+def resolve_piper_voice(
+    persona: str, persona_config: dict, *, other_engine: bool = False
+) -> tuple[str, bool]:
     """Return the Piper voice to use for a persona and whether it is the default standing in.
 
     A missing voice is logged once per persona, not per message: a silent
@@ -96,7 +98,9 @@ def resolve_piper_voice(persona: str, persona_config: dict, *, other_engine: boo
     if voice_path.exists():
         if key in _missing_voice_warned:
             _missing_voice_warned.discard(key)
-            log(f"Voice {voice_name} for persona {persona} is installed now at {voice_path}; using it")
+            log(
+                f"Voice {voice_name} for persona {persona} is installed now at {voice_path}; using it"
+            )
         return voice_name, False
     if key not in _missing_voice_warned:
         _missing_voice_warned.add(key)
@@ -141,6 +145,7 @@ def describe_voice(
         return f"sherpa:{sherpa}" + (f"#{speaker}" if speaker >= 0 else "")
     voice, fell_back = resolve_piper_voice(persona, persona_config)
     return f"{voice} (fallback)" if fell_back else voice
+
 
 # Global state
 _lock_fd: TextIOWrapper | None = None
@@ -289,6 +294,22 @@ def write_playback_state(
         f.flush()
         os.fsync(f.fileno())
     tmp.rename(PLAYBACK_STATE_FILE)
+
+
+def set_paused(paused: bool, by: str = "user") -> dict:
+    """Hold or release the whole queue, the way the pause hotkey does.
+
+    Only the flag is written. The play loop polls it every 50 ms and stops the
+    player itself, treating the stop as a pause (rewind, replay on resume), so
+    nothing here needs to know a pid. A release clears paused_by, so a person
+    resuming from a page wins over a mic hold exactly as `claude-tts pause` does.
+    Returns the state as written.
+    """
+    if paused:
+        write_playback_state(paused=True, paused_by=by)
+    else:
+        write_playback_state(paused=False, paused_by=None)
+    return read_playback_state()
 
 
 # An interrupted message in the state file older than this is history, not a resume.
@@ -484,6 +505,7 @@ def daemon_generate_speech(
     Returns True on success.
     """
     import re
+
     # Clean punctuation clusters that make Piper produce noise artifacts.
     # Applied here so ALL text hitting Piper is safe, regardless of source.
     text = re.sub(r"([.!?])[)\]}>\"']+", r"\1", text)
@@ -500,7 +522,11 @@ def daemon_generate_speech(
     speaker_mlx = persona_config.get("speaker_mlx", "")
     lang_mlx = persona_config.get("lang_mlx", "")
     if voice_mlx_override:
-        voice_mlx, speaker_mlx, lang_mlx = voice_mlx_override, speaker_mlx_override, lang_mlx_override
+        voice_mlx, speaker_mlx, lang_mlx = (
+            voice_mlx_override,
+            speaker_mlx_override,
+            lang_mlx_override,
+        )
         kokoro_voice = kokoro_blend = voice_sherpa = ""
     pitch_filter = persona_config.get("pitch_filter", "")
     voice_name, _ = resolve_piper_voice(
@@ -622,7 +648,9 @@ def daemon_play_audio(
                 write_heartbeat()
                 last_heartbeat = now
             if now - last_status_log >= PLAYING_LOG_INTERVAL_S:
-                log(f"Still playing (PID {proc.pid}, {now - start_time:.0f}s, paused={state.get('paused')})")
+                log(
+                    f"Still playing (PID {proc.pid}, {now - start_time:.0f}s, paused={state.get('paused')})"
+                )
                 last_status_log = now
             if JOBS.take_cancel(job_id):
                 elapsed = time.monotonic() - start_time
@@ -750,9 +778,7 @@ def play_sentences(
         return StreamResult("done", n, played_s=played_before_s)
 
     token = secrets.token_hex(3)
-    part_paths = [
-        audio_file.with_name(f"{audio_file.stem}_{token}_s{i}.wav") for i in range(n)
-    ]
+    part_paths = [audio_file.with_name(f"{audio_file.stem}_{token}_s{i}.wav") for i in range(n)]
     ready = [threading.Event() for _ in range(n)]
     ok = [False] * n
     stop = threading.Event()
@@ -985,7 +1011,8 @@ def play_chime() -> None:
                 try:
                     subprocess.run(
                         ["afplay", "-v", "0.3", sound],
-                        check=True, capture_output=True,
+                        check=True,
+                        capture_output=True,
                     )
                     return
                 except subprocess.CalledProcessError:
@@ -1260,12 +1287,17 @@ def prepare_message(msg: dict, raw_config: dict) -> PreparedMessage:
     voice_mlx = msg.get("voice_mlx", "") if msg.get("engine") == "mlx" else ""
     speaker_mlx = msg.get("speaker_mlx", "") if voice_mlx else ""
     lang_mlx = msg.get("lang_mlx", "") if voice_mlx else ""
-    voice_label = describe_voice(persona, persona_config, voice_kokoro, voice_kokoro_blend, voice_mlx, speaker_mlx)
+    voice_label = describe_voice(
+        persona, persona_config, voice_kokoro, voice_kokoro_blend, voice_mlx, speaker_mlx
+    )
 
     # Sherpa applies speed during synthesis: don't also apply at playback.
     sherpa_plays = bool(persona_config.get("voice_sherpa")) and not (
-        voice_kokoro or voice_kokoro_blend or voice_mlx
-        or persona_config.get("voice_kokoro") or persona_config.get("voice_kokoro_blend")
+        voice_kokoro
+        or voice_kokoro_blend
+        or voice_mlx
+        or persona_config.get("voice_kokoro")
+        or persona_config.get("voice_kokoro_blend")
         or persona_config.get("voice_mlx")
     )
     effective_speed_method = "length_scale" if sherpa_plays else speed_method
@@ -1274,7 +1306,9 @@ def prepare_message(msg: dict, raw_config: dict) -> PreparedMessage:
     # One WAV per message, named by the message: the next message is
     # synthesized while this one plays, and two in a row from one session
     # must not share a file.
-    tag = "".join(ch for ch in str(msg.get("id") or "") if ch.isalnum())[:12] or secrets.token_hex(4)
+    tag = "".join(ch for ch in str(msg.get("id") or "") if ch.isalnum())[:12] or secrets.token_hex(
+        4
+    )
     audio_file = Path(f"/tmp/tts_queue_{session_id}_{tag}.wav")
 
     current_msg_info = {
@@ -1297,13 +1331,29 @@ def prepare_message(msg: dict, raw_config: dict) -> PreparedMessage:
         current_msg_info["want_marks"] = want_marks
 
     return PreparedMessage(
-        msg=msg, msg_file=msg["_file"], session_id=session_id, project=project, text=text,
-        persona=persona, persona_config=persona_config, job_id=job_id, want_marks=want_marks,
-        tone=tone, speed=speed, speed_method=speed_method, effective_speed=effective_speed,
-        effective_speed_method=effective_speed_method, voice_kokoro=voice_kokoro,
-        voice_kokoro_blend=voice_kokoro_blend, voice_mlx=voice_mlx, speaker_mlx=speaker_mlx,
-        lang_mlx=lang_mlx, voice_label=voice_label, speaker_key=f"{session_id}:{project}",
-        audio_file=audio_file, current_msg_info=current_msg_info,
+        msg=msg,
+        msg_file=msg["_file"],
+        session_id=session_id,
+        project=project,
+        text=text,
+        persona=persona,
+        persona_config=persona_config,
+        job_id=job_id,
+        want_marks=want_marks,
+        tone=tone,
+        speed=speed,
+        speed_method=speed_method,
+        effective_speed=effective_speed,
+        effective_speed_method=effective_speed_method,
+        voice_kokoro=voice_kokoro,
+        voice_kokoro_blend=voice_kokoro_blend,
+        voice_mlx=voice_mlx,
+        speaker_mlx=speaker_mlx,
+        lang_mlx=lang_mlx,
+        voice_label=voice_label,
+        speaker_key=f"{session_id}:{project}",
+        audio_file=audio_file,
+        current_msg_info=current_msg_info,
     )
 
 
@@ -1397,7 +1447,9 @@ class Prefetch:
         prepared.audio_file.unlink(missing_ok=True)
         if prepared.job_id:
             if prepared.msg_file.exists():
-                JOBS.advance(prepared.job_id, when="synthesizing", to="queued")  # it will be picked later
+                JOBS.advance(
+                    prepared.job_id, when="synthesizing", to="queued"
+                )  # it will be picked later
             else:
                 JOBS.advance(prepared.job_id, when="synthesizing", to="cancelled")
 
@@ -1471,6 +1523,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             log_fn=log,
             read_playback_state=read_playback_state,
             clear_current_message=clear_current_message,
+            set_paused=set_paused,
         )
         if not bridge.start(http_config):
             bridge = None
@@ -1497,7 +1550,9 @@ def daemon_loop(lockpick: bool = False) -> None:
     stale_fields: list[str] = []
     if startup_state.get("audio_pid") is not None:
         if kill_orphan_player(startup_state.get("audio_pid")):
-            log(f"Killed the previous daemon's player (PID {startup_state['audio_pid']}) still speaking")
+            log(
+                f"Killed the previous daemon's player (PID {startup_state['audio_pid']}) still speaking"
+            )
         stale_fields.append("audio_pid")
     if startup_state.get("paused") and startup_state.get("paused_by") == "mic":
         stale_fields.append("mic-pause")
@@ -1509,11 +1564,17 @@ def daemon_loop(lockpick: bool = False) -> None:
     # keeping it would speak it twice.
     interrupted_recently = (
         isinstance(startup_state.get("current_message"), dict)
-        and (startup_state["current_message"].get("audio_position") is not None
-             or startup_state["current_message"].get("sentence_index") is not None)
+        and (
+            startup_state["current_message"].get("audio_position") is not None
+            or startup_state["current_message"].get("sentence_index") is not None
+        )
         and time.time() - float(startup_state.get("updated_at") or 0) <= RESUME_AFTER_RESTART_S
     )
-    if startup_state.get("current_message") is not None and not is_respawn and not interrupted_recently:
+    if (
+        startup_state.get("current_message") is not None
+        and not is_respawn
+        and not interrupted_recently
+    ):
         stale_fields.append("current_message")
     elif interrupted_recently and not is_respawn:
         log("Resuming the message the previous daemon stopped in")
@@ -1597,7 +1658,9 @@ def daemon_loop(lockpick: bool = False) -> None:
                 last_reap = time.monotonic()
                 idle_s = float(config.get("worker_idle_unload_s", 1800))
                 for name in reap_idle_workers(idle_s):
-                    log(f"Unloaded {name} worker: unused for {idle_s / 60:.0f} min; it reloads on the next message")
+                    log(
+                        f"Unloaded {name} worker: unused for {idle_s / 60:.0f} min; it reloads on the next message"
+                    )
             state = read_playback_state()
             was_paused = ledger.paused
             ledger.mark(bool(state.get("paused")))
@@ -1633,9 +1696,11 @@ def daemon_loop(lockpick: bool = False) -> None:
                 i_job_id = interrupted.get("id") if interrupted.get("source") else None
 
                 if "sentence_index" in interrupted:
-                    i_tone = classify_tone(interrupted.get("text", "")) if raw_config.get(
-                        "tone_modulation", False
-                    ) else DEFAULT_TONE
+                    i_tone = (
+                        classify_tone(interrupted.get("text", ""))
+                        if raw_config.get("tone_modulation", False)
+                        else DEFAULT_TONE
+                    )
 
                     stream_message(
                         interrupted,
@@ -1701,8 +1766,10 @@ def daemon_loop(lockpick: bool = False) -> None:
                             log("Trim failed, replaying from start")
                             resume_from = 0.0
                     else:
-                        log(f"Replaying interrupted message from start: "
-                            f"{interrupted.get('text', '')[:50]}...")
+                        log(
+                            f"Replaying interrupted message from start: "
+                            f"{interrupted.get('text', '')[:50]}..."
+                        )
 
                     write_playback_state(current_message=interrupted)
                     JOBS.update(
@@ -1763,7 +1830,9 @@ def daemon_loop(lockpick: bool = False) -> None:
             if not str(msg.get("text", "")).strip():
                 log(f"Empty message from {msg.get('project', 'unknown')}, skipping")
                 msg_file.unlink(missing_ok=True)
-                JOBS.update(msg.get("id") if msg.get("source") else None, state="failed", error="empty text")
+                JOBS.update(
+                    msg.get("id") if msg.get("source") else None, state="failed", error="empty text"
+                )
                 continue
 
             # The message after the one that just played may be synthesized already.
@@ -1775,7 +1844,12 @@ def daemon_loop(lockpick: bool = False) -> None:
                 p = prepare_message(msg, raw_config)
                 ok, marks, prefetched = False, None, False
             session_id, project, text, persona = p.session_id, p.project, p.text, p.persona
-            persona_config, job_id, want_marks, tone = p.persona_config, p.job_id, p.want_marks, p.tone
+            persona_config, job_id, want_marks, tone = (
+                p.persona_config,
+                p.job_id,
+                p.want_marks,
+                p.tone,
+            )
             audio_file, speed, speed_method = p.audio_file, p.speed, p.speed_method
             effective_speed, effective_speed_method = p.effective_speed, p.effective_speed_method
             voice_kokoro, voice_kokoro_blend = p.voice_kokoro, p.voice_kokoro_blend
@@ -1790,8 +1864,15 @@ def daemon_loop(lockpick: bool = False) -> None:
             # since marks need the whole WAV before playback starts.
             if speech_unit() == "sentence" and not want_marks:
                 if last_speaker and last_speaker != speaker_key:
-                    speaker_transition(config["speaker_transition"], last_speaker, speaker_key,
-                                       project, persona, speed, speed_method)
+                    speaker_transition(
+                        config["speaker_transition"],
+                        last_speaker,
+                        speaker_key,
+                        project,
+                        persona,
+                        speed,
+                        speed_method,
+                    )
                 last_speaker = speaker_key
                 current_msg_info["tone"] = tone.name
                 if prefetched:
@@ -1813,13 +1894,19 @@ def daemon_loop(lockpick: bool = False) -> None:
                 continue
 
             if prefetched and not ok:
-                log(f"Prefetch of {project} failed ({audio_last_error()}); synthesizing it now", "WARN")
+                log(
+                    f"Prefetch of {project} failed ({audio_last_error()}); synthesizing it now",
+                    "WARN",
+                )
                 prefetched = False
             if not prefetched:
                 JOBS.update(job_id, state="synthesizing")
                 ok, marks = synthesize_prepared(p)
             if not ok:
-                log(f"Failed to generate speech for message from {project}: {audio_last_error()}", "ERROR")
+                log(
+                    f"Failed to generate speech for message from {project}: {audio_last_error()}",
+                    "ERROR",
+                )
                 audio_file.unlink(missing_ok=True)
                 msg_file.unlink(missing_ok=True)
                 JOBS.update(job_id, state="failed", error=audio_last_error())
@@ -1829,8 +1916,15 @@ def daemon_loop(lockpick: bool = False) -> None:
 
             # Speaker transition
             if last_speaker and last_speaker != speaker_key:
-                speaker_transition(config["speaker_transition"], last_speaker, speaker_key,
-                                   project, persona, speed, speed_method)
+                speaker_transition(
+                    config["speaker_transition"],
+                    last_speaker,
+                    speaker_key,
+                    project,
+                    persona,
+                    speed,
+                    speed_method,
+                )
             last_speaker = speaker_key
 
             # Start on the message after this one now, so it is ready the moment this
@@ -1847,9 +1941,12 @@ def daemon_loop(lockpick: bool = False) -> None:
             # Save WAV to speech history before playback
             save_speech_wav(
                 audio_file,
-                session_id=session_id, project=project,
-                persona=persona, text=text,
-                speed=effective_speed, tone=tone.name,
+                session_id=session_id,
+                project=project,
+                persona=persona,
+                text=text,
+                speed=effective_speed,
+                tone=tone.name,
             )
 
             wav_duration = get_wav_duration(audio_file)
@@ -1877,10 +1974,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 audio_pos = calculate_audio_position(elapsed, effective_speed, speed_method)
                 remaining = wav_duration - audio_pos
                 if remaining <= NEAR_END_THRESHOLD:
-                    log(
-                        f"Interrupted near end ({remaining:.1f}s remaining), "
-                        f"skipping replay"
-                    )
+                    log(f"Interrupted near end ({remaining:.1f}s remaining), skipping replay")
                     clear_current_message()
                     msg_file.unlink(missing_ok=True)
                     JOBS.update(job_id, state="done")
@@ -1892,8 +1986,10 @@ def daemon_loop(lockpick: bool = False) -> None:
                     state="paused",
                     position_ms=to_playback_ms(audio_pos, effective_speed, speed_method),
                 )
-                log(f"Message interrupted at {audio_pos:.1f}s / {wav_duration:.1f}s, "
-                    f"will resume on unpause")
+                log(
+                    f"Message interrupted at {audio_pos:.1f}s / {wav_duration:.1f}s, "
+                    f"will resume on unpause"
+                )
                 msg_file.unlink(missing_ok=True)
                 continue
             else:
@@ -2011,6 +2107,7 @@ def start_daemon(lockpick: bool = False) -> bool:
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
     import atexit
+
     atexit.register(lambda: PID_FILE.unlink(missing_ok=True))
 
     global _daemon_mode
@@ -2199,7 +2296,9 @@ def log_stats(lines: Iterable[str]) -> dict:
         elif msg.startswith("Sentence stream: first audio"):
             streams += 1
             if pending is not None:
-                gaps.append((datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S") - pending).total_seconds())
+                gaps.append(
+                    (datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S") - pending).total_seconds()
+                )
                 pending = None
         elif msg.startswith("Audio started") and pending is not None:
             gaps.append((datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S") - pending).total_seconds())
@@ -2219,14 +2318,23 @@ def log_stats(lines: Iterable[str]) -> dict:
         "streams": streams,
         "mic_pauses": mic_pauses,
         "errors": errors,
-        "latency": {"n": len(gaps), "median": pick(0.5), "p90": pick(0.9), "max": gaps[-1] if gaps else 0.0},
+        "latency": {
+            "n": len(gaps),
+            "median": pick(0.5),
+            "p90": pick(0.9),
+            "max": gaps[-1] if gaps else 0.0,
+        },
         "kinds": sorted(((n, k) for k, n in kinds.items()), reverse=True)[:8],
     }
 
 
 def format_log_stats(stats: dict, name: str, size_bytes: int) -> str:
     """The digest as a short report."""
-    size = f"{size_bytes / 1024:.1f} KB" if size_bytes < 1024 * 1024 else f"{size_bytes / 1024 / 1024:.1f} MB"
+    size = (
+        f"{size_bytes / 1024:.1f} KB"
+        if size_bytes < 1024 * 1024
+        else f"{size_bytes / 1024 / 1024:.1f} MB"
+    )
     span = f", {stats['first']} to {stats['last']}" if stats["first"] else ""
     lat = stats["latency"]
     out = [

@@ -406,6 +406,7 @@ class BridgeHTTPServer(ThreadingHTTPServer):
         log_fn: Callable[[str], None],
         read_playback_state: Callable[[], dict],
         clear_current_message: Callable[[], None],
+        set_paused: Callable[[bool], dict],
     ) -> None:
         super().__init__(address, BridgeHandler)
         self.token = token
@@ -413,6 +414,7 @@ class BridgeHTTPServer(ThreadingHTTPServer):
         self.log_fn = log_fn
         self.read_playback_state = read_playback_state
         self.clear_current_message = clear_current_message
+        self.set_paused = set_paused
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
@@ -514,6 +516,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             else:
                 job.pop("updated_at", None)
                 self._send_json(200, job)
+        elif path == "/pause":
+            self._send_json(200, pause_view(self.server.read_playback_state()))
         else:
             self._send_json(404, {"error": "no such route"})
 
@@ -528,6 +532,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._speak(body)
         elif path == "/stop":
             self._stop(body)
+        elif path == "/pause":
+            self._pause(body)
         else:
             self._send_json(404, {"error": "no such route"})
 
@@ -576,6 +582,36 @@ class BridgeHandler(BaseHTTPRequestHandler):
             stopped_current = True
         self._send_json(200, {"flushed": flushed, "stopped_current": stopped_current})
 
+    def _pause(self, body: dict) -> None:
+        """Hold or release the whole queue. No "paused" in the body toggles."""
+        before = self.server.read_playback_state()
+        want = body.get("paused")
+        if want is None:
+            want = not before.get("paused", False)
+        elif not isinstance(want, bool):
+            self._send_json(400, {"error": "paused must be true or false"})
+            return
+        changed = bool(before.get("paused", False)) != want
+        if changed:
+            after = self.server.set_paused(want)
+            self.server.log_fn(f"Bridge {'paused' if want else 'resumed'} the queue")
+        else:
+            after = before
+        view = pause_view(after)
+        view["changed"] = changed
+        self._send_json(200, view)
+
+
+def pause_view(state: dict) -> dict:
+    """The hold as a page sees it: the flag, who set it, and whether audio is out."""
+    current = state.get("current_message") or {}
+    return {
+        "paused": bool(state.get("paused", False)),
+        "paused_by": state.get("paused_by") if state.get("paused") else None,
+        "speaking": bool(state.get("audio_pid")),
+        "current": {k: current[k] for k in ("id", "source", "project") if current.get(k)},
+    }
+
 
 # --- Lifecycle ---
 
@@ -589,10 +625,12 @@ class Bridge:
         log_fn: Callable[[str], None],
         read_playback_state: Callable[[], dict],
         clear_current_message: Callable[[], None],
+        set_paused: Callable[[bool], dict],
     ) -> None:
         self._log = log_fn
         self._read_state = read_playback_state
         self._clear_current = clear_current_message
+        self._set_paused = set_paused
         self._server: BridgeHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -613,6 +651,7 @@ class Bridge:
                 log_fn=self._log,
                 read_playback_state=self._read_state,
                 clear_current_message=self._clear_current,
+                set_paused=self._set_paused,
             )
         except OSError as e:
             self._log(f"HTTP bridge could not listen on {bind}:{port}: {e}")

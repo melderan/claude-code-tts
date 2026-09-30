@@ -199,3 +199,15 @@ class TestLoopHoldsQueueWhilePaused:
                 p.stop()
         assert spoken == ["waited through the meeting"]
         assert read_playback_state().get("current_message") is None
+
+
+def test_set_paused_writes_the_flag_and_a_release_clears_paused_by(tmp_path: Path) -> None:
+    """set_paused is the bridge's hold: flag only, no pid, release clears who held it."""
+    with patch.object(d, "PLAYBACK_STATE_FILE", tmp_path / "playback.json"):
+        d.write_playback_state(audio_pid=4242, current_message={"id": "m1"})
+        state = d.set_paused(True, by="user")
+        assert state["paused"] is True and state["paused_by"] == "user"
+        assert state["audio_pid"] == 4242, "the play loop owns the pid, set_paused leaves it"
+        assert state["current_message"] == {"id": "m1"}
+        state = d.set_paused(False)
+        assert state["paused"] is False and state["paused_by"] is None

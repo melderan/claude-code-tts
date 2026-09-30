@@ -142,6 +142,32 @@ Deletes every queued message from that source. If the message playing right now 
 source, the player is killed and the message is cleared with no replay. Messages from rooms are
 untouched, queued or playing.
 
+### `GET /pause` and `POST /pause`
+
+The daemon has one hold for everything it plays: the flag behind the pause hotkey and
+`claude-tts pause`. These routes read and set that same flag, so a pause button on a page holds
+the rooms too, and a hotkey press shows up on the page. There is no per-source pause; a page that
+wants only its own reading to stop uses `/stop`.
+
+`GET /pause`:
+
+```json
+{"paused": true, "paused_by": "user", "speaking": false,
+ "current": {"id": "3f9c2b7e1a04d5c6", "source": "page", "project": "page:PR 1223 cascade"}}
+```
+
+- `paused_by` is `user` for a person (hotkey, CLI, or this route) and `mic` for the mic watcher;
+  `null` when not paused.
+- `speaking` is true while a player process is running.
+- `current` is the message on deck, playing or held; empty between messages.
+
+`POST /pause` with `{"paused": true}` or `{"paused": false}` sets the hold; an empty body `{}`
+toggles it. Anything else in `paused`: `400`. The response is the `GET` shape plus `changed`,
+false when the hold already matched. Only the flag is written: the play loop polls it every
+50 ms and stops the player itself, rewinding a little so nothing is lost on resume, exactly as
+it does for the hotkey. A resume clears a mic hold as well, since a person pressing resume
+knows better than the watcher.
+
 ## How timing is measured
 
 With `want_marks`, the daemon splits the block into sentences on terminal punctuation, runs the
@@ -161,5 +187,5 @@ the follow-up after that.
 Before this the daemon's inputs were files on your disk. With the bridge enabled, anything on
 your machine that can reach loopback and read `~/.claude-tts/http-token` can make it speak.
 That is the same set of things that could already write into `~/.claude-tts/queue/`, and the
-bridge cannot change config, personas, or anything but the queue. Keep it disabled if you do not
+bridge cannot change config, personas, or anything but the queue and its pause flag. Keep it disabled if you do not
 use it.
