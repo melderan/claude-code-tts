@@ -62,7 +62,7 @@ def cmd_status(args: argparse.Namespace) -> None:
 
     # Daemon status, heartbeat age, queue depth
     from claude_code_tts.config import TTS_QUEUE_DIR
-    from claude_code_tts.daemon import HEARTBEAT_FILE, is_daemon_running
+    from claude_code_tts.state import HEARTBEAT_FILE, is_daemon_running, read_playback_state
     running, pid = is_daemon_running()
     daemon_status = f"running (PID {pid})" if running else "not running"
     heartbeat = "none"
@@ -73,18 +73,10 @@ def cmd_status(args: argparse.Namespace) -> None:
     queued = len(list(TTS_QUEUE_DIR.glob("*.json"))) if TTS_QUEUE_DIR.exists() else 0
 
     # Playback state
-    playback_file = Path.home() / ".claude-tts" / "playback.json"
-    pause_state = "false"
-    paused_by = ""
-    audio_pid = ""
-    if playback_file.exists():
-        try:
-            pb = json.loads(playback_file.read_text())
-            pause_state = str(pb.get("paused", False)).lower()
-            paused_by = pb.get("paused_by", "") or ""
-            audio_pid = str(pb.get("audio_pid", ""))
-        except (json.JSONDecodeError, OSError):
-            pass
+    pb = read_playback_state()
+    pause_state = str(pb.get("paused", False)).lower()
+    paused_by = pb.get("paused_by", "") or ""
+    audio_pid = str(pb.get("audio_pid", ""))
 
     # Mic-aware pause
     raw_config = cfg.raw_config
@@ -1617,7 +1609,7 @@ def cmd_pause(args: argparse.Namespace) -> None:
     saved, replay on resume). Killing the player from here instead, as this command did
     through 9.33.0, made the daemon see a finished process and drop the message.
     """
-    from claude_code_tts.daemon import read_playback_state, set_paused
+    from claude_code_tts.state import read_playback_state, set_paused
 
     if read_playback_state().get("paused", False):
         set_paused(False)

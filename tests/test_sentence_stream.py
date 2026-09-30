@@ -14,6 +14,7 @@ from unittest.mock import patch
 import pytest
 
 import claude_code_tts.daemon as d
+import claude_code_tts.state as st
 from claude_code_tts.bridge import JOBS
 from claude_code_tts.daemon import (
     StreamResult,
@@ -83,8 +84,8 @@ def env(tmp_path, monkeypatch):
     # the stream honours it, so start each test with the daemon not shutting down.
     monkeypatch.setattr(d, "_shutdown_requested", False)
     with (
-        patch.object(d, "PLAYBACK_STATE_FILE", state / "playback.json"),
-        patch.object(d, "HEARTBEAT_FILE", state / "daemon.heartbeat"),
+        patch.object(st, "PLAYBACK_STATE_FILE", state / "playback.json"),
+        patch.object(st, "HEARTBEAT_FILE", state / "daemon.heartbeat"),
         patch.object(d, "LOG_FILE", state / "daemon.log"),
     ):
         write_playback_state(paused=False, paused_by=None, current_message=None, audio_pid=None)

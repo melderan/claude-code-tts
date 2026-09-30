@@ -61,7 +61,7 @@ def test_daemon_version_reads_the_release_marker_not_the_protocol_tag(
 def test_daemon_writes_a_release_marker_the_script_can_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import claude_code_tts.daemon as d
+    import claude_code_tts.state as d
     from claude_code_tts import __version__
 
     monkeypatch.setattr(d, "VERSION_FILE", tmp_path / "daemon.version")

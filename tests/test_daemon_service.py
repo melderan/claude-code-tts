@@ -5,6 +5,7 @@ import time
 
 from claude_code_tts import audio as audio_mod
 from claude_code_tts import daemon as daemon_mod
+from claude_code_tts import state as state_mod
 
 
 class TestServicePathEnv:
@@ -34,8 +35,8 @@ class TestIsDaemonRunning:
         pid_file.write_text(str(pid))
         if beat_age is not None:
             hb.write_text(str(time.time() - beat_age))
-        monkeypatch.setattr(daemon_mod, "PID_FILE", pid_file)
-        monkeypatch.setattr(daemon_mod, "HEARTBEAT_FILE", hb)
+        monkeypatch.setattr(state_mod, "PID_FILE", pid_file)
+        monkeypatch.setattr(state_mod, "HEARTBEAT_FILE", hb)
         return pid_file
 
     def test_fresh_heartbeat_keeps_pid_file_for_invisible_pid(self, tmp_path, monkeypatch):

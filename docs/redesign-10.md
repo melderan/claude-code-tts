@@ -61,6 +61,12 @@ its teeth and the signatures show the sound unchanged.
 ## Simplifications, in the order they ship
 
 1. **One state writer** (`state.py`). Four writers across processes and threads today.
+   Shipped in 9.36.2 as a move: every read and write of the six files goes through
+   `state.py`, daemon re-exports the functions. The paths themselves are not re-exported:
+   a module constant imported into another module is a copy, so a test that patched
+   `daemon.PLAYBACK_STATE_FILE` would have redirected nothing. Tests patch `state.X` and a
+   patch aimed at the old name fails loudly. The hook's liveness check in
+   `audio.daemon_healthy` stays separate on purpose: it resolves HOME on every call.
 2. **One queue writer** (`queue.py`). Three today, each with its own field set; the hook
    writer sends fields the daemon never reads. An additive `"v": 1` field; a missing field
    reads as the old shape, so queued messages still play.

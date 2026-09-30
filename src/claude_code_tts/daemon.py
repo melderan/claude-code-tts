@@ -8,7 +8,6 @@ Absorbed from scripts/tts-daemon.py into the Python CLI.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import secrets
@@ -22,11 +21,9 @@ import wave
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
-from io import TextIOWrapper
 from pathlib import Path
 from typing import Any
 
-from claude_code_tts import __version__
 from claude_code_tts.audio import _set_last_error as audio_set_last_error
 from claude_code_tts.audio import (
     detect_player,
@@ -51,30 +48,43 @@ from claude_code_tts.config import (
     TTS_CONFIG_DIR,
     TTS_QUEUE_DIR,
     VOICES_DIR,
-    atomic_write_json,
     load_raw_config,
 )
 from claude_code_tts.handy import AnalyzerThread, save_speech_wav
 from claude_code_tts.level import normalize as normalize_level
 from claude_code_tts.mic_watcher import MicWatcher
+from claude_code_tts.state import (
+    UNSET,
+    acquire_lock,
+    clear_current_message,
+    clear_heartbeat,
+    clear_pid,
+    get_interrupted_message,
+    is_daemon_running,
+    pid_alive,
+    read_playback_state,
+    release_lock,
+    set_paused,
+    take_respawn_marker,
+    write_heartbeat,
+    write_pid,
+    write_playback_state,
+    write_protocol_marker,
+    write_release_marker,
+    write_respawn_marker,
+)
 from claude_code_tts.tone import DEFAULT_TONE, ToneParams, classify_tone
 
-# --- Daemon path constants ---
+# --- Daemon path constants (the state files live in state.py) ---
 
-PID_FILE = TTS_CONFIG_DIR / "daemon.pid"
-LOCK_FILE = TTS_CONFIG_DIR / "daemon.lock"
 LOG_FILE = TTS_CONFIG_DIR / "daemon.log"
 # Rotate once to daemon.log.1 past this size; the daemon is meant to run for weeks.
 LOG_MAX_BYTES = 5 * 1024 * 1024
 # While audio plays: refresh the heartbeat this often, and say so in the log this often.
 HEARTBEAT_INTERVAL_S = 1.0
 PLAYING_LOG_INTERVAL_S = 30.0
-HEARTBEAT_FILE = TTS_CONFIG_DIR / "daemon.heartbeat"
 # How often the loop looks for model workers idle past worker_idle_unload_s.
 WORKER_REAP_EVERY_S = 30.0
-PLAYBACK_STATE_FILE = TTS_CONFIG_DIR / "playback.json"
-VERSION_FILE = TTS_CONFIG_DIR / "daemon.version"
-RESPAWN_MARKER = TTS_CONFIG_DIR / "daemon.respawn"
 
 # Default voice model
 # (persona, voice) pairs already reported as missing, so the log says it once.
@@ -152,7 +162,6 @@ def describe_voice(
 
 
 # Global state
-_lock_fd: TextIOWrapper | None = None
 _shutdown_requested = False
 _daemon_mode = False
 # log() is called from the synth, bridge and mic-watcher threads too.
@@ -183,167 +192,10 @@ def log(msg: str, level: str = "INFO") -> None:
         pass
 
 
-# --- Lock File ---
-
-
-def acquire_lock(lockpick: bool = False) -> bool:
-    """Acquire exclusive lock to prevent duplicate daemons."""
-    global _lock_fd
-
-    try:
-        LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _lock_fd = open(LOCK_FILE, "w")
-
-        if lockpick:
-            try:
-                fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                if PID_FILE.exists():
-                    try:
-                        old_pid = int(PID_FILE.read_text().strip())
-                        os.kill(old_pid, signal.SIGTERM)
-                        time.sleep(1)
-                    except (ValueError, ProcessLookupError):
-                        pass
-                fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        else:
-            fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-        _lock_fd.write(str(os.getpid()))
-        _lock_fd.flush()
-        return True
-
-    except BlockingIOError:
-        if _lock_fd:
-            _lock_fd.close()
-            _lock_fd = None
-        return False
-    except Exception as e:
-        log(f"Lock acquisition failed: {e}", "ERROR")
-        if _lock_fd:
-            _lock_fd.close()
-            _lock_fd = None
-        return False
-
-
-def release_lock() -> None:
-    """Release the daemon lock."""
-    global _lock_fd
-    if _lock_fd:
-        try:
-            fcntl.flock(_lock_fd, fcntl.LOCK_UN)
-            _lock_fd.close()
-        except Exception:
-            pass
-        _lock_fd = None
-
-
-# --- Heartbeat ---
-
-
-def write_release_marker() -> Path:
-    """Record which release this daemon is, next to the protocol marker.
-
-    daemon.version holds the control-protocol tag ("control-v1"), not a release,
-    so `just up --if-changed` compared 9.x against it and never skipped. The
-    release goes in daemon.release, derived from VERSION_FILE so tests that
-    redirect one redirect both.
-    """
-    path = VERSION_FILE.with_name("daemon.release")
-    path.write_text(__version__)
-    return path
-
-
-def write_heartbeat() -> None:
-    """Touch the heartbeat file so hooks know we're alive."""
-    try:
-        HEARTBEAT_FILE.write_text(str(time.time()))
-    except Exception:
-        pass
-
-
-# --- Playback State (pause/resume) ---
-
-
-def read_playback_state() -> dict:
-    """Read current playback state; the default when the file is missing or unreadable."""
-    try:
-        return json.loads(PLAYBACK_STATE_FILE.read_text("utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeDecodeError):
-        return {"paused": False, "audio_pid": None, "current_message": None}
-
-
-# One writer at a time inside this process: the play loop, the mic watcher and the bridge
-# all update the state, and a read-modify-write from two threads loses one of the updates.
-# Another process (the CLI's pause toggle) still races the daemon; its writes are one flag.
-_PLAYBACK_STATE_LOCK = threading.Lock()
-
-
-_UNSET = object()
-
-
-def write_playback_state(
-    audio_pid: int | None | object = _UNSET,
-    paused: bool | None = None,
-    paused_by: str | None | object = _UNSET,
-    current_message: dict | None | object = _UNSET,
-) -> None:
-    """Update playback state atomically.
-
-    paused_by tracks who paused: "user" (manual toggle) or "mic" (mic watcher).
-    This prevents mic-unpause from overriding a manual pause.
-    """
-    with _PLAYBACK_STATE_LOCK:
-        _write_playback_state_locked(audio_pid, paused, paused_by, current_message)
-
-
-def _write_playback_state_locked(
-    audio_pid: int | None | object,
-    paused: bool | None,
-    paused_by: str | None | object,
-    current_message: dict | None | object,
-) -> None:
-    state = read_playback_state()
-    if audio_pid is not _UNSET:
-        state["audio_pid"] = audio_pid
-    if paused is not None:
-        state["paused"] = paused
-    if paused_by is not _UNSET:
-        state["paused_by"] = paused_by
-    if current_message is not _UNSET:
-        state["current_message"] = current_message
-    state["updated_at"] = time.time()
-    atomic_write_json(PLAYBACK_STATE_FILE, state)
-
-
-def set_paused(paused: bool, by: str = "user") -> dict:
-    """Hold or release the whole queue, the way the pause hotkey does.
-
-    Only the flag is written. The play loop polls it every 50 ms and stops the
-    player itself, treating the stop as a pause (rewind, replay on resume), so
-    nothing here needs to know a pid. A release clears paused_by, so a person
-    resuming from a page wins over a mic hold exactly as `claude-tts pause` does.
-    Returns the state as written.
-    """
-    if paused:
-        write_playback_state(paused=True, paused_by=by)
-    else:
-        write_playback_state(paused=False, paused_by=None)
-    return read_playback_state()
-
-
 # An interrupted message in the state file older than this is history, not a resume.
 RESUME_AFTER_RESTART_S = 300.0
 # stop_daemon forces only after this long with the daemon idle (not speaking) and still alive.
 STOP_IDLE_GRACE_S = 15.0
-
-
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
 
 
 def kill_orphan_player(pid: int | None) -> bool:
@@ -369,20 +221,6 @@ def kill_orphan_player(pid: int | None) -> bool:
     except OSError:
         pass
     return True
-
-
-def clear_current_message() -> None:
-    """Clear the current message (called after successful playback)."""
-    write_playback_state(current_message=None)
-
-
-def get_interrupted_message() -> dict | None:
-    """Get the interrupted message if any, and clear it."""
-    state = read_playback_state()
-    msg = state.get("current_message")
-    if msg:
-        write_playback_state(current_message=None)
-    return msg
 
 
 # --- WAV position helpers ---
@@ -1129,12 +967,12 @@ def handle_control_message(msg: dict) -> None:
         speak_announcement(text, persona)
 
     if post_action == "restart":
-        VERSION_FILE.write_text("control-v1")
+        write_protocol_marker()
         msg_file = msg.get("_file")
         if msg_file:
             Path(msg_file).unlink(missing_ok=True)
-        RESPAWN_MARKER.write_text(str(time.time()))
-        HEARTBEAT_FILE.unlink(missing_ok=True)
+        write_respawn_marker()
+        clear_heartbeat()
         release_lock()
         if _supervised():
             log("Control: exiting for the service manager to restart us")
@@ -1586,7 +1424,7 @@ def daemon_loop(lockpick: bool = False) -> None:
     """Main daemon processing loop."""
     global _shutdown_requested
 
-    if not acquire_lock(lockpick=lockpick):
+    if not acquire_lock(lockpick=lockpick, log=log):
         log("Another daemon is already running. Exiting.", "ERROR")
         print("Another daemon is already running. Use --lockpick to force takeover.")
         sys.exit(1)
@@ -1607,7 +1445,7 @@ def daemon_loop(lockpick: bool = False) -> None:
     signal.signal(signal.SIGINT, handle_shutdown)
 
     log("Daemon starting...")
-    PID_FILE.write_text(str(os.getpid()))
+    write_pid()
     TTS_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
 
     config = get_queue_config()
@@ -1620,7 +1458,7 @@ def daemon_loop(lockpick: bool = False) -> None:
         f"transition={config['speaker_transition']}"
     )
 
-    VERSION_FILE.write_text("control-v1")
+    write_protocol_marker()
     write_release_marker()
 
     # Loopback HTTP bridge for browser pages (off unless http.enabled in config).
@@ -1641,14 +1479,7 @@ def daemon_loop(lockpick: bool = False) -> None:
     # --- Detect restart type ---
     # Respawn marker with recent timestamp = controlled restart (upgrade/config).
     # Missing or old marker = cold start (reboot, crash, manual start).
-    is_respawn = False
-    if RESPAWN_MARKER.exists():
-        try:
-            marker_age = time.time() - float(RESPAWN_MARKER.read_text().strip())
-            is_respawn = marker_age < 30.0
-        except (ValueError, OSError):
-            pass
-        RESPAWN_MARKER.unlink(missing_ok=True)
+    is_respawn = take_respawn_marker()
 
     # --- Clear stale state from previous daemon run ---
     # audio_pid and mic-pause are always stale (process is dead, mic isn't
@@ -1692,9 +1523,9 @@ def daemon_loop(lockpick: bool = False) -> None:
     if stale_fields:
         write_playback_state(
             audio_pid=None,
-            current_message=None if "current_message" in stale_fields else _UNSET,
+            current_message=None if "current_message" in stale_fields else UNSET,
             paused=False if "mic-pause" in stale_fields else None,
-            paused_by=None if "mic-pause" in stale_fields else _UNSET,
+            paused_by=None if "mic-pause" in stale_fields else UNSET,
         )
         log(f"Cleared stale state from previous run: {', '.join(stale_fields)}")
 
@@ -2125,39 +1956,12 @@ def daemon_loop(lockpick: bool = False) -> None:
     log("Shutting down gracefully...")
     if not _shutdown_by_signal:
         speak_announcement("Voice daemon shutting down. Catch you later.")
-    HEARTBEAT_FILE.unlink(missing_ok=True)
+    clear_heartbeat()
     release_lock()
     log("Daemon stopped")
 
 
 # --- Daemon Management ---
-
-
-def _heartbeat_fresh() -> bool:
-    try:
-        return time.time() - float(HEARTBEAT_FILE.read_text().strip()) <= 30
-    except (OSError, ValueError):
-        return False
-
-
-def is_daemon_running() -> tuple[bool, int | None]:
-    """Check if daemon is running. Returns (is_running, pid)."""
-    if not PID_FILE.exists():
-        return False, None
-    try:
-        pid = int(PID_FILE.read_text().strip())
-    except ValueError:
-        PID_FILE.unlink(missing_ok=True)
-        return False, None
-    # A fresh heartbeat wins: a sandbox sharing this directory cannot see the host pid.
-    if _heartbeat_fresh():
-        return True, pid
-    try:
-        os.kill(pid, 0)
-        return True, pid
-    except (ProcessLookupError, PermissionError):
-        PID_FILE.unlink(missing_ok=True)
-        return False, None
 
 
 def service_path_env(claude_tts_bin: str) -> str:
@@ -2213,13 +2017,13 @@ def start_daemon(lockpick: bool = False) -> bool:
     sys.stderr = open(os.devnull, "w")
 
     TTS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    PID_FILE.write_text(str(os.getpid()))
+    write_pid()
 
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
     import atexit
 
-    atexit.register(lambda: PID_FILE.unlink(missing_ok=True))
+    atexit.register(clear_pid)
 
     global _daemon_mode
     _daemon_mode = True
@@ -2254,12 +2058,12 @@ def stop_daemon() -> bool:
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
-                PID_FILE.unlink(missing_ok=True)
+                clear_pid()
                 print("Daemon stopped gracefully")
                 return True
             now = time.monotonic()
             player_pid = read_playback_state().get("audio_pid")
-            speaking = isinstance(player_pid, int) and player_pid > 0 and _pid_alive(player_pid)
+            speaking = isinstance(player_pid, int) and player_pid > 0 and pid_alive(player_pid)
             if speaking:
                 idle_since = None
                 if now - last_note >= 3:
@@ -2278,12 +2082,12 @@ def stop_daemon() -> bool:
         os.kill(pid, signal.SIGKILL)
         if kill_orphan_player(player_pid):
             print(f"Stopped its player too (PID {player_pid})")
-        PID_FILE.unlink(missing_ok=True)
-        HEARTBEAT_FILE.unlink(missing_ok=True)
+        clear_pid()
+        clear_heartbeat()
         print("Daemon killed")
         return True
     except ProcessLookupError:
-        PID_FILE.unlink(missing_ok=True)
+        clear_pid()
         print("Daemon was not running")
         return False
     except PermissionError:

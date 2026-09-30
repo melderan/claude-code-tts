@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 import claude_code_tts.daemon as d
+import claude_code_tts.state as st
 from claude_code_tts.daemon import (
     PauseLedger,
     cleanup_old_messages,
@@ -128,14 +129,14 @@ class TestLoopHoldsQueueWhilePaused:
             return True
 
         patches = [
-            patch.object(d, "PLAYBACK_STATE_FILE", state_dir / "playback.json"),
-            patch.object(d, "HEARTBEAT_FILE", state_dir / "daemon.heartbeat"),
+            patch.object(st, "PLAYBACK_STATE_FILE", state_dir / "playback.json"),
+            patch.object(st, "HEARTBEAT_FILE", state_dir / "daemon.heartbeat"),
             patch.object(d, "LOG_FILE", state_dir / "daemon.log"),
             patch.object(d, "TTS_QUEUE_DIR", queue_dir),
-            patch.object(d, "PID_FILE", state_dir / "daemon.pid"),
-            patch.object(d, "LOCK_FILE", state_dir / "daemon.lock"),
-            patch.object(d, "VERSION_FILE", state_dir / "daemon.version"),
-            patch.object(d, "RESPAWN_MARKER", state_dir / "daemon.respawn"),
+            patch.object(st, "PID_FILE", state_dir / "daemon.pid"),
+            patch.object(st, "LOCK_FILE", state_dir / "daemon.lock"),
+            patch.object(st, "VERSION_FILE", state_dir / "daemon.version"),
+            patch.object(st, "RESPAWN_MARKER", state_dir / "daemon.respawn"),
             patch.object(d.signal, "signal"),  # the loop runs in a thread here
             patch.object(d, "detect_player", return_value=[str(player)]),
             patch.object(d, "daemon_generate_speech", side_effect=fake_generate),
@@ -203,7 +204,7 @@ class TestLoopHoldsQueueWhilePaused:
 
 def test_set_paused_writes_the_flag_and_a_release_clears_paused_by(tmp_path: Path) -> None:
     """set_paused is the bridge's hold: flag only, no pid, release clears who held it."""
-    with patch.object(d, "PLAYBACK_STATE_FILE", tmp_path / "playback.json"):
+    with patch.object(st, "PLAYBACK_STATE_FILE", tmp_path / "playback.json"):
         d.write_playback_state(audio_pid=4242, current_message={"id": "m1"})
         state = d.set_paused(True, by="user")
         assert state["paused"] is True and state["paused_by"] == "user"

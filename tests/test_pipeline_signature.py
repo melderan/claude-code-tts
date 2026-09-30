@@ -18,6 +18,7 @@ from unittest.mock import patch
 import pytest
 
 import claude_code_tts.daemon as d
+import claude_code_tts.state as st
 from claude_code_tts.bridge import split_sentences
 from claude_code_tts.daemon import play_sentences, sentence_generator, write_playback_state
 from claude_code_tts.signature import Signature, compare, sign
@@ -47,8 +48,8 @@ def env(tmp_path, monkeypatch):
     player.write_text("#!/bin/bash\nsleep 0.01\n")
     player.chmod(player.stat().st_mode | stat.S_IEXEC)
     with (
-        patch.object(d, "PLAYBACK_STATE_FILE", state / "playback.json"),
-        patch.object(d, "HEARTBEAT_FILE", state / "daemon.heartbeat"),
+        patch.object(st, "PLAYBACK_STATE_FILE", state / "playback.json"),
+        patch.object(st, "HEARTBEAT_FILE", state / "daemon.heartbeat"),
         patch.object(d, "LOG_FILE", state / "daemon.log"),
         patch.object(d, "detect_player", return_value=[str(player)]),
         patch.object(d, "normalize_target", return_value=-16.0),

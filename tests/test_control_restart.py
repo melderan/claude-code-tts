@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 import claude_code_tts.daemon as daemon_mod
+import claude_code_tts.state as state_mod
 from claude_code_tts.daemon import _supervised, handle_control_message
 
 
@@ -31,7 +32,7 @@ def test_restart_under_launchd_exits_3(monkeypatch: pytest.MonkeyPatch) -> None:
         handle_control_message({"post_action": "restart"})
     assert exc.value.code == 3
     execv.assert_not_called()
-    assert daemon_mod.RESPAWN_MARKER.exists()
+    assert state_mod.RESPAWN_MARKER.exists()
 
 
 def test_restart_without_supervisor_reexecs_in_place(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -44,4 +45,4 @@ def test_restart_without_supervisor_reexecs_in_place(monkeypatch: pytest.MonkeyP
     exe, argv = execv.call_args.args
     assert exe == sys.executable
     assert argv[-3:] == ["daemon", "foreground", "--lockpick"]
-    assert daemon_mod.RESPAWN_MARKER.exists()
+    assert state_mod.RESPAWN_MARKER.exists()

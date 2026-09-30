@@ -16,6 +16,7 @@ from unittest.mock import patch
 import pytest
 
 import claude_code_tts.daemon as daemon_mod
+import claude_code_tts.state as state_mod
 from claude_code_tts.daemon import (
     REWIND_REAL_SECONDS,
     calculate_audio_position,
@@ -75,14 +76,14 @@ def daemon_env(tmp_path):
     version_file = state_dir / "daemon.version"
     respawn_marker = state_dir / "daemon.respawn"
 
-    with patch.object(daemon_mod, "PLAYBACK_STATE_FILE", playback_file), \
-         patch.object(daemon_mod, "HEARTBEAT_FILE", heartbeat_file), \
+    with patch.object(state_mod, "PLAYBACK_STATE_FILE", playback_file), \
+         patch.object(state_mod, "HEARTBEAT_FILE", heartbeat_file), \
          patch.object(daemon_mod, "LOG_FILE", log_file), \
          patch.object(daemon_mod, "TTS_QUEUE_DIR", queue_dir), \
-         patch.object(daemon_mod, "PID_FILE", pid_file), \
-         patch.object(daemon_mod, "LOCK_FILE", lock_file), \
-         patch.object(daemon_mod, "VERSION_FILE", version_file), \
-         patch.object(daemon_mod, "RESPAWN_MARKER", respawn_marker):
+         patch.object(state_mod, "PID_FILE", pid_file), \
+         patch.object(state_mod, "LOCK_FILE", lock_file), \
+         patch.object(state_mod, "VERSION_FILE", version_file), \
+         patch.object(state_mod, "RESPAWN_MARKER", respawn_marker):
         yield {
             "state_dir": state_dir,
             "queue_dir": queue_dir,
@@ -372,10 +373,10 @@ class TestDaemonLoopMessageFlow:
         """Extra patches needed to run daemon_loop in a thread."""
         state_dir = daemon_env["state_dir"]
 
-        with patch.object(daemon_mod, "PID_FILE", state_dir / "daemon.pid"), \
-             patch.object(daemon_mod, "LOCK_FILE", state_dir / "daemon.lock"), \
-             patch.object(daemon_mod, "VERSION_FILE", state_dir / "daemon.version"), \
-             patch.object(daemon_mod, "RESPAWN_MARKER", state_dir / "daemon.respawn"), \
+        with patch.object(state_mod, "PID_FILE", state_dir / "daemon.pid"), \
+             patch.object(state_mod, "LOCK_FILE", state_dir / "daemon.lock"), \
+             patch.object(state_mod, "VERSION_FILE", state_dir / "daemon.version"), \
+             patch.object(state_mod, "RESPAWN_MARKER", state_dir / "daemon.respawn"), \
              patch("signal.signal"):  # signal.signal fails in non-main threads
             yield
 

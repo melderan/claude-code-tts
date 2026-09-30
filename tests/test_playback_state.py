@@ -13,6 +13,7 @@ import threading
 from pathlib import Path
 
 import claude_code_tts.daemon as d
+import claude_code_tts.state as st
 from claude_code_tts.config import atomic_write_json
 
 
@@ -48,8 +49,8 @@ def test_concurrent_writers_never_fail_and_leave_valid_json():
     for t in threads:
         t.join()
     assert errors == []
-    json.loads(d.PLAYBACK_STATE_FILE.read_text())
-    leftovers = [p for p in d.PLAYBACK_STATE_FILE.parent.iterdir() if p.suffix == ".tmp"]
+    json.loads(st.PLAYBACK_STATE_FILE.read_text())
+    leftovers = [p for p in st.PLAYBACK_STATE_FILE.parent.iterdir() if p.suffix == ".tmp"]
     assert leftovers == []
 
 
@@ -75,5 +76,5 @@ def test_atomic_write_json_uses_its_own_temp_name(tmp_path):
 
 def test_unreadable_state_file_falls_back_to_defaults():
     _home()
-    d.PLAYBACK_STATE_FILE.write_text("{not json")
+    st.PLAYBACK_STATE_FILE.write_text("{not json")
     assert d.read_playback_state() == {"paused": False, "audio_pid": None, "current_message": None}

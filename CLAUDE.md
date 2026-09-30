@@ -139,6 +139,7 @@ src/claude_code_tts/
   audio.py                 # Piper/Kokoro/afplay backends, tts_speak()
   filter.py                # Text filter (filter_text for responses, filter_document for files)
   daemon.py                # Queue daemon (pause/resume, heartbeat)
+  state.py                 # The daemon's files on disk: playback.json, heartbeat, pid, lock, restart markers; the only reader and writer
   bridge.py                # Opt-in loopback HTTP bridge (browser pages -> queue, timing marks)
   install.py               # Installer (hooks, voices, service)
   signature.py             # Voice signatures: tolerant shape of a WAV, compared with tolerances, not by ear
