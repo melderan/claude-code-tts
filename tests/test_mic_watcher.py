@@ -512,3 +512,25 @@ class TestHandyLogLevel:
         w.stop()
         warns = [m for lvl, m in logs if lvl == "WARN"]
         assert any("Log Level > Debug" in m for m in warns)
+
+
+class TestWatchLoopIsALoop:
+    """Reopening after a rotation or an error must not add a stack frame (9.33.2)."""
+
+    def test_reopen_runs_in_place_until_stopped(self, monkeypatch):
+        w = MicWatcher(
+            log_fn=MagicMock(),
+            read_playback_state=lambda: {"paused": False},
+            write_playback_state=lambda **kw: None,
+        )
+        calls = {"n": 0}
+
+        def once() -> None:
+            calls["n"] += 1
+            if calls["n"] == 3:
+                w._stop_event.set()
+
+        monkeypatch.setattr(w, "_watch_once", once)
+        monkeypatch.setattr(mw.time, "sleep", lambda s: None)
+        w._watch_loop()
+        assert calls["n"] == 3

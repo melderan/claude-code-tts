@@ -414,3 +414,40 @@ class TestReadPCMSamples:
         make_sine_wav(wav, duration=0.1, amplitude=1.0)
         samples, _ = _read_pcm_samples(wav)
         assert all(-1.0 <= s <= 1.0 for s in samples)
+
+
+class TestAnalyzerStartDoesNotBlock:
+    """The recordings backlog is analyzed on the analyzer's thread, not the daemon's (9.33.2)."""
+
+    def test_start_returns_before_the_backlog_is_analyzed(self, tmp_path, monkeypatch):
+        import threading
+        import time
+
+        import claude_code_tts.handy as handy_mod
+        from claude_code_tts.handy import AnalyzerThread
+
+        rec = tmp_path / "recordings"
+        rec.mkdir()
+        for i in range(3):
+            (rec / f"r{i}.wav").write_bytes(b"RIFF")
+        analyzed: list[str] = []
+        gate = threading.Event()
+
+        def slow_analyze(path):
+            gate.wait(5)
+            analyzed.append(path.name)
+            return None
+
+        monkeypatch.setattr(handy_mod, "analyze_recording", slow_analyze)
+        t = AnalyzerThread(log_fn=lambda *a, **k: None, recordings_dir=rec,
+                           db_path=tmp_path / "a.db", poll_interval=0.05)
+        t0 = time.monotonic()
+        assert t.start() is True
+        assert time.monotonic() - t0 < 1.0, "start waited on the backlog"
+        assert analyzed == []
+        gate.set()
+        deadline = time.monotonic() + 5
+        while len(analyzed) < 3 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        t.stop()
+        assert sorted(analyzed) == ["r0.wav", "r1.wav", "r2.wav"]

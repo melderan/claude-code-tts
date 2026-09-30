@@ -238,8 +238,8 @@ class MicWatcher:
             pass
         return False
 
-    def _watch_loop(self) -> None:
-        """Tail the Handy log file, watching for recording events."""
+    def _watch_once(self) -> None:
+        """Tail the Handy log file until it rotates, errors, or a stop is requested."""
         self._last_rotation_check = time.monotonic()
 
         try:
@@ -278,8 +278,15 @@ class MicWatcher:
         except Exception as e:
             self._log(f"Mic watcher error: {e}", "ERROR")
 
-        # If we broke out (rotation or error), restart unless stopping
-        if not self._stop_event.is_set():
+    def _watch_loop(self) -> None:
+        """Tail the log until stopped; reopen after a rotation or an error.
+
+        A loop, not a recursive call: through 9.33.1 every rotation or error added a stack
+        frame, and a log that kept failing to open would have ended in RecursionError.
+        """
+        while True:
+            self._watch_once()
+            if self._stop_event.is_set():
+                return
             self._log("Mic watcher: restarting after rotation/error")
             time.sleep(0.5)
-            self._watch_loop()

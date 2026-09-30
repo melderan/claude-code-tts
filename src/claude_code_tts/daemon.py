@@ -51,6 +51,7 @@ from claude_code_tts.config import (
     TTS_CONFIG_DIR,
     TTS_QUEUE_DIR,
     VOICES_DIR,
+    atomic_write_json,
     load_raw_config,
 )
 from claude_code_tts.handy import AnalyzerThread, save_speech_wav
@@ -265,18 +266,17 @@ def write_heartbeat() -> None:
 
 
 def read_playback_state() -> dict:
-    """Read current playback state."""
-    if PLAYBACK_STATE_FILE.exists():
-        try:
-            fd = os.open(str(PLAYBACK_STATE_FILE), os.O_RDONLY)
-            try:
-                data = os.read(fd, 10000).decode("utf-8")
-                return json.loads(data)
-            finally:
-                os.close(fd)
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {"paused": False, "audio_pid": None, "current_message": None}
+    """Read current playback state; the default when the file is missing or unreadable."""
+    try:
+        return json.loads(PLAYBACK_STATE_FILE.read_text("utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return {"paused": False, "audio_pid": None, "current_message": None}
+
+
+# One writer at a time inside this process: the play loop, the mic watcher and the bridge
+# all update the state, and a read-modify-write from two threads loses one of the updates.
+# Another process (the CLI's pause toggle) still races the daemon; its writes are one flag.
+_PLAYBACK_STATE_LOCK = threading.Lock()
 
 
 _UNSET = object()
@@ -293,6 +293,16 @@ def write_playback_state(
     paused_by tracks who paused: "user" (manual toggle) or "mic" (mic watcher).
     This prevents mic-unpause from overriding a manual pause.
     """
+    with _PLAYBACK_STATE_LOCK:
+        _write_playback_state_locked(audio_pid, paused, paused_by, current_message)
+
+
+def _write_playback_state_locked(
+    audio_pid: int | None | object,
+    paused: bool | None,
+    paused_by: str | None | object,
+    current_message: dict | None | object,
+) -> None:
     state = read_playback_state()
     if audio_pid is not _UNSET:
         state["audio_pid"] = audio_pid
@@ -303,13 +313,7 @@ def write_playback_state(
     if current_message is not _UNSET:
         state["current_message"] = current_message
     state["updated_at"] = time.time()
-
-    tmp = PLAYBACK_STATE_FILE.with_suffix(".tmp")
-    with open(tmp, "w") as f:
-        json.dump(state, f)
-        f.flush()
-        os.fsync(f.fileno())
-    tmp.rename(PLAYBACK_STATE_FILE)
+    atomic_write_json(PLAYBACK_STATE_FILE, state)
 
 
 def set_paused(paused: bool, by: str = "user") -> dict:

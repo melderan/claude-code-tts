@@ -740,19 +740,16 @@ class AnalyzerThread:
             self._log(f"Handy analyzer: recordings dir not found at {self._recordings_dir}", "WARN")
             return False
 
-        # Seed known files from DB + directory
-        self._known_files = {f.name for f in self._recordings_dir.glob("*.wav")}
+        # Files already analyzed are known; anything else in the directory is a backlog the
+        # thread works through. Through 9.33.1 the backlog was analyzed here, on the caller's
+        # thread, so a daemon start waited on pure-Python autocorrelation over every recording
+        # while hooks read its stale heartbeat as a dead daemon.
+        self._known_files = set()
         if self._db_path.exists():
             conn = _init_db(self._db_path)
             rows = conn.execute("SELECT file_name FROM voice_analysis").fetchall()
             self._known_files.update(row[0] for row in rows)
             conn.close()
-
-        # Analyze any unprocessed files on startup
-        new_results = analyze_all_recordings(self._recordings_dir, self._db_path)
-        for r in new_results:
-            self._known_files.add(r.file_name)
-            self._log(f"Handy analyzer: {r.file_name} -> {summarize_tone(r.features)}")
 
         self._stop_event.clear()
         self._thread = threading.Thread(

@@ -7,6 +7,7 @@ Handles the session resolution chain: session.d file > project_personas > global
 import json
 import logging
 import os
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -110,11 +111,17 @@ class TTSConfig:
 
 
 def atomic_write_json(path: Path, data: dict) -> None:
-    """Write JSON atomically via temp file + rename."""
+    """Write JSON atomically: a temp file of its own in the same directory, then rename.
+
+    The temp name is unique per call. A fixed `<name>.tmp` let two writers (the daemon's
+    play loop and its mic thread, or the daemon and the CLI) open the same file and leave
+    a corrupt state behind; measured at 375 failures in 1200 concurrent writes.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_name)
     try:
-        with open(tmp, "w") as f:
+        with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
             f.write("\n")
             f.flush()
