@@ -34,9 +34,12 @@ def make_wav(path: Path, seconds: float, rate: int = 22050) -> Path:
     return path
 
 
-def fake_player(tmp_path: Path, seconds: float) -> Path:
+def fake_player(tmp_path: Path, seconds: float, started: Path | None = None) -> Path:
+    """A player that sleeps. With `started`, it touches that file first, so a test
+    can act at a known point of playback instead of guessing with a timed sleep."""
     script = tmp_path / "fake-player"
-    script.write_text(f"#!/bin/bash\nsleep {seconds}\n")
+    touch = f"touch {started}\n" if started else ""
+    script.write_text(f"#!/bin/bash\n{touch}sleep {seconds}\n")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     return script
 
@@ -244,10 +247,16 @@ class TestPlaySentences:
     def test_bridge_cancel_between_sentences(self, env):
         JOBS.create("job-x", state="playing")
         synth = Synth()
-        player = fake_player(env["tmp"], 0.3)
+        # The cancel lands once the first sentence is audibly playing. A timed
+        # sleep here (0.15 s against a 0.3 s player) landed in the second sentence
+        # on a slow CI runner; waiting for the player's own mark cannot.
+        started = env["tmp"] / "player-started"
+        player = fake_player(env["tmp"], 2.0, started=started)
 
         def cancel_later():
-            time.sleep(0.15)
+            deadline = time.monotonic() + 10
+            while not started.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
             JOBS.request_cancel("job-x")
 
         th = threading.Thread(target=cancel_later)
@@ -307,8 +316,10 @@ class TestStreamMessage:
     def test_resume_starts_at_recorded_sentence(self, env):
         synth = Synth()
         player = fake_player(env["tmp"], 0.05)
-        with patch.object(d, "detect_player", return_value=[str(player)]), \
-             patch.object(d, "save_speech_wav", lambda p, **kw: p):
+        with (
+            patch.object(d, "detect_player", return_value=[str(player)]),
+            patch.object(d, "save_speech_wav", lambda p, **kw: p),
+        ):
             stream_message(self.msg(sentence_index=2), synth, start_index=2)
         assert synth.calls == [SENTENCES[2]]
         assert read_playback_state()["current_message"] is None
@@ -387,8 +398,10 @@ class TestStreamMessage:
             seen.append(msg_file.exists())
 
         th = threading.Thread(target=peek)
-        with patch.object(d, "detect_player", return_value=[str(player)]), \
-             patch.object(d, "save_speech_wav", lambda p, **kw: p):
+        with (
+            patch.object(d, "detect_player", return_value=[str(player)]),
+            patch.object(d, "save_speech_wav", lambda p, **kw: p),
+        ):
             th.start()
             stream_message(self.msg(), Synth(), msg_file=msg_file)
             th.join()
@@ -399,9 +412,13 @@ class TestStreamMessage:
 class TestSpeechUnit:
     @pytest.mark.parametrize(
         ("raw", "want"),
-        [({}, "message"), ({"speech_unit": "sentence"}, "sentence"),
-         ({"speech_unit": " Sentence "}, "sentence"), ({"speech_unit": "word"}, "message"),
-         ({"speech_unit": 3}, "message")],
+        [
+            ({}, "message"),
+            ({"speech_unit": "sentence"}, "sentence"),
+            ({"speech_unit": " Sentence "}, "sentence"),
+            ({"speech_unit": "word"}, "message"),
+            ({"speech_unit": 3}, "message"),
+        ],
     )
     def test_values(self, monkeypatch, raw, want):
         monkeypatch.setattr(d, "load_raw_config", lambda: raw)

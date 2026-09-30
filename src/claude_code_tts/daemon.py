@@ -1138,6 +1138,21 @@ def get_queue_messages() -> list[dict]:
     return messages
 
 
+BACKGROUND_LANE = "background"
+
+
+def play_order(messages: list[dict]) -> list[dict]:
+    """The order the loop speaks in: everything else first, then the background lane.
+
+    A long read queued by a page marks its blocks lane "background" so a
+    room's one-liner arriving mid-read goes next, at the block boundary, instead
+    of behind every queued block. Within a lane the timestamp order holds, and
+    control messages are never background, so they still come first. Ageing and
+    depth trimming keep using timestamp order; this is only who speaks next.
+    """
+    return sorted(messages, key=lambda m: 1 if m.get("lane") == BACKGROUND_LANE else 0)
+
+
 class PauseLedger:
     """Seconds the daemon has spent paused, so a held queue does not age.
 
@@ -1813,7 +1828,7 @@ def daemon_loop(lockpick: bool = False) -> None:
 
             # Get pending messages
             prefetch.discard_if_gone()
-            messages = get_queue_messages()
+            messages = play_order(get_queue_messages())
             if not messages:
                 time.sleep(poll_interval)
                 continue
@@ -1932,7 +1947,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             # speaker transition: an announce is synthesized on this thread and must
             # not race the prefetch for a model worker.
             if config.get("prefetch_next", True):
-                nxt = next_speakable(get_queue_messages(), msg_file)
+                nxt = next_speakable(play_order(get_queue_messages()), msg_file)
                 if nxt is not None and (speech_unit() != "sentence" or nxt.get("want_marks")):
                     prefetch.start(prepare_message(nxt, raw_config))
 

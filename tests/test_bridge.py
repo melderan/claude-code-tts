@@ -293,6 +293,41 @@ def test_stop_leaves_a_room_message_alone(server: Bridge) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Lane and job listing
+# ---------------------------------------------------------------------------
+
+
+def test_speak_background_lane_is_written_and_validated(server: Bridge, tts_home: Path) -> None:
+    status, body, _ = call(server, "POST", "/speak", {"text": "slow read", "lane": "background"})
+    assert status == 202
+    files = list((tts_home / "queue").glob("*.json"))
+    assert len(files) == 1
+    assert json.loads(files[0].read_text())["lane"] == "background"
+    assert JOBS.get(body["id"])["lane"] == "background"  # type: ignore[index]
+    status, body, _ = call(server, "POST", "/speak", {"text": "plain"})
+    assert status == 202
+    msgs = [json.loads(f.read_text()) for f in (tts_home / "queue").glob("*.json")]
+    assert sum("lane" in m for m in msgs) == 1, "no lane means no lane key, as a hook writes"
+    status, body, _ = call(server, "POST", "/speak", {"text": "x", "lane": "urgent"})
+    assert status == 400 and body["lane"] == "urgent"
+
+
+def test_jobs_listed_by_source_oldest_first(server: Bridge) -> None:
+    _, a, _ = call(server, "POST", "/speak", {"text": "one", "source": "page"})
+    _, b, _ = call(server, "POST", "/speak", {"text": "two", "source": "page"})
+    call(server, "POST", "/speak", {"text": "other", "source": "other"})
+    status, body, _ = call(server, "GET", "/jobs?source=page")
+    assert status == 200
+    assert body["source"] == "page"
+    assert [j["id"] for j in body["jobs"]] == [a["id"], b["id"]]
+    assert all("updated_at" not in j and "created_at" in j for j in body["jobs"])
+    status, body, _ = call(server, "GET", "/jobs?source=nobody")
+    assert status == 200 and body["jobs"] == []
+    status, body, _ = call(server, "GET", "/jobs")
+    assert status == 400
+
+
+# ---------------------------------------------------------------------------
 # Pause
 # ---------------------------------------------------------------------------
 

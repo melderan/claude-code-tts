@@ -31,6 +31,7 @@ from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
 from claude_code_tts import __version__
 from claude_code_tts.config import TTS_CONFIG_DIR, TTS_QUEUE_DIR, load_raw_config
@@ -99,10 +100,18 @@ class JobRegistry:
         self._cancel: set[str] = set()
 
     def create(self, job_id: str, **fields: Any) -> dict:
-        job = {"id": job_id, "state": "queued", "updated_at": time.time(), **fields}
+        now = time.time()
+        job = {"id": job_id, "state": "queued", "created_at": now, "updated_at": now, **fields}
         with self._lock:
             self._jobs[job_id] = job
         return dict(job)
+
+    def by_source(self, source: str) -> list[dict]:
+        """Every job this source still has on record, oldest first."""
+        with self._lock:
+            jobs = [dict(j) for j in self._jobs.values() if j.get("source") == source]
+        jobs.sort(key=lambda j: j.get("created_at", 0.0))
+        return jobs
 
     def update(self, job_id: str | None, **fields: Any) -> None:
         if not job_id:
@@ -182,11 +191,13 @@ def write_bridge_message(
     source: str,
     label: str = "",
     want_marks: bool = False,
+    lane: str = "",
 ) -> dict:
     """Write a queue file the way a hook does, tagged with its source.
 
     session_id is "browser" and project is "<source>:<label>", so the daemon's
-    speaker-transition chime fires when a room and the page interleave.
+    speaker-transition chime fires when a room and the page interleave. lane
+    "background" lets every other message go first (see daemon.play_order).
     """
     TTS_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = f"{time.time():.6f}"
@@ -204,11 +215,13 @@ def write_bridge_message(
         "source": source,
         "want_marks": bool(want_marks),
     }
+    if lane:
+        message["lane"] = lane
     queue_file = TTS_QUEUE_DIR / f"{timestamp}_{msg_id}.json"
     tmp_file = queue_file.with_suffix(".tmp")
     tmp_file.write_text(json.dumps(message))
     tmp_file.rename(queue_file)
-    JOBS.create(msg_id, source=source, project=project, persona=persona)
+    JOBS.create(msg_id, source=source, project=project, persona=persona, lane=lane)
     return message
 
 
@@ -516,6 +529,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
             else:
                 job.pop("updated_at", None)
                 self._send_json(200, job)
+        elif path == "/jobs":
+            query = parse_qs(self.path.partition("?")[2])
+            source = (query.get("source") or [""])[0]
+            if not source:
+                self._send_json(400, {"error": "source is required: /jobs?source=<name>"})
+                return
+            jobs = JOBS.by_source(source)
+            for job in jobs:
+                job.pop("updated_at", None)
+            self._send_json(200, {"source": source, "jobs": jobs})
         elif path == "/pause":
             self._send_json(200, pause_view(self.server.read_playback_state()))
         else:
@@ -555,6 +578,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         source = re.sub(r"[^A-Za-z0-9_.-]", "", str(body.get("source") or "browser"))[:32]
         label = str(body.get("label", ""))[:80]
+        lane = str(body.get("lane") or "")
+        if lane not in ("", "background"):
+            self._send_json(400, {"error": "lane must be omitted or \"background\"", "lane": lane})
+            return
         msg = write_bridge_message(
             text,
             persona=persona,
@@ -562,6 +589,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             source=source or "browser",
             label=label,
             want_marks=bool(body.get("want_marks", False)),
+            lane=lane,
         )
         self._send_json(202, {"id": msg["id"], "state": "queued"})
 

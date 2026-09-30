@@ -73,7 +73,8 @@ separate "daemon down" answer because the bridge lives inside the daemon.
  "persona": "claude-connery",
  "source": "artifact",
  "label": "PR 1223 cascade",
- "want_marks": true}
+ "want_marks": true,
+ "lane": "background"}
 ```
 
 - `text` is required. Longer than the persona's `max_chars`: `413`.
@@ -83,6 +84,12 @@ separate "daemon down" answer because the bridge lives inside the daemon.
   fires when a room and the page interleave, exactly as it does between two rooms. Default
   `browser`.
 - `want_marks` asks for timing. Costs one synthesis per sentence instead of one per block.
+- `lane` is optional. `"background"` lets every message without it go first: a page reading a
+  long document block by block sets it on every block, so a session's one-liner arriving
+  mid-read is spoken at the next block boundary instead of behind every queued block. Within a
+  lane the order is arrival order. Ageing (`max_age_seconds`) and depth trimming still count
+  by arrival, so a background block that waits behind a busy session can age out; keep only a
+  few blocks queued and top up as they finish. Any other value: `400`.
 
 Response `202`:
 
@@ -122,6 +129,19 @@ States: `queued`, `synthesizing`, `playing`, `paused`, `done`, `cancelled`, `fai
 - `position_ms` is present in `paused` and `cancelled`: how far the listener got.
 - `failed` carries `error`.
 - Finished jobs are readable for five minutes, then `404`.
+
+### `GET /jobs?source=<name>`
+
+```json
+{"source": "page",
+ "jobs": [{"id": "3f9c2b7e1a04d5c6", "state": "done", "source": "page", "project": "page:PR 1223 cascade",
+           "persona": "claude-connery", "lane": "background", "created_at": 1790099390.12}]}
+```
+
+Every job the daemon still has on record for that source, oldest first, in the `/jobs/<id>`
+shape plus `created_at`. A page that was reloaded finds what it queued, resumes polling the one
+that is playing, or stops the lot. Same five-minute memory for finished jobs. `source` is
+required: `400` without it.
 
 Poll at a few hertz. There is no streaming endpoint on purpose: `GM_xmlhttpRequest` streams
 poorly and polling on loopback is free.
@@ -167,6 +187,15 @@ false when the hold already matched. Only the flag is written: the play loop pol
 50 ms and stops the player itself, rewinding a little so nothing is lost on resume, exactly as
 it does for the hotkey. A resume clears a mic hold as well, since a person pressing resume
 knows better than the watcher.
+
+## Mute does not apply here
+
+`muted`, `default_muted` and a session's own mute are decided by the hook before it writes a
+queue file: a muted session never queues. The bridge writes queue files directly for a page,
+which is not a session and has no mute of its own, so a bridge message speaks even when every
+session is muted. That is by design: the person asked the page to read, and the way to stop it
+is the page's own control (`/stop`) or the hold (`/pause`). A page that wants to honour a
+house-wide silence can read `muted` from the config file itself; the bridge does not expose it.
 
 ## How timing is measured
 
