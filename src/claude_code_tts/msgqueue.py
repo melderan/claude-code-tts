@@ -153,6 +153,13 @@ class PauseLedger:
     def paused(self) -> bool:
         return self._open is not None
 
+    def open_for(self, now: float | None = None) -> float:
+        """Seconds the current pause has been held; 0.0 when not paused."""
+        if self._open is None:
+            return 0.0
+        t = time.time() if now is None else now
+        return max(0.0, t - self._open)
+
     def held_since(self, since: float, now: float | None = None) -> float:
         """Paused seconds between since and now."""
         t = time.time() if now is None else now

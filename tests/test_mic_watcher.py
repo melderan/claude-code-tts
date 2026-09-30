@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 import claude_code_tts.mic_watcher as mw
 from claude_code_tts.mic_watcher import (
     _RE_RECORDING_START,
@@ -534,3 +536,51 @@ class TestWatchLoopIsALoop:
         monkeypatch.setattr(mw.time, "sleep", lambda s: None)
         w._watch_loop()
         assert calls["n"] == 3
+
+
+class TestRecordingThatNeverBegan:
+    """Handy logs "start called" and returns early when the microphone or model is missing.
+
+    src-tauri/src/actions.rs (read 2026-09-30): "Failed to start recording: {}" and "Not starting
+    recording: no model can transcribe it" are the two early returns after the start line, and
+    neither path ever logs a stop. On 2026-09-30 at 08:12Z one of them held the queue for six
+    minutes until the daemon was restarted by hand.
+    """
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "[2026-09-30][01:12:20][handy_app_lib::actions][ERROR] Failed to start recording: device busy",
+            "[2026-09-30][01:12:20][handy_app_lib::actions][WARN] Not starting recording: no model can transcribe it (en)",
+        ],
+    )
+    def test_start_failure_counts_as_stop(self, line):
+        assert _RE_RECORDING_STOP.search(line)
+        assert not _RE_RECORDING_START.search(line)
+
+    def test_failed_start_releases_the_hold(self, tmp_path, monkeypatch):
+        log_file = tmp_path / "handy.log"
+        log_file.write_text("")
+        monkeypatch.setattr("claude_code_tts.mic_watcher.HANDY_LOG", log_file)
+        state = {"paused": False, "paused_by": None}
+
+        def write_state(**kwargs):
+            state.update(kwargs)
+
+        w = MicWatcher(
+            log_fn=MagicMock(),
+            read_playback_state=lambda: dict(state),
+            write_playback_state=write_state,
+            resume_delay_ms=50,
+        )
+        w.start()
+        time.sleep(0.1)
+        with open(log_file, "a") as f:
+            f.write("[DEBUG] TranscribeAction::start called for binding: transcribe\n")
+        time.sleep(0.2)
+        assert state["paused"] is True and state["paused_by"] == "mic"
+        with open(log_file, "a") as f:
+            f.write("[ERROR] Failed to start recording: no input device\n")
+        time.sleep(0.3)
+        assert state["paused"] is False and state["paused_by"] is None
+        w.stop()

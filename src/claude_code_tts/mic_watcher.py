@@ -34,11 +34,16 @@ _RE_RECORDING_START = re.compile(
     r"TranscribeAction::start called for binding"
     r"|Recording started for binding"
 )
+# A recording that never began ends the same way: Handy logs "start called" and then
+# returns early (no microphone, no model) without ever logging a stop. Through 9.36.5
+# that left the queue paused until the daemon was restarted (2026-09-30, six minutes).
 _RE_RECORDING_STOP = re.compile(
     r"TranscribeAction::stop called for binding"
     r"|Recording stopped and samples retrieved"
     r"|Recording produced no audio samples"
     r"|No samples retrieved from recording stop"
+    r"|Failed to start recording"
+    r"|Not starting recording"
 )
 
 # Handy's log_level setting: string since 0.7, numeric 1-5 before that

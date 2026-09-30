@@ -318,6 +318,17 @@ def rewind_amount(speed: float, speed_method: str) -> float:
 
 # --- Persona/Config helpers ---
 
+# A mic hold longer than this is a recording whose end the watcher never saw (Handy has
+# paths that log no stop line, and there may be more). "mic_pause_max_s" in config.json
+# overrides it; 0 disables the limit. A person's pause is never limited.
+MIC_PAUSE_MAX_S = 180.0
+
+
+def mic_hold_expired(state: dict, held_s: float, max_s: float) -> bool:
+    """True when a mic pause has outlived max_s and the loop should release it."""
+    return bool(state.get("paused")) and state.get("paused_by") == "mic" and 0 < max_s < held_s
+
+
 
 def get_queue_config() -> dict:
     """Get queue-specific config with defaults."""
@@ -1413,6 +1424,7 @@ def daemon_loop(lockpick: bool = False) -> None:
     # we start talking over the user.
     mic_watcher: MicWatcher | None = None
     raw_config = load_raw_config()
+    mic_pause_max_s = float(raw_config.get("mic_pause_max_s", MIC_PAUSE_MAX_S))
     if raw_config.get("mic_aware_pause", False):
         resume_delay = raw_config.get("mic_resume_delay_ms", 800)
         mic_watcher = MicWatcher(
@@ -1487,6 +1499,14 @@ def daemon_loop(lockpick: bool = False) -> None:
                 # Paused holds the queue: nothing expires, nothing is trimmed.
                 if not was_paused:
                     log(f"Paused by {state.get('paused_by') or 'user'}; holding the queue")
+                if mic_hold_expired(state, ledger.open_for(), mic_pause_max_s):
+                    log(
+                        f"Mic hold of {ledger.open_for():.0f}s passed mic_pause_max_s={mic_pause_max_s:.0f}"
+                        " with no end of recording seen; resuming",
+                        "WARN",
+                    )
+                    set_paused(False)
+                    continue
                 time.sleep(poll_interval)
                 continue
             if was_paused:

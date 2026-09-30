@@ -213,3 +213,124 @@ def test_set_paused_writes_the_flag_and_a_release_clears_paused_by(tmp_path: Pat
         assert state["current_message"] == {"id": "m1"}
         state = d.set_paused(False)
         assert state["paused"] is False and state["paused_by"] is None
+
+
+class TestMicHoldLimit:
+    """A mic pause the watcher never releases is released by the loop after mic_pause_max_s.
+
+    2026-09-30 08:12Z: Handy logged a recording start and no stop (a start that failed), the
+    watcher paused the queue, and nothing spoke for six minutes until a restart, which then
+    dropped 17 messages as stale. The limit is the second line of defence behind the watcher
+    matching Handy's start-failure lines; a person's pause is never limited.
+    """
+
+    def test_open_for_measures_only_the_current_pause(self):
+        led = PauseLedger()
+        assert led.open_for(now=10.0) == 0.0
+        led.mark(True, now=10.0)
+        assert led.open_for(now=25.0) == 15.0
+        led.mark(False, now=30.0)
+        assert led.open_for(now=40.0) == 0.0
+
+    @pytest.mark.parametrize(
+        ("state", "held", "max_s", "expect"),
+        [
+            ({"paused": True, "paused_by": "mic"}, 200.0, 180.0, True),
+            ({"paused": True, "paused_by": "mic"}, 100.0, 180.0, False),
+            ({"paused": True, "paused_by": "user"}, 1000.0, 180.0, False),
+            ({"paused": True, "paused_by": "mic"}, 1000.0, 0.0, False),
+            ({"paused": False, "paused_by": None}, 1000.0, 180.0, False),
+        ],
+    )
+    def test_mic_hold_expired(self, state, held, max_s, expect):
+        assert d.mic_hold_expired(state, held, max_s) is expect
+
+    def test_loop_releases_a_mic_hold_nobody_ends(self, tmp_path):
+        state_dir = tmp_path / ".claude-tts"
+        state_dir.mkdir()
+        queue_dir = state_dir / "queue"
+        queue_dir.mkdir()
+        player = tmp_path / "fake-player"
+        player.write_text("#!/bin/bash\nsleep 0.05\n")
+        player.chmod(0o755)
+        spoken: list[str] = []
+
+        def fake_generate(text, persona, output_file, **kw):
+            spoken.append(text)
+            import wave
+
+            with wave.open(str(output_file), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(8000)
+                w.writeframes(b"\x00\x00" * 800)
+            return True
+
+        patches = [
+            patch.object(st, "PLAYBACK_STATE_FILE", state_dir / "playback.json"),
+            patch.object(st, "HEARTBEAT_FILE", state_dir / "daemon.heartbeat"),
+            patch.object(d, "LOG_FILE", state_dir / "daemon.log"),
+            patch.object(mq, "QUEUE_DIR", queue_dir),
+            patch.object(st, "PID_FILE", state_dir / "daemon.pid"),
+            patch.object(st, "LOCK_FILE", state_dir / "daemon.lock"),
+            patch.object(st, "VERSION_FILE", state_dir / "daemon.version"),
+            patch.object(st, "RESPAWN_MARKER", state_dir / "daemon.respawn"),
+            patch.object(d.signal, "signal"),
+            patch.object(d, "detect_player", return_value=[str(player)]),
+            patch.object(d, "daemon_generate_speech", side_effect=fake_generate),
+            patch.object(d, "acquire_lock", return_value=True),
+            patch.object(d, "release_lock"),
+            patch.object(d, "speak_announcement"),
+            patch.object(d, "save_speech_wav", lambda p, **kw: p),
+            patch.object(d, "get_http_config", return_value={"enabled": False}),
+            patch.object(
+                d,
+                "get_queue_config",
+                return_value={
+                    "max_depth": 20,
+                    "max_age_seconds": 300,
+                    "speaker_transition": "none",
+                    "coalesce_rapid_ms": 500,
+                    "idle_poll_ms": 20,
+                },
+            ),
+            patch.object(d, "load_raw_config", return_value={"mic_pause_max_s": 0.3}),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            write_playback_state(paused=False, paused_by=None, audio_pid=None, current_message=None)
+
+            def run():
+                d._shutdown_requested = False
+                d._daemon_mode = True
+                d.daemon_loop()
+
+            runner = threading.Thread(target=run, daemon=True)
+            runner.start()
+            # Startup clears a mic pause it finds as stale, so the hold must land after the
+            # loop is past reconciliation: the heartbeat is written on every idle pass.
+            for _ in range(200):
+                if (state_dir / "daemon.heartbeat").exists():
+                    break
+                time.sleep(0.025)
+            assert (state_dir / "daemon.heartbeat").exists(), "loop never reached its idle pass"
+            time.sleep(0.1)
+            write_playback_state(paused=True, paused_by="mic")  # the watcher's hold, never released
+            enqueue(queue_dir, "spoken once the hold expires", age_s=0)
+            time.sleep(0.2)
+            assert spoken == [], "held: the message must wait while the mic pause is fresh"
+            for _ in range(100):
+                if spoken:
+                    break
+                time.sleep(0.05)
+            d._shutdown_requested = True
+            runner.join(timeout=5)
+        finally:
+            d._shutdown_requested = False
+            for p in patches:
+                p.stop()
+        assert spoken == ["spoken once the hold expires"]
+        log = (state_dir / "daemon.log").read_text()
+        assert "passed mic_pause_max_s=0" in log and "resuming" in log
+        assert json.loads((state_dir / "playback.json").read_text())["paused"] is False
