@@ -263,7 +263,10 @@ Recipes the operator runs on the daemon's machine (`up`, `timeline`, `release`, 
 config that forbids source builds cannot build the project, and `uv run` recreates `.venv` inside a
 checkout a sandbox may share (both happened on 2026-09-30). `tests/test_justfile_host_recipes.py`
 enforces the list. A recipe the room cannot execute is not tested until the operator has run it;
-hand over the `--help` form first. `just up` is the operator side: it rebuilds, installs,
+hand over the `--help` form first. The interpreter itself comes from `scripts/host-python.sh`: the one
+behind the installed `claude-tts` tool, else the newest 3.10+ on the PATH. `just up` installs the
+tool on Python 3.14 when the machine can supply it (Homebrew: `brew install python@3.14`) and falls
+back to what uv finds; the timeline line's `py=` field says which one the daemon runs on. `just up` is the operator side: it rebuilds, installs,
 restarts the daemon, verifies the heartbeat, writes the full output of the run to
 `.logs/just/up-<time>-<git ref>.log`, and appends one line (time, version, git ref, branch, daemon,
 bridge and mic state, run file) to `.logs/just/timeline.log`, which `just timeline` prints. The

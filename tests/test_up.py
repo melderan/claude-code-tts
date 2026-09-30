@@ -69,3 +69,31 @@ def test_daemon_writes_a_release_marker_the_script_can_read(
     assert written == tmp_path / "daemon.release" and written.read_text() == __version__
     monkeypatch.setattr(up, "TTS_DIR", tmp_path)
     assert up.daemon_version() == __version__
+
+
+def test_install_asks_for_the_preferred_python_then_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first install command pins PREFERRED_PYTHON; the alternative has no pin."""
+    import inspect
+
+    src = inspect.getsource(up.main)
+    assert '"--python", PREFERRED_PYTHON' in src
+    after_pin = src.split('"--python", PREFERRED_PYTHON', 1)[1]
+    assert '["uv", "tool", "install", ".", "--force", "--build"],' in after_pin
+    assert up.PREFERRED_PYTHON == "3.14"
+
+
+def test_tool_python_reads_the_shebang(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_py = tmp_path / "python3"
+    fake_py.write_text("#!/bin/sh\necho 'Python 3.14.4'\n")
+    fake_py.chmod(0o755)
+    tool = tmp_path / "claude-tts"
+    tool.write_text(f"#!{fake_py}\nprint('hi')\n")
+    monkeypatch.setattr(up.shutil, "which", lambda name: str(tool) if name == "claude-tts" else None)
+    assert up.tool_python() == str(fake_py)
+    assert up.tool_python_version() == "3.14.4"
+
+
+def test_tool_python_is_empty_without_the_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(up.shutil, "which", lambda name: None)
+    assert up.tool_python() == ""
+    assert up.tool_python_version() == "-"

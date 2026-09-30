@@ -27,7 +27,13 @@ import tempfile
 import time
 from pathlib import Path
 
-from claude_code_tts.signature import Signature, Tolerance, compare, sign, spread
+if sys.version_info < (3, 10):  # noqa: UP036  the point is to run on an older interpreter and say so
+    sys.exit(
+        f"voice-signatures needs Python 3.10+, this is {sys.version.split()[0]} ({sys.executable}); "
+        "`just voices-*` picks python3.10+ from the PATH, or run it with python3.12 yourself"
+    )
+
+from claude_code_tts.signature import Signature, Tolerance, compare, sign, spread  # noqa: E402
 
 TTS_DIR = Path.home() / ".claude-tts"
 HISTORY_DIR = TTS_DIR / "speech_history"

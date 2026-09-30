@@ -8,6 +8,7 @@ recipes and may.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -46,7 +47,18 @@ def test_host_recipes_use_only_what_the_host_has():
     assert bad == [], "host-side recipes must not use uv or .venv:\n" + "\n".join(bad)
 
 
-def test_host_recipes_that_import_the_package_put_src_on_the_path():
+def test_host_recipes_that_import_the_package_use_host_py_with_src_on_the_path():
+    """macOS ships python3 3.9; the package needs 3.10, so HOST_PY picks the newest 3.10+."""
     for name, body in recipes().items():
         if name in HOST_RECIPES and any("claude_code_tts" in ln or "scripts/voice-signatures" in ln for ln in body):
             assert any("PYTHONPATH=src" in ln for ln in body), name
+            assert any("{{HOST_PY}}" in ln for ln in body), f"{name} must run under HOST_PY, not python3"
+            assert not any(re.search(r"\bpython3\b", ln) for ln in body), f"{name} uses bare python3"
+
+
+def test_host_py_comes_from_the_resolver_script():
+    text = JUSTFILE.read_text()
+    m = re.search(r"^HOST_PY := `(.+)`$", text, re.M)
+    assert m, "HOST_PY definition missing"
+    assert m.group(1) == "scripts/host-python.sh"
+    assert os.access(JUSTFILE.parent / "scripts" / "host-python.sh", os.X_OK)

@@ -67,7 +67,11 @@ test-audit *ARGS:
 # voices-* trio, playpen). They use only what that machine has: python3 and this checkout on
 # PYTHONPATH. Never `uv run` or `.venv` here: a uv config that forbids source builds cannot
 # build the project, and `uv run` recreates .venv inside a checkout a sandbox may share.
-# tests/test_justfile_host_recipes.py enforces this list.
+# tests/test_justfile_host_recipes.py enforces this list. HOST_PY is the Python the installed
+# claude-tts tool runs on (so recipes and daemon share one interpreter), else the newest 3.10+
+# on the PATH: macOS ships a 3.9 as `python3`, and the package uses 3.10 syntax.
+
+HOST_PY := `scripts/host-python.sh`
 
 # Voice signatures on the machine that owns the engines: baseline from the daemon's own speech
 # history, measure run-to-run spread, re-synthesize and compare (exit 1 on drift). Baseline
@@ -76,13 +80,13 @@ test-audit *ARGS:
 # whose uv config forbids source builds cannot build the project (and it recreates .venv in a
 # checkout another machine may share).
 voices-capture *ARGS:
-    PYTHONPATH=src python3 scripts/voice-signatures.py capture {{ARGS}}
+    PYTHONPATH=src {{HOST_PY}} scripts/voice-signatures.py capture {{ARGS}}
 
 voices-spread *ARGS:
-    PYTHONPATH=src python3 scripts/voice-signatures.py spread {{ARGS}}
+    PYTHONPATH=src {{HOST_PY}} scripts/voice-signatures.py spread {{ARGS}}
 
 voices-verify *ARGS:
-    PYTHONPATH=src python3 scripts/voice-signatures.py verify {{ARGS}}
+    PYTHONPATH=src {{HOST_PY}} scripts/voice-signatures.py verify {{ARGS}}
 
 # Run any command against a throwaway HOME with src on the path. ~/.claude-tts is live daemon
 # state (in a sandbox, the host's): every ad-hoc script or repro that imports the package goes
@@ -98,7 +102,7 @@ hooks:
 
 # Maintainer: signed tag on HEAD's version, push, wait for GitHub to publish. `just release --check` to rehearse.
 release *ARGS:
-    PYTHONPATH=src python3 -m claude_code_tts.cli release {{ARGS}}
+    PYTHONPATH=src {{HOST_PY}} -m claude_code_tts.cli release {{ARGS}}
 
 # Operator, on the daemon's machine: rebuild from this checkout, deploy hooks, restart, verify; logs in .logs/just/
 up *ARGS:

@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -33,6 +34,7 @@ LOGDIR = REPO / ".logs" / "just"
 HOME = Path.home()
 TTS_DIR = HOME / ".claude-tts"
 HEARTBEAT_MAX_AGE = 10.0
+PREFERRED_PYTHON = "3.14"  # the newest interpreter in the CI matrix
 
 
 def stamp() -> str:
@@ -62,6 +64,32 @@ def config_flag(path: list[str]) -> str:
         return "on" if node else "off"
     except (OSError, json.JSONDecodeError, KeyError, TypeError):
         return "off"
+
+
+def tool_python() -> str:
+    """The interpreter behind the installed claude-tts tool, from its shebang; '' if unknown."""
+    tool = shutil.which("claude-tts")
+    if not tool:
+        return ""
+    try:
+        with open(tool, "rb") as f:
+            first = f.readline().decode(errors="replace").strip()
+    except OSError:
+        return ""
+    return first[2:] if first.startswith("#!") and "python" in first else ""
+
+
+def tool_python_version() -> str:
+    """'3.14.4' for the tool's interpreter, or '-' when it cannot be asked."""
+    py = tool_python()
+    if not py:
+        return "-"
+    try:
+        out = subprocess.run([py, "--version"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return "-"
+    m = re.search(r"(\d+\.\d+\.\d+)", out)
+    return m.group(1) if m else "-"
 
 
 def heartbeat_fresh() -> bool:
@@ -160,7 +188,14 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"up: v{ver} {ref} ({branch}) -> {run}")
     # --build: some uv configs refuse to build source distributions; harmless elsewhere.
-    step("install", ["uv", "tool", "install", ".", "--force", "--build"])
+    # --python: the daemon runs on the newest Python we test; a machine that cannot supply it
+    # (no such interpreter, downloads forbidden) falls back to whatever uv finds, and the
+    # timeline line records which one the tool landed on (py=).
+    step(
+        "install",
+        ["uv", "tool", "install", ".", "--force", "--build", "--python", PREFERRED_PYTHON],
+        ["uv", "tool", "install", ".", "--force", "--build"],
+    )
     # The installer would restart the daemon itself; we do the one restart below instead,
     # so the daemon finishes its current sentence once, not twice.
     step("hooks", ["claude-tts-install", "--upgrade", "--no-daemon-restart"])
@@ -178,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
     except OSError:
         pid = "-"
     record(
-        f"{stamp()} {ident} daemon={daemon} pid={pid} "
+        f"{stamp()} {ident} daemon={daemon} pid={pid} py={tool_python_version()} "
         f"bridge={config_flag(['http', 'enabled'])} mic={config_flag(['mic_aware_pause'])} "
         f"took={int(time.time() - started)}s run={run.name}"
     )
