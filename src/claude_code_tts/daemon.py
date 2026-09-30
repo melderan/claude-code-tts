@@ -1141,6 +1141,29 @@ def get_queue_messages() -> list[dict]:
 BACKGROUND_LANE = "background"
 
 
+def register_queued_bridge_jobs() -> int:
+    """Put every queued bridge message back in the job registry after a restart.
+
+    The registry lives in memory and the queue on disk, so a graceful restart
+    keeps the blocks a page queued but forgot their ids: every poll answered
+    404 while the blocks still played. Recreating the entries as "queued" from
+    the files lets GET /jobs?source= and /jobs/<id> find them again. Returns the
+    count.
+    """
+    count = 0
+    for msg in get_queue_messages():
+        if msg.get("source") and msg.get("id") and JOBS.get(str(msg["id"])) is None:
+            JOBS.create(
+                str(msg["id"]),
+                source=msg["source"],
+                project=msg.get("project", msg["source"]),
+                persona=msg.get("persona", ""),
+                lane=msg.get("lane", ""),
+            )
+            count += 1
+    return count
+
+
 def play_order(messages: list[dict]) -> list[dict]:
     """The order the loop speaks in: everything else first, then the background lane.
 
@@ -1562,6 +1585,9 @@ def daemon_loop(lockpick: bool = False) -> None:
     # recording across restarts). current_message is only preserved on
     # controlled respawn — on cold start it's from a previous session.
     startup_state = read_playback_state()
+    reregistered = register_queued_bridge_jobs()
+    if reregistered:
+        log(f"Re-registered {reregistered} queued bridge job(s) left by the previous daemon")
     stale_fields: list[str] = []
     if startup_state.get("audio_pid") is not None:
         if kill_orphan_player(startup_state.get("audio_pid")):
