@@ -33,6 +33,41 @@ def test_unchanged(
     assert (up.unchanged("9.30.0") is not None) is expect_skip
 
 
+@pytest.mark.parametrize(
+    ("status", "tags", "expect"),
+    [
+        ("", "v9.30.0", None),
+        ("", "v9.29.0\nv9.30.0", None),
+        (" M src/x.py", "v9.30.0", "uncommitted"),
+        ("?? new.py", "v9.30.0", "uncommitted"),
+        ("", "", "not tagged"),
+        ("", "v9.29.0", "not tagged"),
+    ],
+)
+def test_not_released(monkeypatch: pytest.MonkeyPatch, status: str, tags: str, expect: str | None) -> None:
+    """The sweep deploys a clean tree tagged v<version>; a bump mid-edit is held."""
+    answers = {("status", "--porcelain"): status, ("tag", "--points-at", "HEAD"): tags}
+    monkeypatch.setattr(up, "git", lambda *a: answers[a])
+    hold = up.not_released("9.30.0")
+    assert (hold is None) if expect is None else (expect in hold)
+
+
+def test_if_changed_holds_an_unreleased_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A differing but untagged version writes one held line and installs nothing."""
+    monkeypatch.setattr(up, "LOGDIR", tmp_path)
+    monkeypatch.setattr(up, "unchanged", lambda ver: None)
+    monkeypatch.setattr(up, "not_released", lambda ver: "HEAD is not tagged v9.30.0")
+    monkeypatch.setattr(up, "git", lambda *a: "abc123")
+    monkeypatch.setattr(up, "version", lambda: "9.30.0")
+    monkeypatch.setattr(up.subprocess, "run", lambda *a, **k: pytest.fail("no command may run"))
+    assert up.main(["--if-changed"]) == 0
+    assert "holding" in capsys.readouterr().out
+    assert "held (HEAD is not tagged v9.30.0)" in (tmp_path / "timeline.log").read_text()
+    assert list(tmp_path.glob("up-*.log")) == []
+
+
 def test_installed_version_parses_the_cli_line(monkeypatch: pytest.MonkeyPatch) -> None:
     class R:
         stdout = "claude-tts 9.30.0\n"

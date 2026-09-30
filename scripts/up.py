@@ -14,7 +14,10 @@ tree can read what the host is running without asking. Standard library only.
 daemon already carry the checkout's version and the heartbeat is fresh, it writes one
 "unchanged" line to the timeline and exits 0 without rebuilding or restarting. The
 script puts ~/.local/bin (where uv installs tools) on its own PATH, so it runs the same
-from a terminal, launchd or cron; it never reads a TTY.
+from a terminal, launchd or cron; it never reads a TTY. The scheduled form also deploys
+only a released checkout: a clean working tree whose HEAD carries the tag v<version>.
+The checkout is a working tree a sandbox edits in place, so a version bump mid-edit must
+not reach the daemon; the tag is what "released" means here (see `claude-tts release`).
 """
 
 from __future__ import annotations
@@ -119,6 +122,21 @@ def daemon_version() -> str:
         return ""
 
 
+def not_released(ver: str) -> str | None:
+    """Why a scheduled run must hold, or None when the checkout is a release.
+
+    A release is a clean working tree (git status reports nothing, .logs/ is ignored)
+    whose HEAD carries the tag v<ver>. Anything else is work in progress that a person
+    may still deploy by hand with a plain `just up`.
+    """
+    if git("status", "--porcelain") not in ("", "unknown"):
+        return "working tree has uncommitted changes"
+    tags = git("tag", "--points-at", "HEAD").split()
+    if f"v{ver}" not in tags:
+        return f"HEAD is not tagged v{ver}"
+    return None
+
+
 def unchanged(ver: str) -> str | None:
     """Why nothing needs doing, or None when a run is due.
 
@@ -184,6 +202,12 @@ def main(argv: list[str] | None = None) -> int:
             with timeline.open("a") as f:
                 f.write(f"{stamp()} {ident} unchanged ({why})\n")
             print(f"up: nothing to do, {why}")
+            return 0
+        hold = not_released(ver)
+        if hold:
+            with timeline.open("a") as f:
+                f.write(f"{stamp()} {ident} held ({hold})\n")
+            print(f"up: holding, {hold}")
             return 0
 
     print(f"up: v{ver} {ref} ({branch}) -> {run}")
