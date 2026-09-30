@@ -8,7 +8,6 @@ import json
 import os
 import platform
 import re
-import secrets
 import select
 import shutil
 import subprocess
@@ -697,17 +696,9 @@ def write_queue_message(text: str, config: TTSConfig, *, engine: str = "") -> Pa
     of the persona's, so `claude-tts speak --voice-mlx ...` uses the daemon's
     resident model rather than loading its own.
     """
-    msgqueue.ensure_dir()
-
-    timestamp = f"{time.time():.6f}"
-    msg_id = secrets.token_hex(8)
-    queue_file = msgqueue.QUEUE_DIR / f"{timestamp}_{msg_id}.json"
-
     method = config.speed_method or "playback"
 
     message = {
-        "id": msg_id,
-        "timestamp": float(timestamp),
         "session_id": config.session_id,
         "project": config.project_name,
         "text": text,
@@ -726,11 +717,7 @@ def write_queue_message(text: str, config: TTSConfig, *, engine: str = "") -> Pa
     if engine:
         message["engine"] = engine
 
-    # Write-then-rename so the daemon never globs a half-written file.
-    tmp_file = queue_file.with_suffix(".tmp")
-    with open(tmp_file, "w") as f:
-        json.dump(message, f)
-    tmp_file.rename(queue_file)
+    queue_file, _ = msgqueue.write_message(message)
 
     debug(f"Wrote to queue: {queue_file} (speed={config.speed})")
     return queue_file

@@ -47,6 +47,76 @@ def depth() -> int:
     return len(list(QUEUE_DIR.glob("*.json"))) if QUEUE_DIR.exists() else 0
 
 
+# --- The message schema ---
+#
+# One JSON object per file, named "<timestamp:.6f>_<id>.json", written as ".tmp" and renamed so
+# the daemon never globs a half-written file. Nothing parses the name; readers use the fields.
+# Writers: hook = audio.py:write_queue_message, bridge = bridge.py:write_bridge_message,
+# control = msgqueue.py:write_control_message, all through write_message below.
+#
+# Compatibility is additive only. Hooks in a sandbox and the daemon on the host can be different
+# versions in either direction, permanently, so no field is ever dropped (even one nothing reads)
+# and a reader treats a missing field as the old shape and ignores fields it does not know.
+#
+#   field               writers        read by
+#   v                   all            nobody yet; absent means a 9.36.x or older writer
+#   id                  all            daemon.py:prepare_message (WAV name; job id when source is
+#                                      set), register_queued_bridge_jobs; bridge.py:flush_source
+#   timestamp           all            scan and play order, cleanup_old_messages, enforce_max_depth
+#   type "control"      control        next_speakable; daemon.py:daemon_loop hands it to
+#                                      handle_control_message
+#   session_id          all            daemon.py:prepare_message ("browser" for the bridge,
+#                                      "system" for control)
+#   project             hook, bridge   daemon.py:prepare_message, register_queued_bridge_jobs,
+#                                      daemon_loop and daemon_status (log and print lines);
+#                                      enforce_max_depth (log line)
+#   text                all            daemon.py:prepare_message, handle_control_message,
+#                                      next_speakable
+#   persona             hook, bridge   daemon.py:prepare_message, register_queued_bridge_jobs;
+#                                      handle_control_message reads it but control never writes it
+#   speed               hook, bridge   daemon.py:prepare_message
+#   speed_method        hook, bridge   daemon.py:prepare_message
+#   voice_kokoro        hook           daemon.py:prepare_message
+#   voice_kokoro_blend  hook           daemon.py:prepare_message
+#   voice_sherpa        hook           nobody (the persona decides); kept for older daemons
+#   speaker_sherpa      hook           nobody (the persona decides); kept for older daemons
+#   voice_mlx           hook           daemon.py:prepare_message, only when engine is "mlx"
+#   speaker_mlx         hook           daemon.py:prepare_message, only when engine is "mlx"
+#   lang_mlx            hook           daemon.py:prepare_message, only when engine is "mlx"
+#   pitch_filter        hook           daemon.py:prepare_message copies it into playback state
+#   engine              hook, optional daemon.py:prepare_message ("mlx": the message's mlx voice)
+#   source              bridge         daemon.py:prepare_message, register_queued_bridge_jobs;
+#                                      remove_source
+#   want_marks          bridge         daemon.py:prepare_message
+#   lane                bridge, opt.   play_order ("background"), register_queued_bridge_jobs
+#   pre_action          control, opt.  daemon.py:handle_control_message ("drain")
+#   post_action         control, opt.  daemon.py:handle_control_message (restart, reload_config,
+#                                      stop)
+
+SCHEMA_VERSION = 1
+
+
+def write_message(fields: dict) -> tuple[Path, dict]:
+    """Write one queue message; the one writer. Returns the file and the message as written.
+
+    Adds "id" and "timestamp" unless the caller set them, and always "v". The timestamp is
+    rounded to the microsecond so the file name and the field agree.
+    """
+    msg = {
+        "id": fields.get("id") or secrets.token_hex(8),
+        "timestamp": float(f"{float(fields.get('timestamp') or time.time()):.6f}"),
+        **{k: v for k, v in fields.items() if k not in ("id", "timestamp", "v")},
+        "v": SCHEMA_VERSION,
+    }
+
+    ensure_dir()
+    queue_file = QUEUE_DIR / f"{msg['timestamp']:.6f}_{msg['id']}.json"
+    tmp_file = queue_file.with_suffix(".tmp")
+    tmp_file.write_text(json.dumps(msg))
+    tmp_file.rename(queue_file)
+    return queue_file, msg
+
+
 def write_control_message(
     text: str = "",
     pre_action: str | None = None,
@@ -54,24 +124,12 @@ def write_control_message(
     log: Log | None = None,
 ) -> Path:
     """Write a control message to the queue directory."""
-    ensure_dir()
-
-    msg: dict = {
-        "id": secrets.token_hex(8),
-        "timestamp": time.time(),
-        "type": "control",
-        "session_id": "system",
-        "text": text,
-    }
+    fields: dict = {"type": "control", "session_id": "system", "text": text}
     if pre_action:
-        msg["pre_action"] = pre_action
+        fields["pre_action"] = pre_action
     if post_action:
-        msg["post_action"] = post_action
-
-    queue_file = QUEUE_DIR / f"{msg['timestamp']}_{msg['id']}.json"
-    tmp_file = queue_file.with_suffix(".tmp")
-    tmp_file.write_text(json.dumps(msg))
-    tmp_file.rename(queue_file)
+        fields["post_action"] = post_action
+    queue_file, _ = write_message(fields)
     _say(log, f"Control message written: {queue_file.name}")
     return queue_file
 

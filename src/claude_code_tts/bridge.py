@@ -199,13 +199,8 @@ def write_bridge_message(
     speaker-transition chime fires when a room and the page interleave. lane
     "background" lets every other message go first (see daemon.play_order).
     """
-    msgqueue.ensure_dir()
-    timestamp = f"{time.time():.6f}"
-    msg_id = secrets.token_hex(8)
     project = f"{source}:{label}" if label else source
-    message = {
-        "id": msg_id,
-        "timestamp": float(timestamp),
+    fields = {
         "session_id": "browser",
         "project": project,
         "text": text,
@@ -216,12 +211,9 @@ def write_bridge_message(
         "want_marks": bool(want_marks),
     }
     if lane:
-        message["lane"] = lane
-    queue_file = msgqueue.QUEUE_DIR / f"{timestamp}_{msg_id}.json"
-    tmp_file = queue_file.with_suffix(".tmp")
-    tmp_file.write_text(json.dumps(message))
-    tmp_file.rename(queue_file)
-    JOBS.create(msg_id, source=source, project=project, persona=persona, lane=lane)
+        fields["lane"] = lane
+    _, message = msgqueue.write_message(fields)
+    JOBS.create(message["id"], source=source, project=project, persona=persona, lane=lane)
     return message
 
 
