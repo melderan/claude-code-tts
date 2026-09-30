@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import claude_code_tts.msgqueue as mq
 from claude_code_tts import audio
 from claude_code_tts.audio import generate_speech
 
@@ -225,7 +226,7 @@ class TestSherpaQueueMessage:
         from claude_code_tts.audio import write_queue_message
         from claude_code_tts.config import TTSConfig
 
-        monkeypatch.setattr(audio, "TTS_QUEUE_DIR", tmp_path / "queue")
+        monkeypatch.setattr(mq, "QUEUE_DIR", tmp_path / "queue")
 
         cfg = TTSConfig(
             voice_sherpa="kokoro-multi",
@@ -244,7 +245,7 @@ class TestSherpaQueueMessage:
         from claude_code_tts.audio import write_queue_message
         from claude_code_tts.config import TTSConfig
 
-        monkeypatch.setattr(audio, "TTS_QUEUE_DIR", tmp_path / "queue")
+        monkeypatch.setattr(mq, "QUEUE_DIR", tmp_path / "queue")
 
         cfg = TTSConfig(
             pitch_filter="asetrate=24000*0.86,aresample=24000*1.0,atempo=1.0",
@@ -261,7 +262,7 @@ class TestSherpaQueueMessage:
         from claude_code_tts.audio import write_queue_message
         from claude_code_tts.config import TTSConfig
 
-        monkeypatch.setattr(audio, "TTS_QUEUE_DIR", tmp_path / "queue")
+        monkeypatch.setattr(mq, "QUEUE_DIR", tmp_path / "queue")
 
         cfg = TTSConfig(session_id="test", project_name="test-project")
         path = write_queue_message("hello", cfg)

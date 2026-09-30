@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 import claude_code_tts.daemon as d
+import claude_code_tts.msgqueue as mq
 import claude_code_tts.state as st
 from claude_code_tts.daemon import (
     PauseLedger,
@@ -59,7 +60,7 @@ def enqueue(queue_dir: Path, text: str, age_s: float) -> Path:
 def queue_dir(tmp_path):
     q = tmp_path / "queue"
     q.mkdir()
-    with patch.object(d, "TTS_QUEUE_DIR", q), patch.object(d, "LOG_FILE", tmp_path / "log"):
+    with patch.object(mq, "QUEUE_DIR", q), patch.object(d, "LOG_FILE", tmp_path / "log"):
         yield q
 
 
@@ -132,7 +133,7 @@ class TestLoopHoldsQueueWhilePaused:
             patch.object(st, "PLAYBACK_STATE_FILE", state_dir / "playback.json"),
             patch.object(st, "HEARTBEAT_FILE", state_dir / "daemon.heartbeat"),
             patch.object(d, "LOG_FILE", state_dir / "daemon.log"),
-            patch.object(d, "TTS_QUEUE_DIR", queue_dir),
+            patch.object(mq, "QUEUE_DIR", queue_dir),
             patch.object(st, "PID_FILE", state_dir / "daemon.pid"),
             patch.object(st, "LOCK_FILE", state_dir / "daemon.lock"),
             patch.object(st, "VERSION_FILE", state_dir / "daemon.version"),

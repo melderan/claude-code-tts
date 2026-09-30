@@ -47,7 +47,7 @@ its teeth and the signatures show the sound unchanged.
 | Module | Responsibility | Comes from |
 |---|---|---|
 | `state.py` | The only reader and writer of playback.json, heartbeat, pid and lock, under one lock | daemon.py state functions, cli.py pause and status |
-| `queue.py` | One message schema and one writer; scan, order, age, `PauseLedger`, control messages | audio.py write_queue_message, bridge.py write_bridge_message, daemon.py queue functions |
+| `msgqueue.py` | One message schema and one writer; scan, order, age, `PauseLedger`, control messages | audio.py write_queue_message, bridge.py write_bridge_message, daemon.py queue functions |
 | `voice.py` | Resolve persona, message and session into one immutable voice, effective speed method computed once | daemon.py prepare_message and the interrupted-resume copy of it, audio.py defaults |
 | `engines/` | One synthesize call per engine (piper, kokoro, sherpa, mlx), workers, levelling | audio.py generation, level.py |
 | `player.py` | Pause-aware playback of a list of parts; position, rewind, trim, chime | daemon.py daemon_play_audio, play_sentences |
@@ -70,6 +70,15 @@ its teeth and the signatures show the sound unchanged.
 2. **One queue writer** (`queue.py`). Three today, each with its own field set; the hook
    writer sends fields the daemon never reads. An additive `"v": 1` field; a missing field
    reads as the old shape, so queued messages still play.
+   First half shipped in 9.36.5 as a move: `msgqueue.py` owns the directory (`QUEUE_DIR`, the
+   one patch point; config, daemon, audio and bridge no longer carry a copy), scan, order, age,
+   trim, `PauseLedger` and control messages; the daemon's wrappers bind its log. Named msgqueue
+   because a `queue.py` in the package shadows the standard library's for any interpreter
+   whose sys.path[0] is the package directory, which two blind reviews flagged independently.
+   The three writers still build their own dicts; the one writer with `"v": 1` is the second half.
+   Found by the same reviews, to fix after the move (each its own commit): a queue file holding
+   `[]` or `null` wedges the loop for good; ageing and trimming delete bridge files without
+   settling their jobs, so a page polls forever; depth trimming can drop a control message.
 3. **Resolve the voice once** (`voice.py`). The interrupted-resume branch re-derives every
    voice field by hand, a copy of prepare_message; the speed-method slip fixed in 9.33.1 is
    the kind of drift two copies produce. `speed_method` has five different defaults today.

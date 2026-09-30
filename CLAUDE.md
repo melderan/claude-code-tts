@@ -140,6 +140,7 @@ src/claude_code_tts/
   filter.py                # Text filter (filter_text for responses, filter_document for files)
   daemon.py                # Queue daemon (pause/resume, heartbeat)
   state.py                 # The daemon's files on disk: playback.json, heartbeat, pid, lock, restart markers; the only reader and writer
+  msgqueue.py              # The queue directory: scan, order, age, trim, PauseLedger, control messages; the only module that names it
   bridge.py                # Opt-in loopback HTTP bridge (browser pages -> queue, timing marks)
   install.py               # Installer (hooks, voices, service)
   signature.py             # Voice signatures: tolerant shape of a WAV, compared with tolerances, not by ear

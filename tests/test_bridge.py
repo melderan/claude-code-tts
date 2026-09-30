@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 import claude_code_tts.bridge as bridge_mod
+import claude_code_tts.msgqueue as mq
 from claude_code_tts.bridge import (
     JOBS,
     Bridge,
@@ -38,7 +39,7 @@ def tts_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     cfg_dir.mkdir()
     queue = cfg_dir / "queue"
     monkeypatch.setattr(bridge_mod, "TTS_CONFIG_DIR", cfg_dir)
-    monkeypatch.setattr(bridge_mod, "TTS_QUEUE_DIR", queue)
+    monkeypatch.setattr(mq, "QUEUE_DIR", queue)
     monkeypatch.setattr(bridge_mod, "TOKEN_FILE", cfg_dir / "http-token")
     config = {
         "active_persona": "claude-connery",

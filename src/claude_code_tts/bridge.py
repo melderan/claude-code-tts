@@ -33,8 +33,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
-from claude_code_tts import __version__
-from claude_code_tts.config import TTS_CONFIG_DIR, TTS_QUEUE_DIR, load_raw_config
+from claude_code_tts import __version__, msgqueue
+from claude_code_tts.config import TTS_CONFIG_DIR, load_raw_config
 
 TOKEN_FILE = TTS_CONFIG_DIR / "http-token"
 DEFAULT_PORT = 7457
@@ -199,7 +199,7 @@ def write_bridge_message(
     speaker-transition chime fires when a room and the page interleave. lane
     "background" lets every other message go first (see daemon.play_order).
     """
-    TTS_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    msgqueue.ensure_dir()
     timestamp = f"{time.time():.6f}"
     msg_id = secrets.token_hex(8)
     project = f"{source}:{label}" if label else source
@@ -217,7 +217,7 @@ def write_bridge_message(
     }
     if lane:
         message["lane"] = lane
-    queue_file = TTS_QUEUE_DIR / f"{timestamp}_{msg_id}.json"
+    queue_file = msgqueue.QUEUE_DIR / f"{timestamp}_{msg_id}.json"
     tmp_file = queue_file.with_suffix(".tmp")
     tmp_file.write_text(json.dumps(message))
     tmp_file.rename(queue_file)
@@ -227,19 +227,10 @@ def write_bridge_message(
 
 def flush_source(source: str) -> int:
     """Delete queued (not yet playing) messages from one source. Returns the count."""
-    removed = 0
-    if not TTS_QUEUE_DIR.exists():
-        return 0
-    for f in TTS_QUEUE_DIR.glob("*.json"):
-        try:
-            msg = json.loads(f.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        if msg.get("source") == source:
-            f.unlink(missing_ok=True)
-            JOBS.update(msg.get("id"), state="cancelled", position_ms=0)
-            removed += 1
-    return removed
+    removed = msgqueue.remove_source(source)
+    for msg in removed:
+        JOBS.update(msg.get("id"), state="cancelled", position_ms=0)
+    return len(removed)
 
 
 # --- Marks: sentence-exact, word-estimated timing ---

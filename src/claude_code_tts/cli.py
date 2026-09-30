@@ -61,7 +61,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         mute_source = "default"
 
     # Daemon status, heartbeat age, queue depth
-    from claude_code_tts.config import TTS_QUEUE_DIR
+    from claude_code_tts.msgqueue import depth
     from claude_code_tts.state import HEARTBEAT_FILE, is_daemon_running, read_playback_state
     running, pid = is_daemon_running()
     daemon_status = f"running (PID {pid})" if running else "not running"
@@ -70,7 +70,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         heartbeat = f"{time.time() - float(HEARTBEAT_FILE.read_text().strip()):.0f}s ago"
     except (OSError, ValueError):
         pass
-    queued = len(list(TTS_QUEUE_DIR.glob("*.json"))) if TTS_QUEUE_DIR.exists() else 0
+    queued = depth()
 
     # Playback state
     pb = read_playback_state()

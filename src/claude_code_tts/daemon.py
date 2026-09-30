@@ -8,7 +8,6 @@ Absorbed from scripts/tts-daemon.py into the Python CLI.
 
 from __future__ import annotations
 
-import json
 import os
 import secrets
 import shutil
@@ -24,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from claude_code_tts import msgqueue
 from claude_code_tts.audio import _set_last_error as audio_set_last_error
 from claude_code_tts.audio import (
     detect_player,
@@ -46,13 +46,13 @@ from claude_code_tts.bridge import (
 from claude_code_tts.config import (
     DEFAULT_VOICE,
     TTS_CONFIG_DIR,
-    TTS_QUEUE_DIR,
     VOICES_DIR,
     load_raw_config,
 )
 from claude_code_tts.handy import AnalyzerThread, save_speech_wav
 from claude_code_tts.level import normalize as normalize_level
 from claude_code_tts.mic_watcher import MicWatcher
+from claude_code_tts.msgqueue import PauseLedger, next_speakable, play_order
 from claude_code_tts.state import (
     UNSET,
     acquire_lock,
@@ -1006,59 +1006,36 @@ def handle_control_message(msg: dict) -> None:
         log("Control: stop requested")
 
 
+# --- Queue Management (the queue itself is msgqueue.py; these bind the daemon's log) ---
+
+
 def write_control_message(
     text: str = "",
     pre_action: str | None = None,
     post_action: str | None = None,
 ) -> Path:
     """Write a control message to the queue directory."""
-    TTS_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-
-    msg: dict = {
-        "id": secrets.token_hex(8),
-        "timestamp": time.time(),
-        "type": "control",
-        "session_id": "system",
-        "text": text,
-    }
-    if pre_action:
-        msg["pre_action"] = pre_action
-    if post_action:
-        msg["post_action"] = post_action
-
-    queue_file = TTS_QUEUE_DIR / f"{msg['timestamp']}_{msg['id']}.json"
-    tmp_file = queue_file.with_suffix(".tmp")
-    tmp_file.write_text(json.dumps(msg))
-    tmp_file.rename(queue_file)
-    log(f"Control message written: {queue_file.name}")
-    return queue_file
-
-
-# --- Queue Management ---
+    return msgqueue.write_control_message(text, pre_action, post_action, log=log)
 
 
 def get_queue_messages() -> list[dict]:
     """Get all messages in the queue, sorted by timestamp."""
-    messages: list[dict] = []
-    if not TTS_QUEUE_DIR.exists():
-        return messages
-
-    for f in TTS_QUEUE_DIR.glob("*.json"):
-        try:
-            with open(f) as fp:
-                msg = json.load(fp)
-                msg["_file"] = f
-                messages.append(msg)
-        except (OSError, json.JSONDecodeError) as e:
-            log(f"Failed to read queue file {f}: {e}", "WARN")
-            f.unlink(missing_ok=True)
-
-    messages.sort(key=lambda m: m.get("timestamp", 0))
-    return messages
+    return msgqueue.scan(log=log)
 
 
-BACKGROUND_LANE = "background"
+def cleanup_old_messages(max_age_seconds: int, ledger: PauseLedger | None = None) -> int:
+    """Remove messages older than max_age, not counting paused time. Returns count removed."""
+    return msgqueue.cleanup_old_messages(max_age_seconds, ledger, log=log)
+
+
+def enforce_max_depth(max_depth: int, ledger: PauseLedger | None = None) -> int:
+    """Remove oldest messages if queue exceeds max depth; held messages are exempt."""
+    return msgqueue.enforce_max_depth(max_depth, ledger, log=log)
+
+
 DEFAULT_NORMALIZE_DBFS = -16.0
+
+
 
 
 def register_queued_bridge_jobs() -> int:
@@ -1082,101 +1059,6 @@ def register_queued_bridge_jobs() -> int:
             )
             count += 1
     return count
-
-
-def play_order(messages: list[dict]) -> list[dict]:
-    """The order the loop speaks in: everything else first, then the background lane.
-
-    A long read queued by a page marks its blocks lane "background" so a
-    room's one-liner arriving mid-read goes next, at the block boundary, instead
-    of behind every queued block. Within a lane the timestamp order holds, and
-    control messages are never background, so they still come first. Ageing and
-    depth trimming keep using timestamp order; this is only who speaks next.
-    """
-    return sorted(messages, key=lambda m: 1 if m.get("lane") == BACKGROUND_LANE else 0)
-
-
-class PauseLedger:
-    """Seconds the daemon has spent paused, so a held queue does not age.
-
-    A pause means "hold everything", so time spent paused is subtracted from a
-    message's age before the max_age check, and a message that waited through a
-    pause is exempt from depth trimming until it plays. The ledger lives in
-    memory: a daemon restart forgets it and wall-clock age applies again.
-    """
-
-    def __init__(self) -> None:
-        self._closed: list[tuple[float, float]] = []
-        self._open: float | None = None
-
-    def mark(self, paused: bool, now: float | None = None) -> None:
-        """Record the pause flag as seen on this pass of the loop."""
-        t = time.time() if now is None else now
-        if paused and self._open is None:
-            self._open = t
-        elif not paused and self._open is not None:
-            self._closed.append((self._open, t))
-            self._open = None
-
-    @property
-    def paused(self) -> bool:
-        return self._open is not None
-
-    def held_since(self, since: float, now: float | None = None) -> float:
-        """Paused seconds between since and now."""
-        t = time.time() if now is None else now
-        intervals = list(self._closed)
-        if self._open is not None:
-            intervals.append((self._open, t))
-        held = 0.0
-        for start, end in intervals:
-            held += max(0.0, min(end, t) - max(start, since))
-        return held
-
-
-def cleanup_old_messages(max_age_seconds: int, ledger: PauseLedger | None = None) -> int:
-    """Remove messages older than max_age, not counting paused time. Returns count removed."""
-    removed = 0
-    now = time.time()
-
-    for f in TTS_QUEUE_DIR.glob("*.json"):
-        try:
-            with open(f) as fp:
-                msg = json.load(fp)
-            ts = float(msg.get("timestamp", 0))
-            held = ledger.held_since(ts, now) if ledger else 0.0
-            if now - ts - held > max_age_seconds:
-                f.unlink()
-                removed += 1
-                log(f"Removed stale message: {f.name}")
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            f.unlink(missing_ok=True)
-            removed += 1
-
-    return removed
-
-
-def enforce_max_depth(max_depth: int, ledger: PauseLedger | None = None) -> int:
-    """Remove oldest messages if queue exceeds max depth.
-
-    Messages that waited through a pause are held, not trimmed: they neither
-    count toward the depth nor get removed.
-    """
-    now = time.time()
-    messages = [
-        m
-        for m in get_queue_messages()
-        if not ledger or ledger.held_since(float(m.get("timestamp", 0) or 0), now) <= 0
-    ]
-    removed = 0
-
-    while len(messages) > max_depth:
-        oldest = messages.pop(0)
-        oldest["_file"].unlink(missing_ok=True)
-        removed += 1
-        log(f"Queue overflow, removed: {oldest.get('project', 'unknown')}")
-
-    return removed
 
 
 # --- Main Daemon Loop ---
@@ -1333,22 +1215,6 @@ def synthesize_prepared(p: PreparedMessage) -> tuple[bool, dict | None]:
     )
 
 
-def next_speakable(messages: list[dict], current: Path) -> dict | None:
-    """The message the loop will pick after `current`, if it is one worth synthesizing ahead.
-
-    None when the queue is empty past `current`, or when a control message
-    comes first: the loop handles control before anything else.
-    """
-    for m in messages:
-        if m.get("_file") == current:
-            continue
-        if m.get("type") == "control":
-            return None
-        if str(m.get("text", "")).strip():
-            return m
-    return None
-
-
 class Prefetch:
     """Synthesizes the next queue message while the current one plays.
 
@@ -1457,7 +1323,7 @@ def daemon_loop(lockpick: bool = False) -> None:
 
     log("Daemon starting...")
     write_pid()
-    TTS_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    msgqueue.ensure_dir()
 
     config = get_queue_config()
     poll_interval = config["idle_poll_ms"] / 1000.0
@@ -2146,7 +2012,7 @@ def run_foreground(lockpick: bool = False) -> None:
             return
 
     print("Running in foreground (Ctrl+C to stop)...")
-    print(f"Queue directory: {TTS_QUEUE_DIR}")
+    print(f"Queue directory: {msgqueue.QUEUE_DIR}")
     print()
 
     global _daemon_mode

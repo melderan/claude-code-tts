@@ -16,6 +16,7 @@ from unittest.mock import patch
 import pytest
 
 import claude_code_tts.daemon as daemon_mod
+import claude_code_tts.msgqueue as mq
 import claude_code_tts.state as state_mod
 from claude_code_tts.daemon import (
     REWIND_REAL_SECONDS,
@@ -79,7 +80,7 @@ def daemon_env(tmp_path):
     with patch.object(state_mod, "PLAYBACK_STATE_FILE", playback_file), \
          patch.object(state_mod, "HEARTBEAT_FILE", heartbeat_file), \
          patch.object(daemon_mod, "LOG_FILE", log_file), \
-         patch.object(daemon_mod, "TTS_QUEUE_DIR", queue_dir), \
+         patch.object(mq, "QUEUE_DIR", queue_dir), \
          patch.object(state_mod, "PID_FILE", pid_file), \
          patch.object(state_mod, "LOCK_FILE", lock_file), \
          patch.object(state_mod, "VERSION_FILE", version_file), \

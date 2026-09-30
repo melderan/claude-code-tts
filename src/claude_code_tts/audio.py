@@ -16,12 +16,12 @@ import threading
 import time
 from pathlib import Path
 
+from claude_code_tts import msgqueue
 from claude_code_tts.config import (
     MLX_VENV_DIR,
     SHERPA_MODELS_DIR,
     SHERPA_VENV_DIR,
     TTS_CONFIG_DIR,
-    TTS_QUEUE_DIR,
     TTSConfig,
     debug,
 )
@@ -697,11 +697,11 @@ def write_queue_message(text: str, config: TTSConfig, *, engine: str = "") -> Pa
     of the persona's, so `claude-tts speak --voice-mlx ...` uses the daemon's
     resident model rather than loading its own.
     """
-    TTS_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    msgqueue.ensure_dir()
 
     timestamp = f"{time.time():.6f}"
     msg_id = secrets.token_hex(8)
-    queue_file = TTS_QUEUE_DIR / f"{timestamp}_{msg_id}.json"
+    queue_file = msgqueue.QUEUE_DIR / f"{timestamp}_{msg_id}.json"
 
     method = config.speed_method or "playback"
 

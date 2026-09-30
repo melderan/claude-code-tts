@@ -8,6 +8,7 @@ import pytest
 
 import claude_code_tts.audio as audio_mod
 import claude_code_tts.config as config_mod
+import claude_code_tts.msgqueue as mq
 
 # ---------------------------------------------------------------------------
 # TestQueueSpeak — queue message construction
@@ -23,7 +24,7 @@ class TestQueueSpeak:
 
     def test_queue_message_kokoro(self, queue_dir):
         """Queue message carries kokoro voice override."""
-        with patch.object(audio_mod, "TTS_QUEUE_DIR", queue_dir), \
+        with patch.object(mq, "QUEUE_DIR", queue_dir), \
              patch.object(audio_mod, "daemon_healthy", return_value=True):
             cfg = config_mod.TTSConfig(
                 mode="queue",
@@ -44,7 +45,7 @@ class TestQueueSpeak:
 
     def test_queue_message_blend(self, queue_dir):
         """Queue message carries blend spec."""
-        with patch.object(audio_mod, "TTS_QUEUE_DIR", queue_dir):
+        with patch.object(mq, "QUEUE_DIR", queue_dir):
             cfg = config_mod.TTSConfig(
                 mode="queue",
                 speed=2.0,
@@ -61,7 +62,7 @@ class TestQueueSpeak:
 
     def test_queue_message_has_required_fields(self, queue_dir):
         """Queue messages contain all fields the daemon expects."""
-        with patch.object(audio_mod, "TTS_QUEUE_DIR", queue_dir):
+        with patch.object(mq, "QUEUE_DIR", queue_dir):
             cfg = config_mod.TTSConfig(
                 mode="queue",
                 speed=2.0,

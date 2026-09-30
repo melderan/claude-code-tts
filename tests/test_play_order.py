@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import claude_code_tts.msgqueue as mq
 from claude_code_tts.daemon import next_speakable, play_order
 
 
@@ -60,7 +61,7 @@ def test_queued_bridge_jobs_are_reregistered_after_a_restart(tmp_path: Path) -> 
         json.dumps({"id": "r", "timestamp": 2.0, "text": "y", "session_id": "s", "project": "proj"})
     )
     JOBS._jobs.pop("a1", None)
-    with patch.object(d, "TTS_QUEUE_DIR", q):
+    with patch.object(mq, "QUEUE_DIR", q):
         assert d.register_queued_bridge_jobs() == 1
         assert d.register_queued_bridge_jobs() == 0, "second start does not duplicate"
     job = JOBS.get("a1")

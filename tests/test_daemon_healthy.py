@@ -4,7 +4,7 @@ import json
 import os
 import time
 
-from claude_code_tts import audio as audio_mod
+import claude_code_tts.msgqueue as mq
 from claude_code_tts.audio import daemon_healthy, write_queue_message
 from claude_code_tts.config import TTSConfig
 
@@ -46,7 +46,7 @@ class TestDaemonHealthy:
 class TestWriteQueueMessage:
     def test_atomic_and_valid_json(self, tmp_path, monkeypatch):
         qdir = tmp_path / "queue"
-        monkeypatch.setattr(audio_mod, "TTS_QUEUE_DIR", qdir)
+        monkeypatch.setattr(mq, "QUEUE_DIR", qdir)
         cfg = TTSConfig(mode="queue", session_id="s1", project_name="p1")
         out = write_queue_message("hello there", cfg)
         assert out.suffix == ".json"

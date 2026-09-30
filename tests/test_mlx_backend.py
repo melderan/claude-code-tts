@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import claude_code_tts.msgqueue as mq
 from claude_code_tts import audio
 from claude_code_tts.audio import generate_speech
 
@@ -359,7 +360,7 @@ class TestDaemonHonoursMessageMlx:
     def test_message_mlx_fields_are_ignored_without_engine(self, tmp_path, monkeypatch):
         """Hook messages carry the persona's mlx fields; only "engine": "mlx" makes them an override."""
         from claude_code_tts.config import TTSConfig
-        monkeypatch.setattr(audio, "TTS_QUEUE_DIR", tmp_path / "queue")
+        monkeypatch.setattr(mq, "QUEUE_DIR", tmp_path / "queue")
         cfg = TTSConfig(voice_mlx="m", session_id="s", project_name="p")
         plain = json.loads(audio.write_queue_message("hello", cfg).read_text())
         chosen = json.loads(audio.write_queue_message("hello", cfg, engine="mlx").read_text())
@@ -381,7 +382,7 @@ class TestSpeakRidesTheQueue:
         from claude_code_tts import cli
         from claude_code_tts.config import TTSConfig
         from claude_code_tts.mlx_catalog import CATALOG, resolve_model
-        monkeypatch.setattr(audio, "TTS_QUEUE_DIR", tmp_path / "queue")
+        monkeypatch.setattr(mq, "QUEUE_DIR", tmp_path / "queue")
         cfg = TTSConfig(mode="queue", voice_kokoro="af_bella", session_id="s", project_name="p", active_persona="x", speed=2.0)
         monkeypatch.setattr(cli, "load_config", lambda *a, **k: cfg)
         with patch("claude_code_tts.audio.daemon_healthy", return_value=True), \
@@ -400,7 +401,7 @@ class TestSpeakRidesTheQueue:
     def test_daemon_down_falls_back_to_direct(self, tmp_path, monkeypatch):
         from claude_code_tts import cli
         from claude_code_tts.config import TTSConfig
-        monkeypatch.setattr(audio, "TTS_QUEUE_DIR", tmp_path / "queue")
+        monkeypatch.setattr(mq, "QUEUE_DIR", tmp_path / "queue")
         cfg = TTSConfig(mode="queue", session_id="s", project_name="p", active_persona="x")
         monkeypatch.setattr(cli, "load_config", lambda *a, **k: cfg)
         with patch("claude_code_tts.audio.daemon_healthy", return_value=False), \
@@ -434,7 +435,7 @@ class TestMlxConfigPlumbing:
 
     def test_queue_message_carries_mlx_fields(self, tmp_path, monkeypatch):
         from claude_code_tts.config import TTSConfig
-        monkeypatch.setattr(audio, "TTS_QUEUE_DIR", tmp_path / "queue")
+        monkeypatch.setattr(mq, "QUEUE_DIR", tmp_path / "queue")
         cfg = TTSConfig(voice_mlx="m", speaker_mlx="v", lang_mlx="a", session_id="s", project_name="p")
         msg = json.loads(audio.write_queue_message("hello", cfg).read_text())
         assert (msg["voice_mlx"], msg["speaker_mlx"], msg["lang_mlx"]) == ("m", "v", "a")
