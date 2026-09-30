@@ -55,7 +55,7 @@ When writing documentation, comments, commit messages, or any public-facing cont
 - Standalone tools: `claude-tts speak` and `claude-tts audition`
 - Multi-speaker model support (libritts has 904 speakers)
 - Voice knowledge base in `docs/voice-notes.md`
-- New sessions speak by default (since 9.23.0); `claude-tts mute --all` flips the default to silent
+- New sessions speak by default (since 9.23.0; an upgrade flips a config written before that once, 9.25.3); `claude-tts mute --all` flips the default to silent
 - Daemon management via `claude-tts daemon start|stop|restart|status`
 
 ## Quick Reference
