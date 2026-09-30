@@ -68,8 +68,8 @@ release *ARGS:
     uv run python -m claude_code_tts.cli release {{ARGS}}
 
 # Operator, on the daemon's machine: rebuild from this checkout, deploy hooks, restart, verify; logs in .logs/just/
-up:
-    @scripts/up.py
+up *ARGS:
+    @scripts/up.py {{ARGS}}
 
 # Operator: the timeline of `just up` runs, newest last
 timeline N="20":

@@ -9,6 +9,12 @@ verify the heartbeat, and record the run:
 
 .logs/ is gitignored and lives in the checkout, so a sandbox sharing the working
 tree can read what the host is running without asking. Standard library only.
+
+`just up --if-changed` is the scheduled form: when the installed CLI and the running
+daemon already carry the checkout's version and the heartbeat is fresh, it writes one
+"unchanged" line to the timeline and exits 0 without rebuilding or restarting. The
+script puts ~/.local/bin (where uv installs tools) on its own PATH, so it runs the same
+from a terminal, launchd or cron; it never reads a TTY.
 """
 
 from __future__ import annotations
@@ -65,7 +71,48 @@ def heartbeat_fresh() -> bool:
         return False
 
 
-def main() -> int:
+def installed_version() -> str:
+    """The claude-tts on PATH, or "" when there is none."""
+    try:
+        out = subprocess.run(["claude-tts", "--version"], capture_output=True, text=True).stdout
+    except OSError:
+        return ""
+    return out.strip().rsplit(" ", 1)[-1] if out.strip() else ""
+
+
+def daemon_version() -> str:
+    """The version the running daemon wrote at start, or "" when unknown."""
+    try:
+        return (TTS_DIR / "daemon.version").read_text().strip()
+    except OSError:
+        return ""
+
+
+def unchanged(ver: str) -> str | None:
+    """Why nothing needs doing, or None when a run is due.
+
+    Installed CLI, running daemon and checkout must all be the same version and
+    the daemon must be alive; anything else is a reason to run.
+    """
+    if installed_version() != ver:
+        return None
+    if daemon_version() != ver:
+        return None
+    if not heartbeat_fresh():
+        return None
+    return f"installed and running daemon are already v{ver}"
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if_changed = "--if-changed" in args
+    unknown = [a for a in args if a != "--if-changed"]
+    if unknown:
+        print(f"up: unknown argument(s): {' '.join(unknown)} (only --if-changed)", file=sys.stderr)
+        return 2
+    # uv installs tools into ~/.local/bin, which a launchd or cron PATH does not have.
+    # The run must not depend on who launched it, so put it first ourselves.
+    os.environ["PATH"] = f"{Path.home() / '.local' / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
     LOGDIR.mkdir(parents=True, exist_ok=True)
     ref = git("describe", "--always", "--dirty", "--tags")
     branch = git("branch", "--show-current") or "detached"
@@ -97,6 +144,16 @@ def main() -> int:
         record(f"{stamp()} {ident} FAILED at {name} run={run.name}")
         print(f"details: {run}")
         sys.exit(1)
+
+    if if_changed:
+        why = unchanged(ver)
+        if why:
+            # One timeline line, no run file: a scheduled run that found nothing to do
+            # still shows it ran.
+            with timeline.open("a") as f:
+                f.write(f"{stamp()} {ident} unchanged ({why})\n")
+            print(f"up: nothing to do, {why}")
+            return 0
 
     print(f"up: v{ver} {ref} ({branch}) -> {run}")
     # --build: some uv configs refuse to build source distributions; harmless elsewhere.
