@@ -52,17 +52,17 @@ def _args(**kw):
 
 
 def test_capture_writes_one_baseline_per_utterance_and_is_idempotent(vs, capsys):
-    assert vs.cmd_capture(_args(limit=50)) == 0
+    assert vs.cmd_capture(_args(limit=50, refresh=False)) == 0
     files = sorted(p.name for p in (vs.BASELINE_DIR / "test-voice").glob("*.json"))
     assert len(files) == 2
     b = json.loads((vs.BASELINE_DIR / "test-voice" / files[0]).read_text())
     assert b["persona"] == "test-voice" and b["text"] and b["signature"]["seconds"] > 0
-    assert vs.cmd_capture(_args(limit=50)) == 0
+    assert vs.cmd_capture(_args(limit=50, refresh=False)) == 0
     assert "2 already known" in capsys.readouterr().out
 
 
 def test_verify_passes_when_the_engine_still_sounds_the_same(vs, monkeypatch, capsys):
-    vs.cmd_capture(_args(limit=50))
+    vs.cmd_capture(_args(limit=50, refresh=False))
 
     def same(text, persona, out):
         write(out, voice(words=len(text.split()), seed=99))  # a fresh run, tiny noise
@@ -73,8 +73,16 @@ def test_verify_passes_when_the_engine_still_sounds_the_same(vs, monkeypatch, ca
     assert "2 ok, 0 drifted" in capsys.readouterr().out
 
 
-def test_verify_fails_when_the_engine_got_quieter_and_faster(vs, monkeypatch, capsys):
-    vs.cmd_capture(_args(limit=50))
+def test_drift_on_a_deterministic_engine_fails_verify(vs, monkeypatch, capsys):
+    """A spread with zero variation marks the engine deterministic; drift is then a hard failure."""
+    vs.cmd_capture(_args(limit=50, refresh=False))
+
+    def same(text, persona, out):
+        write(out, voice(words=len(text.split()), seed=0))  # bit-identical every run, like Kokoro
+        return True
+
+    monkeypatch.setattr(vs, "synthesize", same)
+    assert vs.cmd_spread(_args(runs=3, limit=50, persona=None, max_seconds=30.0)) == 0
 
     def worse(text, persona, out):
         write(out, voice(words=len(text.split()), gain=0.15, word_s=0.18))
@@ -86,8 +94,34 @@ def test_verify_fails_when_the_engine_got_quieter_and_faster(vs, monkeypatch, ca
     assert "DRIFT" in out and "speech level" in out and "2 drifted" in out
 
 
+def test_drift_on_a_jittering_engine_is_advisory(vs, monkeypatch, capsys):
+    """Without a spread that proves determinism (Piper), drift is a note and exit stays 0."""
+    vs.cmd_capture(_args(limit=50, refresh=False))
+
+    def worse(text, persona, out):
+        write(out, voice(words=len(text.split()), gain=0.15, word_s=0.18))
+        return True
+
+    monkeypatch.setattr(vs, "synthesize", worse)
+    assert vs.cmd_verify(_args(limit=50, persona=None, max_seconds=30.0)) == 0
+    out = capsys.readouterr().out
+    assert "note" in out and "advisory" in out and "0 drifted, 2 advisory" in out
+
+
+def test_capture_refreshes_baselines_of_an_older_signature_version(vs, capsys):
+    vs.cmd_capture(_args(limit=50, refresh=False))
+    old = next((vs.BASELINE_DIR / "test-voice").glob("*.json"))
+    data = json.loads(old.read_text())
+    data["signature"]["version"] = 1
+    old.write_text(json.dumps(data))
+    vs.cmd_capture(_args(limit=50, refresh=False))
+    out = capsys.readouterr().out
+    assert "refresh" in out and "1 added, 1 already known" in out
+    assert json.loads(old.read_text())["signature"]["version"] == vs.VERSION
+
+
 def test_spread_records_the_run_to_run_variation(vs, monkeypatch, capsys):
-    vs.cmd_capture(_args(limit=50))
+    vs.cmd_capture(_args(limit=50, refresh=False))
     counter = {"n": 0}
 
     def noisy(text, persona, out):
@@ -103,7 +137,7 @@ def test_spread_records_the_run_to_run_variation(vs, monkeypatch, capsys):
 
 
 def test_long_baselines_are_skipped_and_short_ones_come_first(vs):
-    vs.cmd_capture(_args(limit=50))
+    vs.cmd_capture(_args(limit=50, refresh=False))
     both = vs.load_baselines(None)
     assert [b["signature"]["seconds"] for b in both] == sorted(b["signature"]["seconds"] for b in both)
     assert vs.load_baselines(None, max_seconds=both[0]["signature"]["seconds"]) == [both[0]]

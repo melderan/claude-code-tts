@@ -7,11 +7,16 @@ instead of by ear: total length, speech and peak level, the energy envelope over
 zero-crossing profile (a cheap stand-in for spectral brightness), leading and trailing
 silence, and the number of interior pauses.
 
-Engines are not bit-exact from run to run (Piper samples noise for every utterance), so a
-signature never compares samples. Tolerances default to what one engine's run-to-run spread
-looks like, and `spread` measures that spread from several signatures of the same utterance
-so a caller can widen them with evidence rather than guesses. Standard library only; a
-12 second WAV signs in well under a second.
+Engines are not bit-exact from run to run (Piper samples noise for every utterance and its
+word and pause lengths jitter by up to a tenth), so a signature never compares samples, and
+its shape measures are built to survive timing jitter: the envelope is binned over the speech
+span (leading and trailing silence are separate numbers), compared by dynamic time warping
+(mean dB deviation along the best alignment) and by the distribution of its values. Measured
+on three-run spreads of real Piper output, positional correlation of the same sentence fell to
+0.24; the warp distance stayed near 2 dB while a 30 percent truncation read 3.4 dB. Tolerances
+default to what one engine's run-to-run spread looks like, and `spread` measures that spread
+from several signatures of the same utterance so a caller can widen them with evidence rather
+than guesses. Standard library only; a 12 second WAV signs in well under a second.
 """
 
 from __future__ import annotations
@@ -25,8 +30,11 @@ from pathlib import Path
 
 from .level import FULL_SCALE, _read, dbfs, measure_samples
 
+VERSION = 2  # bump when the shape measures change; baselines must then be recaptured
 BINS = 32
+DIST_BINS = 16
 SILENCE_BELOW_SPEECH_DB = 25.0  # a window this far under the speech level is silence
+SILENCE_FLOOR_DB = -60.0  # digital silence is clamped here so it cannot dominate a distance
 PAUSE_MIN_S = 0.12
 WINDOW_S = 0.02
 
@@ -42,10 +50,11 @@ class Signature:
     lead_silence_s: float
     trail_silence_s: float
     pauses: int
-    envelope: list[float]  # BINS values, dBFS of RMS per equal slice of the file
-    zcr: list[float]  # BINS values, zero crossings per second per slice, in kHz
+    envelope: list[float]  # BINS values, dBFS of RMS per equal slice of the speech span
+    zcr: list[float]  # BINS values, zero crossings per second per slice of the span, in kHz
     text_sha: str = ""
     voice: str = ""
+    version: int = VERSION
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=1)
@@ -67,8 +76,8 @@ class Tolerance:
     peak_db: float = 2.0
     silence_s: float = 0.12
     pauses: int = 1
-    envelope_r: float = 0.85  # Pearson correlation floor
-    zcr_r: float = 0.80
+    envelope_dtw_db: float = 3.0  # mean dB deviation along the best time alignment
+    envelope_dist_db: float = 1.5  # mean dB difference between the two envelopes' percentiles
     zcr_rel: float = 0.15  # mean zero-crossing rate, relative: a pitch or brightness change
 
 
@@ -120,6 +129,9 @@ def sign_samples(samples, rate: int, channels: int = 1, *, text: str = "", voice
             run = 0
         else:
             run += 1
+    span = slice(first, last + 1) if last >= first else slice(0, len(rms_db))
+    span_rms = [max(v, SILENCE_FLOOR_DB) for v in rms_db[span]]
+    span_zcr = zcr_khz[span]
     return Signature(
         seconds=round(level.seconds, 3),
         sample_rate=rate,
@@ -128,8 +140,8 @@ def sign_samples(samples, rate: int, channels: int = 1, *, text: str = "", voice
         lead_silence_s=round(first * WINDOW_S, 2),
         trail_silence_s=round(max(0, len(loud) - 1 - last) * WINDOW_S, 2),
         pauses=pauses,
-        envelope=[round(v, 1) for v in _bins(rms_db, BINS)],
-        zcr=[round(v, 3) for v in _bins(zcr_khz, BINS)],
+        envelope=[round(v, 1) for v in _bins(span_rms, BINS)],
+        zcr=[round(v, 3) for v in _bins(span_zcr, BINS)],
         text_sha=text_sha(text) if text else "",
         voice=voice,
     )
@@ -147,22 +159,12 @@ def sign(path: Path, *, text: str = "", voice: str = "") -> Signature | None:
     return sign_samples(samples, params.framerate, params.nchannels, text=text, voice=voice)
 
 
-def _pearson(a: list[float], b: list[float]) -> float:
-    if len(a) != len(b) or len(a) < 2:
-        return 0.0
-    ma, mb = sum(a) / len(a), sum(b) / len(b)
-    cov = sum((x - ma) * (y - mb) for x, y in zip(a, b, strict=True))
-    va = math.sqrt(sum((x - ma) ** 2 for x in a))
-    vb = math.sqrt(sum((y - mb) ** 2 for y in b))
-    if va == 0 or vb == 0:
-        return 1.0 if va == vb else 0.0
-    return cov / (va * vb)
-
-
 def compare(expected: Signature, actual: Signature, tol: Tolerance | None = None) -> list[str]:
     """Every way `actual` drifts from `expected` beyond `tol`; empty means the same sound."""
     t = tol or Tolerance()
     out: list[str] = []
+    if expected.version != actual.version:
+        return [f"signature version {expected.version} vs {actual.version}: recapture the baseline"]
     if expected.text_sha and actual.text_sha and expected.text_sha != actual.text_sha:
         out.append(f"text differs: {expected.text_sha} vs {actual.text_sha}")
     if expected.voice and actual.voice and expected.voice != actual.voice:
@@ -182,16 +184,42 @@ def compare(expected: Signature, actual: Signature, tol: Tolerance | None = None
         out.append(f"trailing silence {expected.trail_silence_s}s vs {actual.trail_silence_s}s")
     if abs(expected.pauses - actual.pauses) > t.pauses:
         out.append(f"pauses {expected.pauses} vs {actual.pauses}")
-    r = _pearson(expected.envelope, actual.envelope)
-    if r < t.envelope_r:
-        out.append(f"envelope correlation {r:.2f} < {t.envelope_r}")
-    r = _pearson(expected.zcr, actual.zcr)
-    if r < t.zcr_r:
-        out.append(f"zero-crossing correlation {r:.2f} < {t.zcr_r}")
+    d = envelope_dtw_db(expected.envelope, actual.envelope)
+    if d > t.envelope_dtw_db:
+        out.append(f"envelope shape {d:.2f} dB from expected along the best alignment > {t.envelope_dtw_db}")
+    d = envelope_dist_db(expected.envelope, actual.envelope)
+    if d > t.envelope_dist_db:
+        out.append(f"envelope distribution {d:.2f} dB from expected > {t.envelope_dist_db}")
     ea, aa = _mean(expected.zcr), _mean(actual.zcr)
     if ea and abs(ea - aa) / ea > t.zcr_rel:
         out.append(f"brightness (mean zero-crossing rate) {ea:.2f} vs {aa:.2f} kHz")
     return out
+
+
+def envelope_dtw_db(a: list[float], b: list[float]) -> float:
+    """Mean absolute dB deviation between two envelopes along their best time alignment.
+
+    Dynamic time warping: a word that came out a little longer or a pause a little later is
+    matched to its counterpart instead of to whatever now sits at the same bin.
+    """
+    n, m = len(a), len(b)
+    if not n or not m:
+        return 0.0 if n == m else 99.0
+    inf = float("inf")
+    prev = [0.0] + [inf] * m
+    for i in range(1, n + 1):
+        cur = [inf] * (m + 1)
+        for j in range(1, m + 1):
+            cost = abs(a[i - 1] - b[j - 1])
+            cur[j] = cost + min(prev[j], cur[j - 1], prev[j - 1])
+        prev = cur
+    return prev[m] / (n + m)
+
+
+def envelope_dist_db(a: list[float], b: list[float]) -> float:
+    """Mean absolute dB difference between the two envelopes' value distributions (percentiles)."""
+    pa, pb = _bins(sorted(a), DIST_BINS), _bins(sorted(b), DIST_BINS)
+    return sum(abs(x - y) for x, y in zip(pa, pb, strict=True)) / DIST_BINS
 
 
 def _mean(values: list[float]) -> float:
@@ -207,8 +235,8 @@ class Spread:
     peak_db: float = 0.0
     silence_s: float = 0.0
     pauses: int = 0
-    envelope_r: float = 1.0  # the lowest pairwise correlation seen
-    zcr_r: float = 1.0
+    envelope_dtw_db: float = 0.0  # the largest pairwise warp distance seen
+    envelope_dist_db: float = 0.0
     zcr_rel: float = 0.0
     runs: int = 0
     notes: list[str] = field(default_factory=list)
@@ -223,8 +251,8 @@ class Spread:
             peak_db=max(b.peak_db, self.peak_db * margin),
             silence_s=max(b.silence_s, self.silence_s * margin),
             pauses=max(b.pauses, self.pauses),
-            envelope_r=min(b.envelope_r, 1.0 - (1.0 - self.envelope_r) * margin),
-            zcr_r=min(b.zcr_r, 1.0 - (1.0 - self.zcr_r) * margin),
+            envelope_dtw_db=max(b.envelope_dtw_db, self.envelope_dtw_db * margin),
+            envelope_dist_db=max(b.envelope_dist_db, self.envelope_dist_db * margin),
             zcr_rel=max(b.zcr_rel, self.zcr_rel * margin),
         )
 
@@ -246,6 +274,6 @@ def spread(signatures: list[Signature]) -> Spread:
     s.zcr_rel = (max(means) - min(means)) / max(means) if max(means) else 0.0
     for i, a in enumerate(signatures):
         for b in signatures[i + 1 :]:
-            s.envelope_r = min(s.envelope_r, _pearson(a.envelope, b.envelope))
-            s.zcr_r = min(s.zcr_r, _pearson(a.zcr, b.zcr))
+            s.envelope_dtw_db = max(s.envelope_dtw_db, envelope_dtw_db(a.envelope, b.envelope))
+            s.envelope_dist_db = max(s.envelope_dist_db, envelope_dist_db(a.envelope, b.envelope))
     return s
