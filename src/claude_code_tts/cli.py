@@ -109,6 +109,85 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(f"Mic-aware: {'enabled' if mic_aware else 'disabled'}")
 
 
+def _flatten_config(data: dict, prefix: str = "") -> dict[str, object]:
+    """Dotted paths for every leaf; personas and project_personas stay whole (they are user data)."""
+    out: dict[str, object] = {}
+    for key, value in data.items():
+        path = f"{prefix}{key}"
+        if isinstance(value, dict) and key not in ("personas", "project_personas"):
+            out.update(_flatten_config(value, path + "."))
+        else:
+            out[path] = value
+    return out
+
+
+def _fmt_config_value(value: object) -> str:
+    if isinstance(value, dict):
+        return f"<{len(value)} entries>"
+    return json.dumps(value)
+
+
+def config_rows(stored: dict, defaults: dict) -> list[dict[str, str]]:
+    """One row per key in either the stored config or the shipped default, with how they relate.
+
+    note is "" when both hold the same value, CHANGED when they differ, "stored only" when the shipped
+    default has no such key, and "not stored" when the file lacks it (the code's own fallback applies).
+    """
+    flat_stored = _flatten_config(stored)
+    flat_default = _flatten_config(defaults)
+    rows = []
+    for key in sorted(set(flat_stored) | set(flat_default)):
+        in_stored, in_default = key in flat_stored, key in flat_default
+        if in_stored and in_default:
+            note = "" if flat_stored[key] == flat_default[key] else "CHANGED"
+        elif in_stored:
+            note = "stored only, no shipped default"
+        else:
+            note = "not stored, code fallback applies"
+        rows.append({
+            "key": key,
+            "stored": _fmt_config_value(flat_stored[key]) if in_stored else "-",
+            "default": _fmt_config_value(flat_default[key]) if in_default else "-",
+            "note": note,
+        })
+    return rows
+
+
+def cmd_config(args: argparse.Namespace) -> None:
+    """Show every stored config key next to the shipped default, so a stale value has nowhere to hide.
+
+    JMO, 2026-09-30, after every rebuilt room started silent from a default_muted the file had kept
+    since before 9.23.0: "We should have tooling that can detect stored vs defaults that we can ask."
+    """
+    from claude_code_tts.install import DEFAULT_CONFIG
+
+    stored = load_raw_config()
+    rows = config_rows(stored, DEFAULT_CONFIG)
+    if getattr(args, "changed", False):
+        rows = [r for r in rows if r["note"]]
+
+    if getattr(args, "json", False):
+        print(json.dumps({"file": str(TTS_CONFIG_FILE), "rows": rows}, indent=2))
+        return
+
+    print(f"Stored:  {TTS_CONFIG_FILE}" + ("" if stored else "  (missing or unreadable)"))
+    print("Default: what claude-tts-install writes for a fresh install")
+    print()
+    if not rows:
+        print("Every stored key matches the shipped default.")
+        return
+    width = max(len(r["key"]) for r in rows)
+    swidth = max(len(r["stored"]) for r in rows)
+    dwidth = max(len(r["default"]) for r in rows)
+    print(f"{'KEY':<{width}}  {'STORED':<{swidth}}  {'DEFAULT':<{dwidth}}  NOTE")
+    for r in rows:
+        print(f"{r['key']:<{width}}  {r['stored']:<{swidth}}  {r['default']:<{dwidth}}  {r['note']}".rstrip())
+    changed = sum(1 for r in rows if r["note"] == "CHANGED")
+    print()
+    print(f"{len(rows)} keys shown, {changed} differ from the shipped default. "
+          "claude-tts config --changed hides the ones that match.")
+
+
 def cmd_mute(args: argparse.Namespace) -> None:
     """Mute TTS for this session or all sessions."""
     config = load_raw_config()
@@ -3295,6 +3374,12 @@ def main(argv: list[str] | None = None) -> None:
     # --- status ---
     p = subparsers.add_parser("status", help="Show TTS status for this session")
     p.set_defaults(func=cmd_status)
+
+    # --- config ---
+    p = subparsers.add_parser("config", help="Every stored config key next to the shipped default; CHANGED marks the ones that differ")
+    p.add_argument("--changed", action="store_true", help="Only keys that differ from, or are missing on either side of, the shipped default")
+    p.add_argument("--json", action="store_true", help="Machine-readable rows")
+    p.set_defaults(func=cmd_config)
 
     # --- mute ---
     p = subparsers.add_parser("mute", help="Mute TTS for this session")

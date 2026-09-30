@@ -90,6 +90,7 @@ just release --check        # preflight and gate only; prints the plan
 | Command | Description |
 |---------|-------------|
 | `/tts-status` | Show session status (mute, persona, mode, daemon) |
+| `/tts-config` | Every stored config key next to the shipped default; `--changed` shows only the ones that differ |
 | `/tts-mute` | Mute this session |
 | `/tts-unmute` | Unmute this session |
 | `/tts-speed [value]` | Show/set speech speed (0.5-4.0) |

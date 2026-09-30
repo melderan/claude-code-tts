@@ -536,3 +536,42 @@ class TestInheritSessionSettings:
     def test_same_id_from_env_and_path_is_a_no_op(self, tts_home, patched_env):
         from claude_code_tts.cli import _inherit_session_settings
         assert _inherit_session_settings("-Users-dev-repo", self.TRANSCRIPT) is False
+
+
+class TestConfigStoredVsDefault:
+    """JMO 2026-09-30: tooling that can detect stored vs defaults that we can ask."""
+
+    def _set(self, tts_home, **kv):
+        cfg_path = tts_home / ".claude-tts" / "config.json"
+        config = json.loads(cfg_path.read_text())
+        config.update(kv)
+        cfg_path.write_text(json.dumps(config))
+
+    def test_marks_a_stale_default_muted_as_changed(self, tts_home, patched_env, capsys):
+        self._set(tts_home, default_muted=True, muted=True)
+        main(["config"])
+        out = capsys.readouterr().out
+        lines = {row.split()[0]: row for row in out.splitlines() if row and row[0] not in " SDEK"}
+        assert "CHANGED" in lines["default_muted"] and "true" in lines["default_muted"]
+        assert "CHANGED" in lines["muted"]
+        assert "CHANGED" not in lines["active_persona"]
+        assert "not stored" in lines["queue.prefetch_next"]
+
+    def test_changed_hides_matching_keys_and_json_is_parseable(self, tts_home, patched_env, capsys):
+        self._set(tts_home, default_muted=True, mic_aware_pause=True)
+        main(["config", "--changed", "--json"])
+        data = json.loads(capsys.readouterr().out)
+        by_key = {r["key"]: r for r in data["rows"]}
+        assert by_key["default_muted"]["note"] == "CHANGED"
+        assert by_key["mic_aware_pause"]["note"].startswith("stored only")
+        assert "active_persona" not in by_key
+
+    def test_rows_compare_nested_leaves_and_keep_personas_whole(self):
+        from claude_code_tts.cli import config_rows
+        rows = {r["key"]: r for r in config_rows(
+            {"queue": {"max_depth": 5}, "personas": {"a": {}, "b": {}}},
+            {"queue": {"max_depth": 20, "idle_poll_ms": 100}, "personas": {"a": {}}},
+        )}
+        assert rows["queue.max_depth"]["note"] == "CHANGED"
+        assert rows["queue.idle_poll_ms"]["note"].startswith("not stored")
+        assert rows["personas"]["stored"] == "<2 entries>" and rows["personas"]["note"] == "CHANGED"
