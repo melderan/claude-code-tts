@@ -839,6 +839,44 @@ def cmd_voices(args: argparse.Namespace) -> None:
     print("  hear:  claude-tts audition --mlx kokoro [--filter bm_,am_]     claude-tts speak --voice-mlx kokoro --speaker-mlx af_heart \"hello\"")
     print("  more:  claude-tts mlx list-available   claude-tts mlx status")
 
+    # --- Who sounds like whom ---
+    print()
+    print("Sessions and their voices (persona from the session, else the project, else active_persona):")
+    project_personas = config.get("project_personas", {})
+    active = config.get("active_persona", "claude-prime")
+    sids = set(project_personas)
+    if TTS_SESSIONS_DIR.is_dir():
+        sids.update(sf.stem for sf in TTS_SESSIONS_DIR.glob("*.json"))
+    rows: list[tuple[str, str, str, str]] = []
+    for sid in sorted(sids):
+        data = session_read(sid)
+        persona = data.get("persona") or project_personas.get(sid) or active
+        source = "session" if data.get("persona") else ("project" if project_personas.get(sid) else "default")
+        pc = personas.get(persona, {})
+        voice = (
+            f"mlx {pc['voice_mlx'].rsplit('/', 1)[-1]} {pc.get('speaker_mlx', '')}".strip() if pc.get("voice_mlx")
+            else f"kokoro {pc['voice_kokoro']}" if pc.get("voice_kokoro")
+            else f"sherpa {pc['voice_sherpa']}" if pc.get("voice_sherpa")
+            else str(pc.get("voice", "?"))
+        )
+        rows.append((sid, persona, source, voice))
+    if not rows:
+        print("  none yet")
+    by_voice: dict[str, list[str]] = {}
+    for sid, _persona, _source, voice in rows:
+        by_voice.setdefault(voice, []).append(sid)
+    for sid, persona, source, voice in rows:
+        others = len(by_voice[voice]) - 1
+        clash = f"  SAME VOICE as {others} other session{'s' if others > 1 else ''}" if others else ""
+        print(f"  {sid}")
+        print(f"      {persona} ({source}) -> {voice}{clash}")
+    if any(len(v) > 1 for v in by_voice.values()):
+        print()
+        print("  To give a session its own voice, from any machine that shares ~/.claude-tts:")
+        print("    claude-tts persona add <name> --mlx kokoro --mlx-voice bm_george     # or --voice <piper name>")
+        print("    CLAUDE_TTS_SESSION=<session id above> claude-tts persona <name> --project")
+        print("  or inside that session: /tts-persona <name>")
+
     print()
     print("Notes on how they sound: docs/voice-notes.md in the repo.")
 

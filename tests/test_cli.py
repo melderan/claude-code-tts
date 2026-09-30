@@ -463,6 +463,29 @@ class TestVoices:
         assert "claude-tts audition --mlx kokoro" in out               # how to hear one
         assert "docs/voice-notes.md" in out
 
+    def test_sessions_section_names_the_clash(self, tts_home, patched_env, capsys, tmp_path, monkeypatch):
+        """JMO 2026-09-30: six brothers, three unique voices; the rest fell through to the default."""
+        import claude_code_tts.config as cfg_mod
+        sd = tts_home / ".claude-tts" / "sessions.d"
+        (sd / "-Users-x-repos-a.json").write_text(json.dumps({"muted": False}))                 # default persona
+        (sd / "-Users-x-repos-b.json").write_text(json.dumps({"muted": False}))                 # default persona
+        (sd / "-Users-x-repos-c.json").write_text(json.dumps({"persona": "claude-prime"}))      # chosen explicitly, same voice
+        cfg_path = tts_home / ".claude-tts" / "config.json"
+        cfg = json.loads(cfg_path.read_text())
+        cfg["personas"]["solo"] = {"voice": "en_GB-alan-medium", "speed": 2.0}
+        cfg["project_personas"] = {"-Users-x-repos-d": "solo"}
+        cfg_path.write_text(json.dumps(cfg))
+        monkeypatch.setattr(cfg_mod, "VOICES_DIR", tmp_path / "none")
+        monkeypatch.setattr(cfg_mod, "SHERPA_MODELS_DIR", tmp_path / "none")
+        monkeypatch.setattr(cfg_mod, "MLX_VENV_DIR", tmp_path / "none")
+        with patch("shutil.which", return_value=None), patch("claude_code_tts.cli._hf_model_cached", return_value=False):
+            main(["voices"])
+        out = capsys.readouterr().out
+        assert "claude-prime (default) -> en_US-hfc_male-medium  SAME VOICE as 2 other sessions" in out
+        assert "claude-prime (session) -> en_US-hfc_male-medium  SAME VOICE as 2 other sessions" in out
+        assert "solo (project) -> en_GB-alan-medium\n" in out    # unique: no clash tag
+        assert "CLAUDE_TTS_SESSION=<session id above> claude-tts persona <name> --project" in out
+
     def test_slash_command_is_installed(self):
         from claude_code_tts.install import MANIFEST
         assert "tts-voices.md" in MANIFEST["commands"]
