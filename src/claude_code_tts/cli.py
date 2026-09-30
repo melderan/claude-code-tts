@@ -12,6 +12,7 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -839,7 +840,6 @@ def cmd_voices(args: argparse.Namespace) -> None:
     JMO's question on 2026-09-29: how do friends find out what voices they can
     choose from which providers? One answer, in one place.
     """
-    import shutil
 
     from claude_code_tts.config import MLX_VENV_DIR
     from claude_code_tts.install import AVAILABLE_VOICES
@@ -1561,7 +1561,6 @@ def _sherpa_install(model_id: str, *, assume_yes: bool = False) -> int:
     # If the archive's top-level dir name doesn't match our id, rename.
     if extracted != target_dir:
         if target_dir.exists():
-            import shutil
             shutil.rmtree(target_dir)
         extracted.rename(target_dir)
 
@@ -1611,47 +1610,32 @@ def cmd_mode(args: argparse.Namespace) -> None:
 
 
 def cmd_pause(args: argparse.Namespace) -> None:
-    """Toggle TTS playback pause/resume."""
-    playback_file = Path.home() / ".claude-tts" / "playback.json"
+    """Toggle the pause hold, the way the hotkey does.
 
-    state: dict[str, Any] = {"paused": False, "audio_pid": None}
-    if playback_file.exists():
-        try:
-            state = json.loads(playback_file.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
+    Only the flag is written, through the daemon's own setter. The play loop polls it
+    every 50 ms and stops the player itself, treating the stop as a pause (position
+    saved, replay on resume). Killing the player from here instead, as this command did
+    through 9.33.0, made the daemon see a finished process and drop the message.
+    """
+    from claude_code_tts.daemon import read_playback_state, set_paused
 
-    if state.get("paused", False):
-        state["paused"] = False
-        state["paused_by"] = None
-        state["updated_at"] = time.time()
-        atomic_write_json(playback_file, state)
-        # macOS notification
-        subprocess.run(
-            ["osascript", "-e", 'display notification "Playback resumed" with title "Claude TTS"'],
-            capture_output=True,
-        )
+    if read_playback_state().get("paused", False):
+        set_paused(False)
+        _notify("Playback resumed")
         print("Resumed")
     else:
-        state["paused"] = True
-        state["paused_by"] = "user"
-        state["updated_at"] = time.time()
+        set_paused(True, "user")
+        _notify("Playback paused")
+        print("Paused")
 
-        audio_pid = state.get("audio_pid")
-        atomic_write_json(playback_file, state)
 
-        if audio_pid:
-            try:
-                os.kill(int(audio_pid), 0)
-                os.kill(int(audio_pid), 15)  # SIGTERM
-            except (ValueError, OSError):
-                pass
-
+def _notify(text: str) -> None:
+    """A desktop notification where one is available; silent elsewhere."""
+    if sys.platform == "darwin" and shutil.which("osascript"):
         subprocess.run(
-            ["osascript", "-e", 'display notification "Playback paused" with title "Claude TTS"'],
+            ["osascript", "-e", f'display notification "{text}" with title "Claude TTS"'],
             capture_output=True,
         )
-        print("Paused")
 
 
 def cmd_test(args: argparse.Namespace) -> None:
@@ -2415,7 +2399,6 @@ def _watermark_lock(lock_dir: Path) -> None:
         except FileExistsError:
             if attempt >= 19:
                 # Break stale lock
-                import shutil
                 shutil.rmtree(lock_dir, ignore_errors=True)
                 try:
                     lock_dir.mkdir()
@@ -2427,7 +2410,6 @@ def _watermark_lock(lock_dir: Path) -> None:
 
 def _watermark_unlock(lock_dir: Path) -> None:
     """Release mkdir-based lock."""
-    import shutil
     shutil.rmtree(lock_dir, ignore_errors=True)
 
 
@@ -2563,7 +2545,6 @@ def _parse_assistant_text(line: str) -> str:
 
 def cmd_audition(args: argparse.Namespace) -> None:
     """Interactive voice audition tool."""
-    import shutil
     import termios
     import tty
 

@@ -2078,7 +2078,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 clear_current_message()
                 msg_file.unlink(missing_ok=True)
             elif was_killed:
-                audio_pos = calculate_audio_position(elapsed, effective_speed, speed_method)
+                audio_pos = calculate_audio_position(elapsed, effective_speed, effective_speed_method)
                 remaining = wav_duration - audio_pos
                 if remaining <= NEAR_END_THRESHOLD:
                     log(f"Interrupted near end ({remaining:.1f}s remaining), skipping replay")
@@ -2091,7 +2091,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 JOBS.update(
                     job_id,
                     state="paused",
-                    position_ms=to_playback_ms(audio_pos, effective_speed, speed_method),
+                    position_ms=to_playback_ms(audio_pos, effective_speed, effective_speed_method),
                 )
                 log(
                     f"Message interrupted at {audio_pos:.1f}s / {wav_duration:.1f}s, "
