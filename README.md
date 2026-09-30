@@ -188,7 +188,7 @@ are released after `queue.worker_idle_unload_s` seconds unused (default 1800; 0 
 ```bash
 claude-tts daemon start       # Start in background
 claude-tts daemon stop        # Graceful shutdown
-claude-tts daemon restart     # Stop + start
+claude-tts daemon restart     # Stop + start; a message mid-play is cut and resumes a few seconds back
 claude-tts daemon status      # Show status and queue depth
 claude-tts daemon logs -f     # Follow the daemon log
 claude-tts daemon foreground  # Run in foreground (for debugging)

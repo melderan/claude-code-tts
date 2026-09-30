@@ -291,6 +291,45 @@ def write_playback_state(
     tmp.rename(PLAYBACK_STATE_FILE)
 
 
+# An interrupted message in the state file older than this is history, not a resume.
+RESUME_AFTER_RESTART_S = 300.0
+# stop_daemon forces only after this long with the daemon idle (not speaking) and still alive.
+STOP_IDLE_GRACE_S = 15.0
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def kill_orphan_player(pid: int | None) -> bool:
+    """Stop a player process a previous daemon left running; True if one was killed.
+
+    2026-09-29: a daemon force-killed mid-message left its afplay alive, and
+    the next daemon replayed the same message over it. Two voices at once.
+    """
+    if not pid:
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+    for _ in range(10):
+        time.sleep(0.1)
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return True
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+    return True
+
+
 def clear_current_message() -> None:
     """Clear the current message (called after successful playback)."""
     write_playback_state(current_message=None)
@@ -1457,11 +1496,27 @@ def daemon_loop(lockpick: bool = False) -> None:
     startup_state = read_playback_state()
     stale_fields: list[str] = []
     if startup_state.get("audio_pid") is not None:
+        if kill_orphan_player(startup_state.get("audio_pid")):
+            log(f"Killed the previous daemon's player (PID {startup_state['audio_pid']}) still speaking")
         stale_fields.append("audio_pid")
     if startup_state.get("paused") and startup_state.get("paused_by") == "mic":
         stale_fields.append("mic-pause")
-    if not is_respawn and startup_state.get("current_message") is not None:
+    # Shutdown lets a message finish (graceful above all: never lose the place,
+    # never two voices), so a current_message left behind is either a sentence
+    # stream stopped at a boundary (sentence_index), a pause (audio_position),
+    # or a crash. The first two resume if recent. One with neither never
+    # started to play; its queue file is still there and will speak it, so
+    # keeping it would speak it twice.
+    interrupted_recently = (
+        isinstance(startup_state.get("current_message"), dict)
+        and (startup_state["current_message"].get("audio_position") is not None
+             or startup_state["current_message"].get("sentence_index") is not None)
+        and time.time() - float(startup_state.get("updated_at") or 0) <= RESUME_AFTER_RESTART_S
+    )
+    if startup_state.get("current_message") is not None and not is_respawn and not interrupted_recently:
         stale_fields.append("current_message")
+    elif interrupted_recently and not is_respawn:
+        log("Resuming the message the previous daemon stopped in")
     if stale_fields:
         write_playback_state(
             audio_pid=None,
@@ -1966,7 +2021,14 @@ def start_daemon(lockpick: bool = False) -> bool:
 
 
 def stop_daemon() -> bool:
-    """Stop the daemon gracefully. Returns True on success."""
+    """Stop the daemon gracefully. Returns True on success.
+
+    Graceful above all (JMO, 2026-09-29): a daemon that is speaking finishes
+    the message, however long that takes, so nobody loses their place and no
+    two voices overlap. The wait is bounded only while the daemon is idle:
+    STOP_IDLE_GRACE_S of not playing and still not exiting means it is stuck,
+    and then it is killed along with any player it left behind.
+    """
     running, pid = is_daemon_running()
     if not running:
         print("Daemon is not running")
@@ -1976,7 +2038,10 @@ def stop_daemon() -> bool:
 
     try:
         os.kill(pid, signal.SIGTERM)
-        for i in range(150):
+        idle_since: float | None = None
+        started = time.monotonic()
+        last_note = started
+        while True:
             time.sleep(0.1)
             try:
                 os.kill(pid, 0)
@@ -1984,11 +2049,27 @@ def stop_daemon() -> bool:
                 PID_FILE.unlink(missing_ok=True)
                 print("Daemon stopped gracefully")
                 return True
-            if i > 0 and i % 30 == 0:
-                print(f"  Waiting for daemon to finish... ({i // 10}s)")
+            now = time.monotonic()
+            player_pid = read_playback_state().get("audio_pid")
+            speaking = isinstance(player_pid, int) and player_pid > 0 and _pid_alive(player_pid)
+            if speaking:
+                idle_since = None
+                if now - last_note >= 3:
+                    print(f"  Waiting for the current message to finish... ({now - started:.0f}s)")
+                    last_note = now
+                continue
+            idle_since = idle_since if idle_since is not None else now
+            if now - last_note >= 3:
+                print(f"  Waiting for daemon to exit... ({now - started:.0f}s)")
+                last_note = now
+            if now - idle_since >= STOP_IDLE_GRACE_S:
+                break
 
-        print("Daemon did not stop gracefully, forcing...")
+        print("Daemon is not speaking and did not exit, forcing...")
+        player_pid = read_playback_state().get("audio_pid")
         os.kill(pid, signal.SIGKILL)
+        if kill_orphan_player(player_pid):
+            print(f"Stopped its player too (PID {player_pid})")
         PID_FILE.unlink(missing_ok=True)
         HEARTBEAT_FILE.unlink(missing_ok=True)
         print("Daemon killed")

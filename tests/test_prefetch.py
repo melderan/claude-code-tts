@@ -168,6 +168,7 @@ class TestPrefetchSlot:
         with patch.object(daemon_mod, "synthesize_prepared", side_effect=synth):
             pf.start(p)
             pf.discard_if_gone()
+            pf.wait()  # the synthesis thread writes the WAV; assert after it, not racing it
             assert pf.pending == p.msg_file and p.audio_file.exists()  # file still there: kept
             p.msg_file.unlink()
             pf.discard_if_gone()
