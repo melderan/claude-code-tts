@@ -64,5 +64,7 @@ htmlcov/
 # Operator run logs from `just up` (per checkout, never committed)
 .logs/
 
-# Private word list for scripts/private-check.py (per maintainer, never committed)
+# Private word list for scripts/private-check.py (per maintainer, never committed), and the
+# organizations whose non-public repository names scripts/private-words-sync.py feeds into it
 .private-words
+.private-orgs

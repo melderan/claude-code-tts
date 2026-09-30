@@ -54,6 +54,10 @@ ci: lint typecheck version test build
 gate FULL="":
     @scripts/gate.py {{ if FULL != "" { "--full" } else { "" } }}
 
+# Teach .private-words every non-public repository name in the orgs listed in .private-orgs
+private-sync:
+    scripts/private-words-sync.py
+
 # Point git at .githooks: pre-commit runs the fast gate, pre-push the full one
 hooks:
     git config core.hooksPath .githooks

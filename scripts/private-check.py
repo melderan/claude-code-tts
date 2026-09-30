@@ -13,12 +13,18 @@ words that must never appear are themselves private, so each maintainer keeps th
 Any hit fails the gate with file:line (or the commit) and the matching pattern. With no word list
 the check prints that it is skipped, so a fresh clone is never silently unprotected.
 
+The list can carry a block written by scripts/private-words-sync.py (every non-public repository
+name the maintainer can see, dated). When that block is older than STALE_WARN_DAYS the check
+warns; older than STALE_FAIL_DAYS it fails, because a list that has not learned this month's
+new names is not protecting anything. Run `just private-sync` to refresh it.
+
     private-check.py [--repo DIR] [--words FILE]
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import re
 import subprocess
 import sys
@@ -26,6 +32,21 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 WORDS_FILE = ".private-words"
+SYNC_HEADER = "# --- managed by scripts/private-words-sync.py: non-public repository names; synced "
+STALE_WARN_DAYS = 14
+STALE_FAIL_DAYS = 45
+
+
+def synced_block_age(words_text: str, today: dt.date | None = None) -> int | None:
+    """Days since the managed block was written; None when the list has no block."""
+    for line in words_text.splitlines():
+        if line.startswith(SYNC_HEADER):
+            try:
+                written = dt.date.fromisoformat(line[len(SYNC_HEADER) :].split(" ", 1)[0])
+            except ValueError:
+                return None
+            return ((today or dt.date.today()) - written).days
+    return None
 
 
 def load_patterns(path: Path) -> list[re.Pattern[str]]:
@@ -84,29 +105,56 @@ def scan_unpushed(repo: Path, patterns: list[re.Pattern[str]]) -> list[str]:
         shas.append(sha.strip())
         hits += scan_text(body, patterns, f"commit {sha[:7]}")
     # `git tag --format` takes for-each-ref atoms only (no %x00), so split on spaces.
-    for tag in _git(repo, "tag", "-l", "--format=%(refname:short) %(*objectname) %(objectname)").splitlines():
+    for tag in _git(
+        repo, "tag", "-l", "--format=%(refname:short) %(*objectname) %(objectname)"
+    ).splitlines():
         name, _, target = tag.partition(" ")
         if any(s in target for s in shas):
-            hits += scan_text(_git(repo, "tag", "-l", "--format=%(contents)", name), patterns, f"tag {name}")
+            hits += scan_text(
+                _git(repo, "tag", "-l", "--format=%(contents)", name), patterns, f"tag {name}"
+            )
     return hits
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--repo", type=Path, default=REPO)
     parser.add_argument("--words", type=Path, default=None)
     args = parser.parse_args(argv)
     words = args.words or (args.repo / WORDS_FILE)
     if not words.exists():
-        print(f"private-check: no {words.name} in {args.repo}; SKIPPED (create it, one pattern per line)")
+        print(
+            f"private-check: no {words.name} in {args.repo}; SKIPPED (create it, one pattern per line)"
+        )
         return 0
     patterns = load_patterns(words)
     hits = scan_files(args.repo, patterns) + scan_unpushed(args.repo, patterns)
     for hit in hits:
         print(f"private-check: {hit}", file=sys.stderr)
     if hits:
-        print(f"private-check: {len(hits)} hit(s); nothing private leaves this repo", file=sys.stderr)
+        print(
+            f"private-check: {len(hits)} hit(s); nothing private leaves this repo", file=sys.stderr
+        )
         return 1
+    age = synced_block_age(words.read_text())
+    if age is None:
+        print(
+            "private-check: word list has no synced repository names; run `just private-sync`",
+            file=sys.stderr,
+        )
+    elif age > STALE_FAIL_DAYS:
+        print(
+            f"private-check: synced repository names are {age} days old (limit {STALE_FAIL_DAYS}); run `just private-sync`",
+            file=sys.stderr,
+        )
+        return 1
+    elif age > STALE_WARN_DAYS:
+        print(
+            f"private-check: synced repository names are {age} days old; run `just private-sync` soon",
+            file=sys.stderr,
+        )
     print(f"private-check: clean ({len(patterns)} patterns)")
     return 0
 

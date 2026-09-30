@@ -37,7 +37,9 @@ class TestPatterns:
     def test_comments_and_blanks_ignored(self, repo):
         _, words = repo
         assert [p.pattern for p in pc.load_patterns(words)] == [
-            "secret-host", "/Users/someone", "\\bacme-internal\\b"
+            "secret-host",
+            "/Users/someone",
+            "\\bacme-internal\\b",
         ]
 
     def test_scan_text_reports_line_and_pattern_once_per_line(self):
@@ -102,6 +104,40 @@ class TestMessages:
         path, words = repo
         git(path, "commit", "-q", "--allow-empty", "-m", "chore: mentions secret-host")
         # A remote-tracking ref makes the commit "already on a remote".
-        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=path, capture_output=True, text=True).stdout.strip()
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=path, capture_output=True, text=True
+        ).stdout.strip()
         git(path, "update-ref", "refs/remotes/origin/main", sha)
         assert pc.main(["--repo", str(path), "--words", str(words)]) == 0
+
+
+def test_synced_block_age_none_warn_fail_thresholds() -> None:
+    today = __import__("datetime").date(2026, 9, 30)
+    header = pc.SYNC_HEADER
+    assert pc.synced_block_age("\\bfoo\\b\n", today) is None
+    assert pc.synced_block_age(f"{header}2026-09-30 ---\n", today) == 0
+    assert pc.synced_block_age(f"{header}2026-09-01 ---\n", today) == 29
+    assert pc.synced_block_age(f"{header}not-a-date ---\n", today) is None
+    assert pc.STALE_WARN_DAYS < pc.STALE_FAIL_DAYS
+
+
+def test_stale_synced_block_fails_and_fresh_passes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", repo], check=True)
+    (repo / "ok.txt").write_text("nothing private\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    old = (
+        __import__("datetime").date.today()
+        - __import__("datetime").timedelta(days=pc.STALE_FAIL_DAYS + 1)
+    ).isoformat()
+    words = repo / ".private-words"
+    words.write_text(f"{pc.SYNC_HEADER}{old} ---\n\\bsecret-9\\b\n# --- end managed block ---\n")
+    assert pc.main(["--repo", str(repo)]) == 1
+    assert "days old" in capsys.readouterr().err
+    words.write_text(
+        f"{pc.SYNC_HEADER}{__import__('datetime').date.today().isoformat()} ---\n\\bsecret-9\\b\n# --- end managed block ---\n"
+    )
+    assert pc.main(["--repo", str(repo)]) == 0
