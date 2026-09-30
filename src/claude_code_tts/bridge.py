@@ -114,6 +114,22 @@ class JobRegistry:
             job.update(fields)
             job["updated_at"] = time.time()
 
+    def advance(self, job_id: str | None, *, when: str, to: str) -> bool:
+        """Move a job to `to` only if it is in state `when`; True if it moved.
+
+        A prefetch marks a job synthesizing before its turn; a /stop that
+        cancelled it in between must win, so the move is a compare-and-set.
+        """
+        if not job_id:
+            return False
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.get("state") != when:
+                return False
+            job["state"] = to
+            job["updated_at"] = time.time()
+            return True
+
     def get(self, job_id: str) -> dict | None:
         with self._lock:
             job = self._jobs.get(job_id)

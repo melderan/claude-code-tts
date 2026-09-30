@@ -25,6 +25,7 @@ from datetime import datetime
 from io import TextIOWrapper
 from pathlib import Path
 
+from claude_code_tts.audio import _set_last_error as audio_set_last_error
 from claude_code_tts.audio import (
     detect_player,
     reap_idle_workers,
@@ -399,6 +400,8 @@ def get_queue_config() -> dict:
         # A loaded model (sherpa, mlx) stays resident between messages and is
         # unloaded after this long unused; 0 keeps it for the daemon's life.
         "worker_idle_unload_s": 1800,
+        # Synthesize the next message while the current one plays.
+        "prefetch_next": True,
     }
     return {**defaults, **config.get("queue", {})}
 
@@ -1155,6 +1158,232 @@ def enforce_max_depth(max_depth: int, ledger: PauseLedger | None = None) -> int:
 # --- Main Daemon Loop ---
 
 
+@dataclass
+class PreparedMessage:
+    """One queue message with every field the loop needs, resolved once.
+
+    Built by prepare_message() for the message about to be spoken and for
+    the one after it (see Prefetch), so both are spoken with the same rules.
+    """
+
+    msg: dict
+    msg_file: Path
+    session_id: str
+    project: str
+    text: str
+    persona: str
+    persona_config: dict
+    job_id: str | None
+    want_marks: bool
+    tone: ToneParams
+    speed: float
+    speed_method: str
+    effective_speed: float
+    effective_speed_method: str
+    voice_kokoro: str
+    voice_kokoro_blend: str
+    voice_mlx: str
+    speaker_mlx: str
+    lang_mlx: str
+    voice_label: str
+    speaker_key: str
+    audio_file: Path
+    current_msg_info: dict
+
+
+def prepare_message(msg: dict, raw_config: dict) -> PreparedMessage:
+    """Resolve a queue message against its persona and the daemon config."""
+    session_id = msg.get("session_id", "unknown")
+    project = msg.get("project", "unknown")
+    text = msg.get("text", "")
+    persona = msg.get("persona", "claude-prime")
+    # Bridge messages carry a source; their id is a job the page polls.
+    job_id = msg.get("id") if msg.get("source") else None
+    want_marks = bool(msg.get("want_marks"))
+
+    # Classify content tone for expressive speech.
+    # Tone modulation is opt-in via config until parameter ranges
+    # are validated with each voice model. noise_scale/noise_w_scale
+    # values that work for one model can produce static on another.
+    tone_enabled = raw_config.get("tone_modulation", False)
+    tone = classify_tone(text) if tone_enabled else DEFAULT_TONE
+    if tone_enabled and tone.name != "neutral":
+        log(f"Tone: {tone.name} (noise={tone.noise_scale}, silence={tone.sentence_silence})")
+
+    persona_config = get_persona_config(persona)
+    speed = msg.get("speed", persona_config.get("speed", 2.0))
+    speed_method = msg.get("speed_method", persona_config.get("speed_method", "playback"))
+    voice_kokoro = msg.get("voice_kokoro", "")
+    voice_kokoro_blend = msg.get("voice_kokoro_blend", "")
+    # Hook messages carry the persona's mlx fields too, and the persona
+    # is the authority for those; only a message that chose mlx for
+    # itself ("engine": "mlx", from `speak --voice-mlx`) overrides.
+    voice_mlx = msg.get("voice_mlx", "") if msg.get("engine") == "mlx" else ""
+    speaker_mlx = msg.get("speaker_mlx", "") if voice_mlx else ""
+    lang_mlx = msg.get("lang_mlx", "") if voice_mlx else ""
+    voice_label = describe_voice(persona, persona_config, voice_kokoro, voice_kokoro_blend, voice_mlx, speaker_mlx)
+
+    # Sherpa applies speed during synthesis: don't also apply at playback.
+    sherpa_plays = bool(persona_config.get("voice_sherpa")) and not (
+        voice_kokoro or voice_kokoro_blend or voice_mlx
+        or persona_config.get("voice_kokoro") or persona_config.get("voice_kokoro_blend")
+        or persona_config.get("voice_mlx")
+    )
+    effective_speed_method = "length_scale" if sherpa_plays else speed_method
+    effective_speed = speed * tone.speed_factor
+
+    # One WAV per message, named by the message: the next message is
+    # synthesized while this one plays, and two in a row from one session
+    # must not share a file.
+    tag = "".join(ch for ch in str(msg.get("id") or "") if ch.isalnum())[:12] or secrets.token_hex(4)
+    audio_file = Path(f"/tmp/tts_queue_{session_id}_{tag}.wav")
+
+    current_msg_info = {
+        "session_id": session_id,
+        "project": project,
+        "text": text,
+        "persona": persona,
+        "speed": effective_speed,
+        "speed_method": effective_speed_method,
+        "voice_kokoro": voice_kokoro,
+        "voice_kokoro_blend": voice_kokoro_blend,
+        "voice_mlx": voice_mlx,
+        "speaker_mlx": speaker_mlx,
+        "lang_mlx": lang_mlx,
+        "pitch_filter": msg.get("pitch_filter", ""),
+    }
+    if job_id:
+        current_msg_info["id"] = job_id
+        current_msg_info["source"] = msg.get("source")
+        current_msg_info["want_marks"] = want_marks
+
+    return PreparedMessage(
+        msg=msg, msg_file=msg["_file"], session_id=session_id, project=project, text=text,
+        persona=persona, persona_config=persona_config, job_id=job_id, want_marks=want_marks,
+        tone=tone, speed=speed, speed_method=speed_method, effective_speed=effective_speed,
+        effective_speed_method=effective_speed_method, voice_kokoro=voice_kokoro,
+        voice_kokoro_blend=voice_kokoro_blend, voice_mlx=voice_mlx, speaker_mlx=speaker_mlx,
+        lang_mlx=lang_mlx, voice_label=voice_label, speaker_key=f"{session_id}:{project}",
+        audio_file=audio_file, current_msg_info=current_msg_info,
+    )
+
+
+def synthesize_prepared(p: PreparedMessage) -> tuple[bool, dict | None]:
+    """The one-piece synthesis of a prepared message into its audio_file."""
+    return synthesize_message(
+        p.text,
+        p.persona,
+        p.audio_file,
+        want_marks=p.want_marks,
+        speed=p.effective_speed,
+        speed_method=p.effective_speed_method,
+        voice_kokoro_override=p.voice_kokoro,
+        voice_kokoro_blend_override=p.voice_kokoro_blend,
+        tone=p.tone,
+        voice_mlx_override=p.voice_mlx,
+        speaker_mlx_override=p.speaker_mlx,
+        lang_mlx_override=p.lang_mlx,
+    )
+
+
+def next_speakable(messages: list[dict], current: Path) -> dict | None:
+    """The message the loop will pick after `current`, if it is one worth synthesizing ahead.
+
+    None when the queue is empty past `current`, or when a control message
+    comes first: the loop handles control before anything else.
+    """
+    for m in messages:
+        if m.get("_file") == current:
+            continue
+        if m.get("type") == "control":
+            return None
+        if str(m.get("text", "")).strip():
+            return m
+    return None
+
+
+class Prefetch:
+    """Synthesizes the next queue message while the current one plays.
+
+    One slot. start() runs synthesize_prepared in a thread; take(msg_file)
+    waits for it and hands the result back when it is for that very file,
+    otherwise discards it (the message was flushed, trimmed or expired
+    meanwhile) and deletes its WAV. wait() is for anything about to
+    synthesize on the loop's thread: the model workers serialise callers and
+    a caller kept waiting falls through to Piper, so the loop never
+    synthesizes while a prefetch is in flight.
+    """
+
+    def __init__(self) -> None:
+        self._thread: threading.Thread | None = None
+        self._prepared: PreparedMessage | None = None
+        self._result: tuple[bool, dict | None] = (False, None)
+
+    @property
+    def pending(self) -> Path | None:
+        return self._prepared.msg_file if self._prepared is not None else None
+
+    def start(self, prepared: PreparedMessage) -> None:
+        self.discard()
+        if not prepared.msg_file.exists():
+            return  # flushed between the queue read and now
+        # Compare-and-set: a /stop that cancelled the job meanwhile must win.
+        if prepared.job_id and not JOBS.advance(prepared.job_id, when="queued", to="synthesizing"):
+            return
+        self._prepared = prepared
+        self._result = (False, None)
+
+        def run() -> None:
+            try:
+                self._result = synthesize_prepared(prepared)
+            except Exception as e:  # noqa: BLE001  a prefetch must never take the loop down
+                log(f"Prefetch of the next message ({prepared.project}) failed: {e}", "WARN")
+                audio_set_last_error(f"prefetch failed: {e}")
+                self._result = (False, None)
+
+        self._thread = threading.Thread(target=run, name="tts-prefetch", daemon=True)
+        self._thread.start()
+
+    def wait(self) -> None:
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+
+    def discard(self) -> None:
+        """Forget the slot: wait for its synthesis, delete its WAV, put a live job back to queued."""
+        self.wait()
+        prepared, self._prepared = self._prepared, None
+        if prepared is None:
+            return
+        prepared.audio_file.unlink(missing_ok=True)
+        if prepared.job_id:
+            if prepared.msg_file.exists():
+                JOBS.advance(prepared.job_id, when="synthesizing", to="queued")  # it will be picked later
+            else:
+                JOBS.advance(prepared.job_id, when="synthesizing", to="cancelled")
+
+    def discard_if_gone(self) -> None:
+        """Drop a prefetch whose queue file no longer exists (flushed, trimmed, expired).
+
+        take() would discard it too, but only when another message is picked;
+        with an empty queue the WAV would otherwise sit until one arrives.
+        """
+        if self._prepared is not None and not self._prepared.msg_file.exists():
+            self.discard()
+
+    def take(self, msg_file: Path) -> tuple[PreparedMessage, bool, dict | None] | None:
+        """The prefetched synthesis of msg_file, or None; anything else is discarded."""
+        self.wait()
+        if self._prepared is None:
+            return None
+        if self._prepared.msg_file != msg_file:
+            self.discard()
+            return None
+        prepared, result = self._prepared, self._result
+        self._prepared = None
+        return prepared, result[0], result[1]
+
+
 def daemon_loop(lockpick: bool = False) -> None:
     """Main daemon processing loop."""
     global _shutdown_requested
@@ -1165,6 +1394,9 @@ def daemon_loop(lockpick: bool = False) -> None:
         sys.exit(1)
 
     _shutdown_by_signal = False
+    # WAVs a previous daemon left behind (killed mid-message, or mid-prefetch).
+    for leftover in Path("/tmp").glob("tts_queue_*.wav"):
+        leftover.unlink(missing_ok=True)
 
     def handle_shutdown(signum: int, _frame: object) -> None:
         global _shutdown_requested
@@ -1302,6 +1534,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             ledger.mark(True)
         log("Started paused; holding the queue since the pause")
     last_reap = time.monotonic()
+    prefetch = Prefetch()
     while not _shutdown_requested:
         try:
             write_heartbeat()
@@ -1328,6 +1561,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             # Check for interrupted message to replay first
             interrupted = get_interrupted_message()
             if interrupted:
+                prefetch.wait()  # never synthesize on this thread while a prefetch runs
                 session_id = interrupted.get("session_id", "unknown")
                 persona = interrupted.get("persona", "claude-prime")
                 persona_config = get_persona_config(persona)
@@ -1456,6 +1690,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 continue
 
             # Get pending messages
+            prefetch.discard_if_gone()
             messages = get_queue_messages()
             if not messages:
                 time.sleep(poll_interval)
@@ -1470,78 +1705,30 @@ def daemon_loop(lockpick: bool = False) -> None:
                 msg_file.unlink(missing_ok=True)
                 continue
 
-            session_id = msg.get("session_id", "unknown")
-            project = msg.get("project", "unknown")
-            text = msg.get("text", "")
-            persona = msg.get("persona", "claude-prime")
-            # Bridge messages carry a source; their id is a job the page polls.
-            job_id = msg.get("id") if msg.get("source") else None
-            want_marks = bool(msg.get("want_marks"))
-
-            if not text.strip():
-                log(f"Empty message from {project}, skipping")
+            if not str(msg.get("text", "")).strip():
+                log(f"Empty message from {msg.get('project', 'unknown')}, skipping")
                 msg_file.unlink(missing_ok=True)
-                JOBS.update(job_id, state="failed", error="empty text")
+                JOBS.update(msg.get("id") if msg.get("source") else None, state="failed", error="empty text")
                 continue
 
-            # Classify content tone for expressive speech.
-            # Tone modulation is opt-in via config until parameter ranges
-            # are validated with each voice model. noise_scale/noise_w_scale
-            # values that work for one model can produce static on another.
-            tone_enabled = raw_config.get("tone_modulation", False)
-            tone = classify_tone(text) if tone_enabled else DEFAULT_TONE
-            if tone_enabled and tone.name != "neutral":
-                log(f"Tone: {tone.name} (noise={tone.noise_scale}, silence={tone.sentence_silence})")
-
-            audio_file = Path(f"/tmp/tts_queue_{session_id}.wav")
-            persona_config = get_persona_config(persona)
-            speed = msg.get("speed", persona_config.get("speed", 2.0))
-            speed_method = msg.get("speed_method", persona_config.get("speed_method", "playback"))
-            voice_kokoro = msg.get("voice_kokoro", "")
-            voice_kokoro_blend = msg.get("voice_kokoro_blend", "")
-            # Hook messages carry the persona's mlx fields too, and the persona
-            # is the authority for those; only a message that chose mlx for
-            # itself ("engine": "mlx", from `speak --voice-mlx`) overrides.
-            voice_mlx = msg.get("voice_mlx", "") if msg.get("engine") == "mlx" else ""
-            speaker_mlx = msg.get("speaker_mlx", "") if voice_mlx else ""
-            lang_mlx = msg.get("lang_mlx", "") if voice_mlx else ""
+            # The message after the one that just played may be synthesized already.
+            taken = prefetch.take(msg_file)
+            if taken is not None:
+                p, ok, marks = taken
+                prefetched = True
+            else:
+                p = prepare_message(msg, raw_config)
+                ok, marks, prefetched = False, None, False
+            session_id, project, text, persona = p.session_id, p.project, p.text, p.persona
+            persona_config, job_id, want_marks, tone = p.persona_config, p.job_id, p.want_marks, p.tone
+            audio_file, speed, speed_method = p.audio_file, p.speed, p.speed_method
+            effective_speed, effective_speed_method = p.effective_speed, p.effective_speed_method
+            voice_kokoro, voice_kokoro_blend = p.voice_kokoro, p.voice_kokoro_blend
+            voice_mlx, speaker_mlx, lang_mlx = p.voice_mlx, p.speaker_mlx, p.lang_mlx
+            current_msg_info, speaker_key = p.current_msg_info, p.speaker_key
             # The line `daemon stats` counts messages by; the bracket says which
             # voice is about to play, so the log can answer that without an ear.
-            voice_label = describe_voice(persona, persona_config, voice_kokoro, voice_kokoro_blend, voice_mlx, speaker_mlx)
-            log(f"Speaking for {project} [{persona}, {voice_label}]: {text[:50]}...")
-            pitch_filter_msg = msg.get("pitch_filter", "")
-
-            # Sherpa applies speed during synthesis — don't also apply at playback
-            sherpa_plays = bool(persona_config.get("voice_sherpa")) and not (
-                voice_kokoro or voice_kokoro_blend or voice_mlx
-                or persona_config.get("voice_kokoro") or persona_config.get("voice_kokoro_blend")
-                or persona_config.get("voice_mlx")
-            )
-            effective_speed_method = "length_scale" if sherpa_plays else speed_method
-
-            # Apply tone speed factor
-            effective_speed = speed * tone.speed_factor
-
-            current_msg_info = {
-                "session_id": session_id,
-                "project": project,
-                "text": text,
-                "persona": persona,
-                "speed": effective_speed,
-                "speed_method": effective_speed_method,
-                "voice_kokoro": voice_kokoro,
-                "voice_kokoro_blend": voice_kokoro_blend,
-                "voice_mlx": voice_mlx,
-                "speaker_mlx": speaker_mlx,
-                "lang_mlx": lang_mlx,
-                "pitch_filter": pitch_filter_msg,
-            }
-            if job_id:
-                current_msg_info["id"] = job_id
-                current_msg_info["source"] = msg.get("source")
-                current_msg_info["want_marks"] = want_marks
-
-            speaker_key = f"{session_id}:{project}"
+            log(f"Speaking for {project} [{persona}, {p.voice_label}]: {text[:50]}...")
 
             # Sentence streaming: first audio after the first sentence, pause on a
             # sentence boundary. Pages asking for marks keep the one-piece path,
@@ -1552,6 +1739,8 @@ def daemon_loop(lockpick: bool = False) -> None:
                                        project, persona, speed, speed_method)
                 last_speaker = speaker_key
                 current_msg_info["tone"] = tone.name
+                if prefetched:
+                    audio_file.unlink(missing_ok=True)  # speech_unit changed under us; stream anew
 
                 stream_message(
                     current_msg_info,
@@ -1568,23 +1757,15 @@ def daemon_loop(lockpick: bool = False) -> None:
                 )
                 continue
 
-            JOBS.update(job_id, state="synthesizing")
-            ok, marks = synthesize_message(
-                text,
-                persona,
-                audio_file,
-                want_marks=want_marks,
-                speed=effective_speed,
-                speed_method=effective_speed_method,
-                voice_kokoro_override=voice_kokoro,
-                voice_kokoro_blend_override=voice_kokoro_blend,
-                tone=tone,
-                voice_mlx_override=voice_mlx,
-                speaker_mlx_override=speaker_mlx,
-                lang_mlx_override=lang_mlx,
-            )
+            if prefetched and not ok:
+                log(f"Prefetch of {project} failed ({audio_last_error()}); synthesizing it now", "WARN")
+                prefetched = False
+            if not prefetched:
+                JOBS.update(job_id, state="synthesizing")
+                ok, marks = synthesize_prepared(p)
             if not ok:
                 log(f"Failed to generate speech for message from {project}: {audio_last_error()}", "ERROR")
+                audio_file.unlink(missing_ok=True)
                 msg_file.unlink(missing_ok=True)
                 JOBS.update(job_id, state="failed", error=audio_last_error())
                 continue
@@ -1596,6 +1777,15 @@ def daemon_loop(lockpick: bool = False) -> None:
                 speaker_transition(config["speaker_transition"], last_speaker, speaker_key,
                                    project, persona, speed, speed_method)
             last_speaker = speaker_key
+
+            # Start on the message after this one now, so it is ready the moment this
+            # one ends instead of costing its synthesis time at the boundary. After the
+            # speaker transition: an announce is synthesized on this thread and must
+            # not race the prefetch for a model worker.
+            if config.get("prefetch_next", True):
+                nxt = next_speakable(get_queue_messages(), msg_file)
+                if nxt is not None and (speech_unit() != "sentence" or nxt.get("want_marks")):
+                    prefetch.start(prepare_message(nxt, raw_config))
 
             write_playback_state(current_message=current_msg_info)
 
@@ -1663,6 +1853,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             log(f"Error in daemon loop: {e}", "ERROR")
             time.sleep(1)
 
+    prefetch.discard()  # a synthesis for a message nobody will play now; its WAV goes too
     if mic_watcher:
         mic_watcher.stop()
     if handy_analyzer:

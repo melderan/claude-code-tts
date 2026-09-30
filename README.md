@@ -172,6 +172,10 @@ Running multiple Claude Code sessions? Use queue mode so they don't talk over ea
 ```
 
 The daemon queues messages and plays them in order, with a chime when switching between sessions.
+While one message plays, the next is already being synthesized, so the boundary between two
+messages costs the chime and the player start, not a synthesis. Set `queue.prefetch_next` to
+`false` to hear the difference. Loaded models (sherpa, mlx) stay resident between messages and
+are released after `queue.worker_idle_unload_s` seconds unused (default 1800; 0 keeps them).
 
 ```bash
 /tts-mode status    # Check daemon status
@@ -310,7 +314,9 @@ reach it (a userscript can; a script inline in a CSP-locked page cannot).
   "queue": {
     "max_depth": 20,
     "max_age_seconds": 300,
-    "speaker_transition": "chime"
+    "speaker_transition": "chime",
+    "prefetch_next": true,
+    "worker_idle_unload_s": 1800
   }
 }
 ```

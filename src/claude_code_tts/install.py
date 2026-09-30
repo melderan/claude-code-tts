@@ -1331,6 +1331,7 @@ DEFAULT_CONFIG = {
         "coalesce_rapid_ms": 500,
         "idle_poll_ms": 100,
         "worker_idle_unload_s": 1800,  # loaded sherpa/mlx models are released after this long unused; 0 = never
+        "prefetch_next": True,  # synthesize the next message while the current one plays
     },
     "sounds": {
         "enabled": False,
