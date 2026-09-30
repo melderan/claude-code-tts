@@ -2286,7 +2286,6 @@ def install_service() -> None:
 
 def _install_launchd() -> None:
     """Install launchd plist for macOS."""
-    import shutil
 
     claude_tts_bin = shutil.which("claude-tts")
     if not claude_tts_bin:
@@ -2343,7 +2342,6 @@ def _install_launchd() -> None:
 
 def _install_systemd() -> None:
     """Install systemd user service for Linux."""
-    import shutil
 
     claude_tts_bin = shutil.which("claude-tts")
     if not claude_tts_bin:

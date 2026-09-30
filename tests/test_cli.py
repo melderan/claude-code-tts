@@ -449,6 +449,9 @@ class TestVoices:
         (voices_dir / "en_US-libritts_r-medium.onnx.json").write_text(json.dumps({"num_speakers": 904}))
         monkeypatch.setattr(cfg_mod, "VOICES_DIR", voices_dir)
         monkeypatch.setattr(cfg_mod, "SHERPA_MODELS_DIR", tmp_path / "sherpa-models")
+        # cli imports these names at module level, so patch where they are read
+        monkeypatch.setattr("claude_code_tts.cli.VOICES_DIR", voices_dir)
+        monkeypatch.setattr("claude_code_tts.cli.SHERPA_MODELS_DIR", tmp_path / "sherpa-models")
         monkeypatch.setattr(cfg_mod, "MLX_VENV_DIR", tmp_path / "venvs" / "mlx")
         with patch("shutil.which", return_value=None), \
              patch("claude_code_tts.cli._hf_model_cached", return_value=False):

@@ -168,6 +168,7 @@ class TestExtractTarbz2:
 def fake_models_dir(tmp_path, monkeypatch):
     models = tmp_path / "sherpa-models"
     monkeypatch.setattr("claude_code_tts.config.SHERPA_MODELS_DIR", models)
+    monkeypatch.setattr("claude_code_tts.cli.SHERPA_MODELS_DIR", models)  # cli binds it at import
     return models
 
 

@@ -462,3 +462,20 @@ class TestTranscriptReread:
                          _tool_use("m1"), _tool_result()):
                 f.write(json.dumps(line) + "\n")
         assert _run_hook(transcript, "post_tool_use", tool_name="Task") == "text before launching a sub-agent"
+
+
+class TestSessionFromEnvOrPath:
+    """The hook must behave the same whether the session id comes from the kit's env var or the path."""
+
+    @pytest.mark.parametrize("env_session", [None, "room-from-env"])
+    def test_pai_summary_spoken_either_way(self, tmp_path, fake_state_dir, monkeypatch, env_session):
+        """9.25.1 raised UnboundLocalError here when CLAUDE_TTS_SESSION was set (shadowed `re`)."""
+        if env_session is None:
+            monkeypatch.delenv("CLAUDE_TTS_SESSION", raising=False)
+        else:
+            monkeypatch.setenv("CLAUDE_TTS_SESSION", env_session)
+        projects = tmp_path / "projects" / "-Users-dev"
+        transcript = projects / f"uuid-env-{bool(env_session)}.jsonl"
+        _write_transcript(transcript, [_user("go"), _assistant("\U0001F5E3 Lode: Summary spoken either way.")])
+        spoken = _run_hook(transcript, "stop")
+        assert spoken is not None and spoken.endswith("Summary spoken either way.")

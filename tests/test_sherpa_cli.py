@@ -55,6 +55,7 @@ class TestSherpaList:
         empty = tmp_path / "sherpa-models"
         empty.mkdir()
         monkeypatch.setattr("claude_code_tts.config.SHERPA_MODELS_DIR", empty)
+        monkeypatch.setattr("claude_code_tts.cli.SHERPA_MODELS_DIR", empty)  # cli binds it at import
         monkeypatch.setattr(
             "claude_code_tts.config.SHERPA_VENV_DIR", tmp_path / "no-venv"
         )
@@ -70,6 +71,7 @@ class TestSherpaList:
     def test_missing_dir_prints_helpful_next_steps(self, tmp_path, monkeypatch, capsys):
         missing = tmp_path / "nope"
         monkeypatch.setattr("claude_code_tts.config.SHERPA_MODELS_DIR", missing)
+        monkeypatch.setattr("claude_code_tts.cli.SHERPA_MODELS_DIR", missing)  # cli binds it at import
         monkeypatch.setattr(
             "claude_code_tts.config.SHERPA_VENV_DIR", tmp_path / "no-venv"
         )
@@ -107,6 +109,7 @@ class TestSherpaList:
         (venv / "python").write_text("#!/bin/sh\n")
 
         monkeypatch.setattr("claude_code_tts.config.SHERPA_MODELS_DIR", models_dir)
+        monkeypatch.setattr("claude_code_tts.cli.SHERPA_MODELS_DIR", models_dir)  # cli binds it at import
         monkeypatch.setattr(
             "claude_code_tts.config.SHERPA_VENV_DIR", tmp_path / "venvs" / "sherpa"
         )
@@ -130,6 +133,7 @@ class TestSherpaList:
         models_dir = tmp_path / "sherpa-models"
         models_dir.mkdir()
         monkeypatch.setattr("claude_code_tts.config.SHERPA_MODELS_DIR", models_dir)
+        monkeypatch.setattr("claude_code_tts.cli.SHERPA_MODELS_DIR", models_dir)  # cli binds it at import
         monkeypatch.setattr(
             "claude_code_tts.config.SHERPA_VENV_DIR", tmp_path / "missing-venv"
         )

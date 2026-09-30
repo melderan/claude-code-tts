@@ -761,7 +761,7 @@ def cmd_voices(args: argparse.Namespace) -> None:
     """
     import shutil
 
-    from claude_code_tts.config import MLX_VENV_DIR, SHERPA_MODELS_DIR, VOICES_DIR
+    from claude_code_tts.config import MLX_VENV_DIR
     from claude_code_tts.install import AVAILABLE_VOICES
     from claude_code_tts.mlx_catalog import CATALOG
 
@@ -1077,7 +1077,7 @@ def _dir_size_mb(path: Path) -> int:
 
 def cmd_sherpa(args: argparse.Namespace) -> None:
     """Manage sherpa-onnx models and venv."""
-    from claude_code_tts.config import SHERPA_MODELS_DIR, SHERPA_VENV_DIR
+    from claude_code_tts.config import SHERPA_VENV_DIR
 
     sub = getattr(args, "sherpa_command", None) or "list"
 
@@ -1402,7 +1402,6 @@ def _sherpa_install(model_id: str, *, assume_yes: bool = False) -> int:
     if the target directory already has a recognized layout, reports and
     exits without re-downloading.
     """
-    from claude_code_tts.config import SHERPA_MODELS_DIR
     from claude_code_tts.sherpa_catalog import get_entry
 
     entry = get_entry(model_id)
@@ -1673,7 +1672,6 @@ def _explain_speech_failure() -> str:
 def cmd_bridge(args: argparse.Namespace) -> None:
     """Manage the loopback HTTP bridge (browser pages -> daemon)."""
     from claude_code_tts.bridge import TOKEN_FILE, ensure_token, get_http_config, read_token
-    from claude_code_tts.config import load_raw_config, save_raw_config
 
     sub = getattr(args, "bridge_command", None)
     http = get_http_config()
@@ -2025,7 +2023,6 @@ def extract_pai_summary(text: str) -> str | None:
     Returns None if no such line exists or the summary is empty/whitespace.
     Only the stop hook calls this; post_tool_use is left untouched.
     """
-    import re
     # U+1F5E3 speaking-head, optional U+FE0F variation selector (VS16), then
     # optional "Label:" prefix (no colon in the label itself), then summary.
     # Cannot use a raw string for the emoji — raw strings don't process \U escapes.
@@ -2044,7 +2041,6 @@ def extract_pai_summary(text: str) -> str | None:
 def _speak_from_hook(args: argparse.Namespace) -> None:
     """Handle --from-hook mode: read hook JSON from stdin, process transcript."""
     from claude_code_tts.audio import speak
-    from claude_code_tts.config import debug
     from claude_code_tts.filter import filter_text
 
     hook_type = args.hook_type or "stop"
@@ -2253,7 +2249,6 @@ def _read_watermark(state_file: Path, lock_dir: Path, transcript: Path) -> int:
         # Auto-reset stale watermark
         current = _count_lines(transcript)
         if wm > current:
-            from claude_code_tts.config import debug
             debug(f"Watermark reset: was {wm} but transcript only has {current} lines")
             wm = 0
             try:
