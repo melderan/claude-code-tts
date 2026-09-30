@@ -70,7 +70,7 @@ claude-tts-install --help       # Show all options
 
 ## Usage
 
-After installation, just use Claude Code. Every response gets spoken. New sessions start muted by default — use `/tts-unmute` to enable voice.
+After installation, just use Claude Code. Every response gets spoken, in new sessions too. `/tts-mute` silences one session; `claude-tts mute --all` silences every session and makes new ones start silent, and `claude-tts unmute --all` undoes that.
 
 ### Slash Commands
 
@@ -306,7 +306,7 @@ reach it (a userscript can; a script inline in a CSP-locked page cannot).
 ```json
 {
   "mode": "queue",
-  "default_muted": true,
+  "default_muted": false,
   "mic_aware_pause": true,
   "mic_resume_delay_ms": 1500,
   "speech_unit": "message",

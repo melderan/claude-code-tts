@@ -44,8 +44,7 @@ sbx run "git+https://github.com/melderan/claude-code-tts.git#ref=v9.11.0&dir=kit
 # 2. Mount the host's tts directory into it (the whole directory, not only queue/)
 sbx mount <sandbox-name> ~/.claude-tts:/home/agent/.claude-tts
 
-# 3. Inside Claude Code, in that project, once:
-/tts-unmute
+# 3. It speaks from the first response. To silence one project: /tts-mute inside it.
 ```
 
 The mount is added after creation and persists across stop and start. Mount the whole directory:
@@ -65,12 +64,24 @@ Validate the kit locally before using it: `sbx kit validate kits/claude-tts`.
 | Symptom | Meaning | Fix |
 |---|---|---|
 | `Daemon not healthy, skipping speech` in `~/.claude-tts/debug.log` | no mount, or stale heartbeat | `sbx mount` the directory; `claude-tts daemon status` on the host |
-| `muted, skipping` | the project is muted (default) | `/tts-unmute` in that project |
+| `muted, skipping` | the project is muted | `/tts-unmute` in that project, or `claude-tts unmute --all` on the host |
 | a queue file sits in `~/.claude-tts/queue/` and never disappears | the daemon is not reading | `claude-tts daemon restart` on the host |
 | `Voice ... is not installed` WARN in `daemon.log` | persona model missing on the host | `claude-tts-install --voice <name>` on the host |
 
 The hook log is `~/.claude-tts/debug.log`, shared by the host and every sandbox; each line carries
 the writer's hostname. `claude-tts status` inside the sandbox shows mute, persona and daemon state.
+
+## Session identity across rebuilds
+
+A session is keyed by the Claude Code project folder, which encodes the working directory. A
+sandbox rebuilt into the same checkout keeps its mute state, persona and speed, because
+`sessions.d/` lives on the host mount. A sandbox that opens Claude from a different directory
+(the parent of the checkout, say) is a new session and gets the defaults. To give a sandbox one
+stable identity regardless of directory, export `CLAUDE_TTS_SESSION=<a name>` in its environment
+before Claude Code starts: the hooks and the CLI both honour it, so `/tts-persona` and
+`/tts-mute` inside the sandbox act on that name, and the daemon's speaker-change chime tells
+sandboxes apart by it. Session pins under `active/` carry the writer's hostname, so two sandboxes
+whose `claude` processes share a PID number cannot read each other's pin.
 
 ## Several sandboxes, one speaker
 

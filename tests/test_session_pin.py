@@ -7,6 +7,7 @@ the CLI walks its process tree to find the same PID and reads the file.
 """
 
 import os
+import time
 from unittest.mock import patch
 
 import pytest
@@ -88,9 +89,9 @@ class TestPinAndRead:
 
     def test_pin_then_read_roundtrip(self, fake_active_dir):
         with patch("claude_code_tts.session.find_claude_ancestor_pid", return_value=12345):
-            from claude_code_tts.session import pin_session, read_pinned_session
+            from claude_code_tts.session import host_tag, pin_session, read_pinned_session
             pin_session("-Users-foo-bar-project")
-            assert (fake_active_dir / "12345.session").is_file()
+            assert (fake_active_dir / f"{host_tag()}-12345.session").is_file()
             assert read_pinned_session() == "-Users-foo-bar-project"
 
     def test_pin_overwrites(self, fake_active_dir):
@@ -107,15 +108,15 @@ class TestPinAndRead:
             pin_session("voiceserver-session")
             assert (fake_active_dir / "latest.session").read_text().strip() == "voiceserver-session"
             # No per-PID file written (no ancestor)
-            pid_files = [f for f in fake_active_dir.iterdir() if f.stem.isdigit()]
+            pid_files = [f for f in fake_active_dir.iterdir() if f.name != "latest.session"]
             assert pid_files == []
 
     def test_pin_with_ancestor_writes_both(self, fake_active_dir):
         """With a claude ancestor, both per-PID and latest.session are written."""
         with patch("claude_code_tts.session.find_claude_ancestor_pid", return_value=12345):
-            from claude_code_tts.session import pin_session
+            from claude_code_tts.session import host_tag, pin_session
             pin_session("-Users-foo-bar-project")
-            assert (fake_active_dir / "12345.session").read_text().strip() == "-Users-foo-bar-project"
+            assert (fake_active_dir / f"{host_tag()}-12345.session").read_text().strip() == "-Users-foo-bar-project"
             assert (fake_active_dir / "latest.session").read_text().strip() == "-Users-foo-bar-project"
 
     def test_read_no_claude_ancestor_returns_none(self, fake_active_dir):
@@ -201,22 +202,43 @@ class TestGetSessionIdPriority:
 
 
 class TestCleanup:
-    """cleanup_stale_pins removes files for dead PIDs."""
+    """cleanup_stale_pins removes this machine's dead pins and leaves other machines' alone.
 
-    def test_removes_dead_pid_files(self, fake_active_dir):
+    ~/.claude-tts is shared by a host and its sandboxes, and each sandbox
+    numbers PIDs from a low base (2026-09-29: two rooms both had a `claude`
+    at PID 1247), so a pin is keyed by host name and PID together.
+    """
+
+    def test_removes_dead_pid_files_of_this_host_only(self, fake_active_dir):
+        from claude_code_tts.session import cleanup_stale_pins, host_tag
         fake_active_dir.mkdir(parents=True)
-        (fake_active_dir / "11111.session").write_text("alive")
-        (fake_active_dir / "22222.session").write_text("dead")
+        me = host_tag()
+        (fake_active_dir / f"{me}-11111.session").write_text("alive")
+        (fake_active_dir / f"{me}-22222.session").write_text("dead")
+        (fake_active_dir / "other-room-22222.session").write_text("another machine, same pid number")
 
         def fake_ps(pid):
             return (1, "claude") if pid == 11111 else None
 
         with patch("claude_code_tts.session._ps_query", side_effect=fake_ps):
-            from claude_code_tts.session import cleanup_stale_pins
             removed = cleanup_stale_pins()
-            assert removed == 1
-            assert (fake_active_dir / "11111.session").is_file()
-            assert not (fake_active_dir / "22222.session").is_file()
+        assert removed == 1
+        assert (fake_active_dir / f"{me}-11111.session").is_file()
+        assert not (fake_active_dir / f"{me}-22222.session").is_file()
+        assert (fake_active_dir / "other-room-22222.session").is_file()
+
+    def test_legacy_pid_only_pins_go_by_age(self, fake_active_dir):
+        from claude_code_tts.session import LEGACY_PIN_MAX_AGE_S, cleanup_stale_pins
+        fake_active_dir.mkdir(parents=True)
+        fresh = fake_active_dir / "333.session"
+        old = fake_active_dir / "444.session"
+        fresh.write_text("x")
+        old.write_text("x")
+        past = time.time() - LEGACY_PIN_MAX_AGE_S - 60
+        os.utime(old, (past, past))
+        with patch("claude_code_tts.session._ps_query", return_value=None):  # ps says dead: irrelevant, unknowable
+            assert cleanup_stale_pins() == 1
+        assert fresh.is_file() and not old.is_file()
 
     def test_ignores_non_pid_filenames(self, fake_active_dir):
         fake_active_dir.mkdir(parents=True)
@@ -227,8 +249,3 @@ class TestCleanup:
             assert removed == 0
             # Non-numeric filename is left alone, not an error
             assert (fake_active_dir / "garbage.session").is_file()
-
-    def test_no_active_dir_is_safe(self, fake_active_dir):
-        from claude_code_tts.session import cleanup_stale_pins
-        # fake_active_dir doesn't exist yet
-        assert cleanup_stale_pins() == 0

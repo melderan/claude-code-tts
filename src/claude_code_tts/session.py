@@ -15,7 +15,9 @@ hook has fired yet (or where claude-tts is invoked outside of Claude Code).
 
 import os
 import re
+import socket
 import subprocess
+import time
 from pathlib import Path
 
 ACTIVE_DIR = Path.home() / ".claude-tts" / "active"
@@ -72,8 +74,24 @@ def find_claude_ancestor_pid(start_pid: int | None = None) -> int | None:
     return None
 
 
+# A legacy pin (v8 to v9.22) is named by PID alone; older than this it is removed.
+LEGACY_PIN_MAX_AGE_S = 7 * 24 * 3600
+
+
+def host_tag() -> str:
+    """This machine's name as a filename-safe token.
+
+    ~/.claude-tts is shared between a host and its sandboxes, and every
+    sandbox numbers its processes from a low base, so a pin keyed by PID
+    alone collided across machines: a rebuilt room could read another
+    room's session. The host name makes the key unique per machine.
+    """
+    raw = socket.gethostname().split(".")[0] or "host"
+    return re.sub(r"[^A-Za-z0-9_-]", "-", raw)[:64] or "host"
+
+
 def _pin_path(claude_pid: int) -> Path:
-    return ACTIVE_DIR / f"{claude_pid}.session"
+    return ACTIVE_DIR / f"{host_tag()}-{claude_pid}.session"
 
 
 def pin_session(session_id: str) -> None:
@@ -129,14 +147,22 @@ def cleanup_stale_pins() -> int:
     if not ACTIVE_DIR.is_dir():
         return 0
     removed = 0
+    mine = host_tag() + "-"
     for entry in ACTIVE_DIR.iterdir():
         if not entry.is_file() or not entry.name.endswith(".session"):
             continue
-        try:
-            pid = int(entry.stem)
-        except ValueError:
-            continue
-        if _ps_query(pid) is None:
+        stem = entry.stem
+        if stem.startswith(mine) and stem[len(mine):].isdigit():
+            stale = _ps_query(int(stem[len(mine):])) is None  # our own machine: ask ps
+        elif stem.isdigit():
+            # A pin from before host tags, from any machine: liveness is unknowable here.
+            try:
+                stale = time.time() - entry.stat().st_mtime > LEGACY_PIN_MAX_AGE_S
+            except OSError:
+                continue
+        else:
+            continue  # another machine's pin: not ours to judge
+        if stale:
             try:
                 entry.unlink()
                 removed += 1

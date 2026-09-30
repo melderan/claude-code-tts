@@ -150,11 +150,33 @@ def cmd_mute(args: argparse.Namespace) -> None:
 
 
 def cmd_unmute(args: argparse.Namespace) -> None:
-    """Unmute TTS for this session."""
+    """Unmute TTS for this session, or every session and the default with --all."""
     if not TTS_CONFIG_FILE.exists():
         print(f"Config file not found: {TTS_CONFIG_FILE}")
         print("Run claude-tts-install first")
         sys.exit(1)
+
+    if getattr(args, "all", False):
+        config = load_raw_config()
+        config["default_muted"] = False
+        config["muted"] = False
+        save_raw_config(config)
+        count = 0
+        if TTS_SESSIONS_DIR.is_dir():
+            for sf in TTS_SESSIONS_DIR.glob("*.json"):
+                try:
+                    data = json.loads(sf.read_text())
+                    if "muted" in data:
+                        del data["muted"]
+                        atomic_write_json(sf, data)
+                        count += 1
+                except (json.JSONDecodeError, OSError):
+                    pass
+        print(f"All sessions unmuted ({count} session flags cleared + global default).")
+        print("")
+        print("Every Claude session speaks, and new ones start speaking.")
+        print("Use /tts-mute in a session to silence just that one.")
+        return
 
     sid = get_session_id()
     session_set(sid, "muted", False)
@@ -3128,6 +3150,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # --- unmute ---
     p = subparsers.add_parser("unmute", help="Unmute TTS for this session")
+    p.add_argument("--all", action="store_true", help="Unmute every session and make new sessions speak by default")
     p.set_defaults(func=cmd_unmute)
 
     # --- speed ---

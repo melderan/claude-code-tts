@@ -102,6 +102,19 @@ class TestMuteUnmute:
         assert config["default_muted"] is True
         assert config["muted"] is True
 
+    def test_unmute_all_clears_flags_and_the_default(self, tts_home, patched_env, capsys):
+        """JMO, 2026-09-29: new sessions should speak, so he never starts one and forgets to unmute."""
+        sd = tts_home / ".claude-tts" / "sessions.d"
+        (sd / "s1.json").write_text(json.dumps({"muted": True, "persona": "claude-chill"}))
+        (sd / "s2.json").write_text(json.dumps({"muted": True}))
+        main(["mute", "--all"])
+        main(["unmute", "--all"])
+        assert json.loads((sd / "s1.json").read_text()) == {"persona": "claude-chill"}  # flag gone, persona kept
+        assert "muted" not in json.loads((sd / "s2.json").read_text())
+        config = json.loads((tts_home / ".claude-tts" / "config.json").read_text())
+        assert config["default_muted"] is False and config["muted"] is False
+        assert "new ones start speaking" in capsys.readouterr().out
+
 
 class TestSpeed:
     def test_show_speed(self, tts_home, patched_env, capsys):

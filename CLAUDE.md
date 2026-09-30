@@ -55,7 +55,7 @@ When writing documentation, comments, commit messages, or any public-facing cont
 - Standalone tools: `claude-tts speak` and `claude-tts audition`
 - Multi-speaker model support (libritts has 904 speakers)
 - Voice knowledge base in `docs/voice-notes.md`
-- Default muted: new sessions silent until /tts-unmute
+- New sessions speak by default (since 9.23.0); `claude-tts mute --all` flips the default to silent
 - Daemon management via `claude-tts daemon start|stop|restart|status`
 
 ## Quick Reference
@@ -80,8 +80,8 @@ just release --check        # preflight and gate only; prints the plan
 ## Session Model
 
 - Sessions are identified by Claude Code project folder name (e.g., `-Users-foo-bar-project`)
-- `default_muted: true` - new sessions are silent by default
-- Use `/tts-unmute` to enable voice for a specific session
+- `default_muted: false` - new sessions speak; `claude-tts mute --all` sets it true and mutes every session, `unmute --all` reverts
+- Use `/tts-mute` and `/tts-unmute` for one session
 - Each session can have its own persona, speed, and mute state
 
 ## Commands

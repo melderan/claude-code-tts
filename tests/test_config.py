@@ -252,6 +252,13 @@ class TestLoadConfig:
         cfg = config_mod.load_config("test-session")
         assert cfg.muted is False
 
+    def test_new_session_speaks_when_config_has_no_default_muted(self, tts_home, patched_paths):
+        """The shipped default since 9.23.0: a session with no file and no default_muted key speaks."""
+        config_file = tts_home / ".claude-tts" / "config.json"
+        config_file.write_text(json.dumps({"mode": "queue", "personas": {}}))
+        cfg = config_mod.load_config("brand-new-session")
+        assert cfg.muted is False and cfg.default_muted is False
+
     def test_default_muted_new_session(self, tts_home, patched_paths):
         """New sessions (no session file) should respect default_muted."""
         config = {

@@ -94,7 +94,7 @@ class TTSConfig:
     active_persona: str = "claude-prime"
     session_id: str = ""
     project_name: str = ""
-    default_muted: bool = True
+    default_muted: bool = False
     global_muted: bool = False
     # Raw dicts for commands that need more detail
     raw_config: dict = field(default_factory=dict, repr=False)
@@ -280,7 +280,7 @@ def load_config(session_id: str | None = None) -> TTSConfig:
         return cfg
 
     cfg.mode = config.get("mode", "direct")
-    cfg.default_muted = config.get("default_muted", True)
+    cfg.default_muted = config.get("default_muted", False)
     cfg.global_muted = config.get("muted", False)
 
     # Determine effective persona: session > project > global
