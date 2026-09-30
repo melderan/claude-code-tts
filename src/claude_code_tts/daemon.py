@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from io import TextIOWrapper
 from pathlib import Path
+from typing import Any
 
 from claude_code_tts.audio import _set_last_error as audio_set_last_error
 from claude_code_tts.audio import (
@@ -52,6 +53,7 @@ from claude_code_tts.config import (
     load_raw_config,
 )
 from claude_code_tts.handy import AnalyzerThread, save_speech_wav
+from claude_code_tts.level import normalize as normalize_level
 from claude_code_tts.mic_watcher import MicWatcher
 from claude_code_tts.tone import DEFAULT_TONE, ToneParams, classify_tone
 
@@ -482,7 +484,55 @@ def get_persona_config(persona_name: str) -> dict:
 # --- Audio (daemon-specific) ---
 
 
+def normalize_target() -> float | None:
+    """queue.normalize_dbfs: the speech level every WAV is brought to; None or false disables."""
+    raw = load_raw_config().get("queue", {}).get("normalize_dbfs", DEFAULT_NORMALIZE_DBFS)
+    if raw is None or raw is False:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def persona_gain_db(persona: str) -> float:
+    """A persona's gain_db, added on top of the target for taste; 0 when unset."""
+    try:
+        return float(load_raw_config().get("personas", {}).get(persona, {}).get("gain_db", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def level_after_synthesis(output_file: Path, persona: str) -> None:
+    """Even out loudness across engines: one line in the log per WAV, numbers first."""
+    target = normalize_target()
+    if target is None or not output_file.exists():
+        return
+    try:
+        result = normalize_level(output_file, target, extra_db=persona_gain_db(persona))
+    except Exception as e:  # a level problem must never cost the message
+        log(f"Level [{persona}]: skipped ({e})", "WARN")
+        return
+    if result is None:
+        return
+    before, gain = result
+    log(
+        f"Level [{persona}]: speech {before.speech_dbfs:.1f} dBFS, peak {before.peak_dbfs:.1f}, "
+        f"{before.seconds:.1f}s -> gain {gain:+.1f} dB (target {target:g})"
+    )
+
+
 def daemon_generate_speech(
+    text: str, persona: str, output_file: Path, *args: Any, **kwargs: Any
+) -> bool:
+    """Synthesize, then level: the one funnel every engine and every path goes through."""
+    ok = _generate_speech_unleveled(text, persona, output_file, *args, **kwargs)
+    if ok:
+        level_after_synthesis(output_file, persona)
+    return ok
+
+
+def _generate_speech_unleveled(
     text: str,
     persona: str,
     output_file: Path,
@@ -1139,6 +1189,7 @@ def get_queue_messages() -> list[dict]:
 
 
 BACKGROUND_LANE = "background"
+DEFAULT_NORMALIZE_DBFS = -16.0
 
 
 def register_queued_bridge_jobs() -> int:

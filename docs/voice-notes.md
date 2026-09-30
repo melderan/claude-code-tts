@@ -81,6 +81,23 @@ Works well with playback. Length_scale untested.
 
 Untested. Needs evaluation.
 
+## Loudness Across Backends
+
+Engines do not agree on level. Measured on one machine from the daemon's speech history:
+Piper voices peak at full scale with speech around -13 dBFS; Kokoro on mlx peaks near -8 dBFS
+with speech around -21 dBFS. That 7 dB gap is one voice at about half the loudness of the other.
+
+Since 9.32.0 the daemon evens this out after every synthesis, for every engine and every path
+(one-piece, sentence stream, bridge marks): the WAV's speech level, the mean RMS of its loudest
+fifth of 50 ms windows, is brought to `queue.normalize_dbfs` (default -16), with the gain capped
+so the peak never passes -1 dBFS. Each WAV logs one line in daemon.log:
+
+    Level [claude-connery]: speech -21.0 dBFS, peak -8.0, 12.6s -> gain +5.0 dB (target -16)
+
+A persona that should sit above or below the house level takes `"gain_db": 2` (or -2) in its
+config block. `"normalize_dbfs": null` turns the whole thing off. To hear the numbers rather than
+read them, `claude-tts speak` with two personas on different engines before and after.
+
 ## Testing Methodology
 
 When evaluating a voice/method combination:

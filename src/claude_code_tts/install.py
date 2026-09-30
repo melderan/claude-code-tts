@@ -1372,6 +1372,7 @@ DEFAULT_CONFIG = {
         "idle_poll_ms": 100,
         "worker_idle_unload_s": 1800,  # loaded sherpa/mlx models are released after this long unused; 0 = never
         "prefetch_next": True,  # synthesize the next message while the current one plays
+        "normalize_dbfs": -16,  # speech level every WAV is brought to, so engines match; null disables
     },
     "sounds": {
         "enabled": False,
