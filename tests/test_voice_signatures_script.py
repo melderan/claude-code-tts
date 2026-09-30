@@ -69,7 +69,7 @@ def test_verify_passes_when_the_engine_still_sounds_the_same(vs, monkeypatch, ca
         return True
 
     monkeypatch.setattr(vs, "synthesize", same)
-    assert vs.cmd_verify(_args(limit=50, persona=None)) == 0
+    assert vs.cmd_verify(_args(limit=50, persona=None, max_seconds=30.0)) == 0
     assert "2 ok, 0 drifted" in capsys.readouterr().out
 
 
@@ -81,7 +81,7 @@ def test_verify_fails_when_the_engine_got_quieter_and_faster(vs, monkeypatch, ca
         return True
 
     monkeypatch.setattr(vs, "synthesize", worse)
-    assert vs.cmd_verify(_args(limit=50, persona=None)) == 1
+    assert vs.cmd_verify(_args(limit=50, persona=None, max_seconds=30.0)) == 1
     out = capsys.readouterr().out
     assert "DRIFT" in out and "speech level" in out and "2 drifted" in out
 
@@ -96,7 +96,14 @@ def test_spread_records_the_run_to_run_variation(vs, monkeypatch, capsys):
         return True
 
     monkeypatch.setattr(vs, "synthesize", noisy)
-    assert vs.cmd_spread(_args(runs=3, limit=50, persona=None)) == 0
+    assert vs.cmd_spread(_args(runs=3, limit=50, persona=None, max_seconds=30.0)) == 0
     spreads = list(vs.BASELINE_DIR.glob("*/*.spread.json"))
     assert len(spreads) == 2
     assert json.loads(spreads[0].read_text())["runs"] == 3
+
+
+def test_long_baselines_are_skipped_and_short_ones_come_first(vs):
+    vs.cmd_capture(_args(limit=50))
+    both = vs.load_baselines(None)
+    assert [b["signature"]["seconds"] for b in both] == sorted(b["signature"]["seconds"] for b in both)
+    assert vs.load_baselines(None, max_seconds=both[0]["signature"]["seconds"]) == [both[0]]

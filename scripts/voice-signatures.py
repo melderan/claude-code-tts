@@ -7,8 +7,8 @@ speed in handy_analysis.db. Nothing here leaves the machine; the baseline holds 
 text, so it lives under ~/.claude-tts/signatures/, never in the repository.
 
     just voices-capture            sign every history WAV not yet in the baseline
-    just voices-spread             synthesize each baseline utterance 3 times; record the spread
-    just voices-verify             synthesize each baseline utterance once; compare to its baseline
+    just voices-spread             synthesize the 20 shortest baselines 3 times each; record the spread
+    just voices-verify             synthesize the 50 shortest baselines once; compare to their baselines
 
 `verify` is the check to run before and after a release that touches the speech path: a
 refactor that keeps every test green and still comes out quieter, faster, clipped or with a
@@ -55,14 +55,19 @@ def baseline_path(persona: str, sha: str) -> Path:
     return BASELINE_DIR / persona / f"{sha}.json"
 
 
-def load_baselines(persona: str | None) -> list[dict]:
+def load_baselines(persona: str | None, max_seconds: float | None = None) -> list[dict]:
+    """Baselines, shortest first: short utterances are the cheaper and steadier ruler."""
     out = []
     for p in sorted(BASELINE_DIR.glob("*/*.json")):
         if p.name.endswith(".spread.json"):
             continue
         if persona and p.parent.name != persona:
             continue
-        out.append(json.loads(p.read_text()))
+        b = json.loads(p.read_text())
+        if max_seconds is not None and b["signature"]["seconds"] > max_seconds:
+            continue
+        out.append(b)
+    out.sort(key=lambda b: b["signature"]["seconds"])
     return out
 
 
@@ -100,7 +105,7 @@ def cmd_spread(args: argparse.Namespace) -> int:
     worst = Tolerance()
     done = 0
     with tempfile.TemporaryDirectory(prefix="voice-spread-") as tmp:
-        for b in load_baselines(args.persona)[: args.limit]:
+        for b in load_baselines(args.persona, args.max_seconds)[: args.limit]:
             sigs = []
             for i in range(args.runs):
                 wav = Path(tmp) / f"{b['signature']['text_sha']}-{i}.wav"
@@ -133,7 +138,7 @@ def cmd_spread(args: argparse.Namespace) -> int:
 def cmd_verify(args: argparse.Namespace) -> int:
     passed = drifted = failed = 0
     with tempfile.TemporaryDirectory(prefix="voice-verify-") as tmp:
-        for b in load_baselines(args.persona)[: args.limit]:
+        for b in load_baselines(args.persona, args.max_seconds)[: args.limit]:
             sha = b["signature"]["text_sha"]
             expected = Signature.from_json(json.dumps(b["signature"]))
             wav = Path(tmp) / f"{sha}.wav"
@@ -172,10 +177,14 @@ def main() -> int:
     p = sub.add_parser("spread", help="measure run-to-run spread per baseline utterance")
     p.add_argument("--runs", type=int, default=3)
     p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--max-seconds", type=float, default=30.0,
+                   help="skip baselines longer than this (default 30; long ones cost minutes)")
     p.add_argument("--persona")
     p.set_defaults(fn=cmd_spread)
     p = sub.add_parser("verify", help="re-synthesize each baseline utterance and compare")
     p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--max-seconds", type=float, default=30.0,
+                   help="skip baselines longer than this (default 30)")
     p.add_argument("--persona")
     p.set_defaults(fn=cmd_verify)
     args = ap.parse_args()
