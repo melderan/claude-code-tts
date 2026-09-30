@@ -1256,6 +1256,9 @@ def do_install(
         # Migrate legacy .sessions from config.json to sessions.d/
         _migrate_sessions_to_confd()
 
+        # Flip the pre-9.23.0 mute defaults once, so upgraded installs speak in new sessions too
+        _migrate_speak_by_default()
+
         # Record installed version
         set_installed_version(__version__)
         info(f"Version {__version__} recorded in config")
@@ -1318,8 +1321,45 @@ def _migrate_sessions_to_confd() -> None:
         info("Sessions already migrated to sessions.d/")
 
 
+def _migrate_speak_by_default() -> None:
+    """Flip the pre-9.23.0 mute defaults once, so new sessions speak on upgraded installs too.
+
+    Installs before 9.23.0 shipped ``default_muted: true``, and the old install toggle could leave
+    the global ``muted`` flag true. 9.23.0 changed the shipped default but never touched existing
+    config files, so every room JMO rebuilt after upgrading started silent (2026-09-30). Gated by
+    the config ``version`` key, 1 -> 2, so it runs once; a later ``claude-tts mute --all`` is kept
+    because it writes a file that is already at version 2. Session files are not touched: a session
+    muted by hand stays muted.
+    """
+    if not TTS_CONFIG_FILE.exists():
+        return
+    config = load_config()
+    try:
+        stored_version = int(config.get("version", 1))
+    except (TypeError, ValueError):
+        stored_version = 1
+    if stored_version >= CONFIG_VERSION:
+        return
+
+    flipped = [key for key in ("default_muted", "muted") if config.get(key)]
+    for key in flipped:
+        config[key] = False
+    config["version"] = CONFIG_VERSION
+    save_config(config)
+
+    if flipped:
+        success(f"New sessions now speak: {' and '.join(flipped)} came from before 9.23.0 and are now false")
+        info("Sessions muted one by one stay muted. To start every session silent: claude-tts mute --all")
+    else:
+        info(f"Config version {CONFIG_VERSION}: new sessions speak")
+
+
+# Bumped when an upgrade must rewrite something in an existing config.json once.
+# 2: new sessions speak (9.23.0 changed the shipped default; _migrate_speak_by_default flips old files)
+CONFIG_VERSION = 2
+
 DEFAULT_CONFIG = {
-    "version": 1,
+    "version": CONFIG_VERSION,
     "mode": "direct",  # "direct" = immediate playback, "queue" = daemon handles playback
     "active_persona": "claude-prime",
     "muted": False,

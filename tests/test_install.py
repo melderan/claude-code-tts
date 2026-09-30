@@ -363,3 +363,61 @@ class TestRestartRunningDaemon:
         with pytest.raises(SystemExit):
             inst.do_install(upgrade=True, restart_daemon=False)
         assert called == []
+
+
+class TestSpeakByDefaultMigration:
+    """Upgrades from before 9.23.0 must start speaking in new sessions, once, without touching sessions.d."""
+
+    @pytest.fixture
+    def cfg_home(self, tmp_path, monkeypatch):
+        tts_dir = tmp_path / ".claude-tts"
+        tts_dir.mkdir()
+        monkeypatch.setattr(install, "TTS_CONFIG_DIR", tts_dir)
+        monkeypatch.setattr(install, "TTS_CONFIG_FILE", tts_dir / "config.json")
+        monkeypatch.setattr(install, "TTS_SESSIONS_DIR", tts_dir / "sessions.d")
+        return tts_dir
+
+    def _write(self, tts_dir, config):
+        (tts_dir / "config.json").write_text(json.dumps(config))
+
+    def _read(self, tts_dir):
+        return json.loads((tts_dir / "config.json").read_text())
+
+    def test_pre_9_23_config_flips_both_mute_flags(self, cfg_home, capsys):
+        """JMO 2026-09-30: every rebuilt room started silent because the Mac's config.json still said true."""
+        self._write(cfg_home, {"version": 1, "muted": True, "default_muted": True, "mode": "queue"})
+        install._migrate_speak_by_default()
+        cfg = self._read(cfg_home)
+        assert cfg["muted"] is False and cfg["default_muted"] is False
+        assert cfg["version"] == install.CONFIG_VERSION
+        assert cfg["mode"] == "queue"  # nothing else touched
+        out = capsys.readouterr().out
+        assert "default_muted and muted" in out and "mute --all" in out
+
+    def test_version_key_missing_counts_as_version_1(self, cfg_home):
+        self._write(cfg_home, {"default_muted": True})
+        install._migrate_speak_by_default()
+        cfg = self._read(cfg_home)
+        assert cfg["default_muted"] is False and cfg["version"] == install.CONFIG_VERSION
+
+    def test_runs_once_so_a_later_mute_all_is_kept(self, cfg_home):
+        """A config already at the current version was written by this era's tooling; its true means true."""
+        self._write(cfg_home, {"version": install.CONFIG_VERSION, "muted": True, "default_muted": True})
+        install._migrate_speak_by_default()
+        cfg = self._read(cfg_home)
+        assert cfg["muted"] is True and cfg["default_muted"] is True
+
+    def test_sessions_muted_by_hand_stay_muted(self, cfg_home):
+        sd = cfg_home / "sessions.d"
+        sd.mkdir()
+        (sd / "quiet-room.json").write_text(json.dumps({"muted": True}))
+        self._write(cfg_home, {"version": 1, "muted": True, "default_muted": True})
+        install._migrate_speak_by_default()
+        assert json.loads((sd / "quiet-room.json").read_text()) == {"muted": True}
+
+    def test_no_config_file_is_a_no_op(self, cfg_home):
+        install._migrate_speak_by_default()
+        assert not (cfg_home / "config.json").exists()
+
+    def test_default_config_is_already_current(self):
+        assert install.DEFAULT_CONFIG["version"] == install.CONFIG_VERSION

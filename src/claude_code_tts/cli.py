@@ -2075,7 +2075,6 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
     # Detect session from transcript path
     session_id = os.environ.get("CLAUDE_TTS_SESSION", "")
     if not session_id:
-        import re
         m = re.search(r"/projects/([^/]+)/", transcript_path)
         if m:
             session_id = m.group(1)
