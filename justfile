@@ -66,14 +66,24 @@ test-audit *ARGS:
 # Voice signatures on the machine that owns the engines: baseline from the daemon's own speech
 # history, measure run-to-run spread, re-synthesize and compare (exit 1 on drift). Baseline
 # stays in ~/.claude-tts/signatures/, never in the repo, because it holds spoken text.
+# Plain python3 with src on the path: the package is stdlib-only, and `uv run` on a machine
+# whose uv config forbids source builds cannot build the project (and it recreates .venv in a
+# checkout another machine may share).
 voices-capture *ARGS:
-    uv run scripts/voice-signatures.py capture {{ARGS}}
+    PYTHONPATH=src python3 scripts/voice-signatures.py capture {{ARGS}}
 
 voices-spread *ARGS:
-    uv run scripts/voice-signatures.py spread {{ARGS}}
+    PYTHONPATH=src python3 scripts/voice-signatures.py spread {{ARGS}}
 
 voices-verify *ARGS:
-    uv run scripts/voice-signatures.py verify {{ARGS}}
+    PYTHONPATH=src python3 scripts/voice-signatures.py verify {{ARGS}}
+
+# Run any command against a throwaway HOME with src on the path. ~/.claude-tts is live daemon
+# state (in a sandbox, the host's): every ad-hoc script or repro that imports the package goes
+# through here. tests/conftest.py does the same for the suite; config.py refuses a pytest import
+# with any other HOME.
+playpen +CMD:
+    HOME="$(mktemp -d "${TMPDIR:-/tmp}/claude-tts-test-home-XXXXXX")" PYTHONPATH=src {{CMD}}
 
 # Point git at .githooks: pre-commit runs the fast gate, pre-push the full one
 hooks:

@@ -7,12 +7,30 @@ Handles the session resolution chain: session.d file > project_personas > global
 import json
 import logging
 import os
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from claude_code_tts.session import get_session_id
+
+# Everything under ~/.claude-tts is live daemon state, and in a sandbox that directory is the
+# host's, bind-mounted: a test that writes there pauses a real person's voice (2026-09-30, a
+# repro outside tests/ ran with the real HOME and held the queue for half an hour). tests/conftest
+# points HOME at a throwaway directory with this prefix; any other pytest import refuses to run.
+# `just playpen <cmd>` does the same for ad-hoc scripts. CLAUDE_TTS_ALLOW_REAL_HOME=1 opts out.
+PLAYPEN_HOME_PREFIX = "claude-tts-test-home-"
+if (
+    "pytest" in sys.modules
+    and PLAYPEN_HOME_PREFIX not in str(Path.home())
+    and not os.environ.get("CLAUDE_TTS_ALLOW_REAL_HOME")
+):
+    raise RuntimeError(
+        f"claude_code_tts imported under pytest with HOME={Path.home()}: tests must run in a "
+        f"playpen (HOME under a {PLAYPEN_HOME_PREFIX}* directory, see tests/conftest.py or "
+        "`just playpen`), or set CLAUDE_TTS_ALLOW_REAL_HOME=1 on purpose"
+    )
 
 logger = logging.getLogger("claude-tts")
 
