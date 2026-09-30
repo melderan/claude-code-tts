@@ -753,6 +753,96 @@ def _persona_vibe(voice: str) -> str:
     return _VOICE_VIBES.get(voice, voice)
 
 
+def cmd_voices(args: argparse.Namespace) -> None:
+    """Every provider, what it offers, what is installed, who uses it, and how to hear one.
+
+    JMO's question on 2026-09-29: how do friends find out what voices they can
+    choose from which providers? One answer, in one place.
+    """
+    import shutil
+
+    from claude_code_tts.config import MLX_VENV_DIR, SHERPA_MODELS_DIR, VOICES_DIR
+    from claude_code_tts.install import AVAILABLE_VOICES
+    from claude_code_tts.mlx_catalog import CATALOG
+
+    config = load_raw_config()
+    personas = config.get("personas", {})
+
+    def users(key: str, value: str) -> str:
+        names = sorted(n for n, pc in personas.items() if str(pc.get(key, "")) == value)
+        return f"    <- persona {', '.join(names)}" if names else ""
+
+    print("Voices by provider. Installed means it can play now; hear one with the command shown.")
+    print("Pick one for yourself: claude-tts persona add <name> ... --project   (see /tts-personas)")
+
+    # --- Piper ---
+    print()
+    print(f"Piper (always available; models in {VOICES_DIR})")
+    installed = sorted(VOICES_DIR.glob("*.onnx")) if VOICES_DIR.is_dir() else []
+    catalog = {name: (gender, quality, desc) for name, gender, quality, desc, _path in AVAILABLE_VOICES}
+    if not installed:
+        print("  no voices installed: claude-tts-install --voice en_US-hfc_male-medium")
+    for onnx in installed:
+        name = onnx.stem
+        speakers = ""
+        meta = onnx.with_suffix(".onnx.json")
+        try:
+            n = int(json.loads(meta.read_text()).get("num_speakers", 1)) if meta.is_file() else 1
+            if n > 1:
+                speakers = f", {n} speakers (claude-tts audition --voice {name} --speakers 20)"
+        except (OSError, ValueError):
+            pass
+        gender, quality, desc = catalog.get(name, ("", "", ""))
+        about = f"  {desc}" if desc else ""
+        print(f"  {name}{about}{speakers}{users('voice', name)}")
+    not_installed = [n for n in catalog if n not in {o.stem for o in installed}]
+    if not_installed:
+        print(f"  + {len(not_installed)} more in the catalog: claude-tts-install --voice <name>; names: {', '.join(not_installed[:6])}{', ...' if len(not_installed) > 6 else ''}")
+    print("  hear:  claude-tts audition            claude-tts speak --voice <name> \"hello\"")
+
+    # --- Kokoro via swift-kokoro ---
+    print()
+    if shutil.which("swift-kokoro"):
+        try:
+            out = subprocess.run(["swift-kokoro", "--list-voices"], capture_output=True, text=True, timeout=15).stdout
+            names = [line.strip() for line in out.splitlines() if line.strip()]
+        except (subprocess.SubprocessError, OSError):
+            names = []
+        print(f"Kokoro via swift-kokoro ({len(names)} voices; persona key voice_kokoro, blends via voice_kokoro_blend)")
+        for v in names:
+            print(f"  {v}{users('voice_kokoro', v)}")
+        print("  hear:  claude-tts audition --kokoro [--filter am_,bf_]")
+    else:
+        print("Kokoro via swift-kokoro: not installed (optional; the mlx backend below runs Kokoro on Apple silicon)")
+
+    # --- sherpa-onnx ---
+    print()
+    sherpa_ready = (SHERPA_MODELS_DIR.parent / "venvs" / "sherpa" / "bin" / "python").is_file()
+    models = sorted(d for d in SHERPA_MODELS_DIR.iterdir() if d.is_dir()) if SHERPA_MODELS_DIR.is_dir() else []
+    print(f"sherpa-onnx ({'venv ready' if sherpa_ready else 'not enabled: claude-tts-install --enable-sherpa'}; models in {SHERPA_MODELS_DIR})")
+    if not models:
+        print("  no models installed: claude-tts sherpa list   (shows what can be fetched)")
+    for d in models:
+        print(f"  {d.name}{users('voice_sherpa', d.name)}")
+    if models:
+        print("  hear:  claude-tts speak --voice-sherpa <model> [--speaker-sherpa N] \"hello\"")
+
+    # --- mlx-audio ---
+    print()
+    mlx_ready = (MLX_VENV_DIR / "bin" / "python").is_file()
+    print(f"mlx-audio ({'venv ready' if mlx_ready else 'not enabled: claude-tts-install --enable-mlx (Apple silicon)'})")
+    for entry in CATALOG.values():
+        cached = _hf_model_cached(entry["hf_repo"])
+        state = "cached" if cached else f"not fetched: claude-tts mlx pull {entry['id']}"
+        voices = f"{len(entry['voices'])} named voices" if entry["voices"] else entry["voices_hint"]
+        print(f"  {entry['id']}  {entry['hf_repo']}  [{state}]  {voices}, {entry['license_weights']}{users('voice_mlx', entry['hf_repo'])}")
+    print("  hear:  claude-tts audition --mlx kokoro [--filter bm_,am_]     claude-tts speak --voice-mlx kokoro --speaker-mlx af_heart \"hello\"")
+    print("  more:  claude-tts mlx list-available   claude-tts mlx status")
+
+    print()
+    print("Notes on how they sound: docs/voice-notes.md in the repo.")
+
+
 def cmd_personas(args: argparse.Namespace) -> None:
     """Guide for sibling Claude sessions choosing their own voice persona.
 
@@ -3147,6 +3237,10 @@ def main(argv: list[str] | None = None) -> None:
     p = subparsers.add_parser("mute", help="Mute TTS for this session")
     p.add_argument("--all", action="store_true", help="Mute all sessions globally")
     p.set_defaults(func=cmd_mute)
+
+    # --- voices ---
+    p = subparsers.add_parser("voices", help="Every provider's voices: installed, available, who uses them, how to hear one")
+    p.set_defaults(func=cmd_voices)
 
     # --- unmute ---
     p = subparsers.add_parser("unmute", help="Unmute TTS for this session")

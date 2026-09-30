@@ -99,6 +99,7 @@ just release --check        # preflight and gate only; prints the plan
 | `/tts-intermediate [on\|off]` | Toggle intermediate narration (between tool calls) |
 | `/tts-discover` | Auto-suggest persona based on repo context |
 | `/tts-personas` | Sibling-Claude voice picker guide (who do you want to be?) |
+| `/tts-voices` | Every provider's voices: installed, available, who uses them, how to hear one |
 | `/tts-release` | Push a release and upgrade local installation |
 
 ## Standalone Tools

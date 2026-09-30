@@ -1,6 +1,7 @@
 """Tests for cli.py — command handler integration tests."""
 
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -434,3 +435,35 @@ class TestSpeechFailureExplained:
         with patch.object(audio, "_LAST_ERROR", ""):
             msg = cli._explain_speech_failure()
         assert "no backend produced audio" in msg and "debug.log" in msg
+
+
+class TestVoices:
+    """`claude-tts voices`: one answer to "what voices can I choose, from which providers?"."""
+
+    def test_lists_every_provider_with_state_and_users(self, tts_home, patched_env, capsys, tmp_path, monkeypatch):
+        import claude_code_tts.config as cfg_mod
+        voices_dir = tmp_path / "piper-voices"
+        voices_dir.mkdir()
+        (voices_dir / "en_US-hfc_male-medium.onnx").write_bytes(b"x")
+        (voices_dir / "en_US-libritts_r-medium.onnx").write_bytes(b"x")
+        (voices_dir / "en_US-libritts_r-medium.onnx.json").write_text(json.dumps({"num_speakers": 904}))
+        monkeypatch.setattr(cfg_mod, "VOICES_DIR", voices_dir)
+        monkeypatch.setattr(cfg_mod, "SHERPA_MODELS_DIR", tmp_path / "sherpa-models")
+        monkeypatch.setattr(cfg_mod, "MLX_VENV_DIR", tmp_path / "venvs" / "mlx")
+        with patch("shutil.which", return_value=None), \
+             patch("claude_code_tts.cli._hf_model_cached", return_value=False):
+            main(["voices"])
+        out = capsys.readouterr().out
+        assert "Piper" in out and "en_US-hfc_male-medium" in out
+        assert "<- persona claude-prime" in out                       # who uses it
+        assert "904 speakers" in out and "--speakers 20" in out        # multi-speaker hint
+        assert "swift-kokoro: not installed" in out
+        assert "sherpa-onnx (not enabled" in out
+        assert "mlx-audio (not enabled" in out and "not fetched: claude-tts mlx pull kokoro" in out
+        assert "claude-tts audition --mlx kokoro" in out               # how to hear one
+        assert "docs/voice-notes.md" in out
+
+    def test_slash_command_is_installed(self):
+        from claude_code_tts.install import MANIFEST
+        assert "tts-voices.md" in MANIFEST["commands"]
+        assert (Path(__file__).parent.parent / "commands" / "tts-voices.md").is_file()

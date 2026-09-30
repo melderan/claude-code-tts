@@ -77,6 +77,7 @@ After installation, just use Claude Code. Every response gets spoken, in new ses
 | Command | Description |
 |---------|-------------|
 | `/tts-unmute` | Enable voice for this session |
+| `/tts-voices` | Every provider's voices: installed, available, who uses them, how to hear one |
 | `/tts-mute` | Silence voice for this session |
 | `/tts-status` | Show session status (mute, persona, mode, daemon, mic-aware) |
 | `/tts-speed [value]` | Show or set playback speed (0.5 - 4.0) for this project; `claude-tts speed --default 1.0` changes the persona default |
