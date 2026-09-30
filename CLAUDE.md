@@ -256,7 +256,14 @@ same. `tests/signatures/pipeline/` holds committed signatures of what the speech
 from a fake engine (regenerate on purpose with `UPDATE_SIGNATURES=1`, read the diff); on the
 machine with the engines, `just voices-capture`, `voices-spread` and `voices-verify` baseline the
 real voices from the daemon's own speech history and fail on drift. docs/redesign-10.md is the
-10.x plan and the list of open decisions. `just up` is the operator side: it rebuilds, installs,
+10.x plan and the list of open decisions. 
+
+Recipes the operator runs on the daemon's machine (`up`, `timeline`, `release`, `voices-*`,
+`playpen`) use only `python3` and this checkout on `PYTHONPATH`, never `uv run` or `.venv`: a uv
+config that forbids source builds cannot build the project, and `uv run` recreates `.venv` inside a
+checkout a sandbox may share (both happened on 2026-09-30). `tests/test_justfile_host_recipes.py`
+enforces the list. A recipe the room cannot execute is not tested until the operator has run it;
+hand over the `--help` form first. `just up` is the operator side: it rebuilds, installs,
 restarts the daemon, verifies the heartbeat, writes the full output of the run to
 `.logs/just/up-<time>-<git ref>.log`, and appends one line (time, version, git ref, branch, daemon,
 bridge and mic state, run file) to `.logs/just/timeline.log`, which `just timeline` prints. The
