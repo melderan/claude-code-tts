@@ -493,3 +493,46 @@ class TestVoices:
         from claude_code_tts.install import MANIFEST
         assert "tts-voices.md" in MANIFEST["commands"]
         assert (Path(__file__).parent.parent / "commands" / "tts-voices.md").is_file()
+
+
+class TestInheritSessionSettings:
+    """A session id from CLAUDE_TTS_SESSION inherits its directory's settings once (JMO 2026-09-30:
+    'oh no your voice isn't right' after every rebuilt room came up as claude-prime)."""
+
+    TRANSCRIPT = "/home/x/.claude/projects/-Users-dev-repo/uuid.jsonl"
+
+    def _sd(self, tts_home):
+        return tts_home / ".claude-tts" / "sessions.d"
+
+    def test_copies_the_directory_session_file(self, tts_home, patched_env):
+        from claude_code_tts.cli import _inherit_session_settings
+        sd = self._sd(tts_home)
+        (sd / "-Users-dev-repo.json").write_text(json.dumps({"muted": False, "persona": "claude-chill", "speed": 1.8}))
+        assert _inherit_session_settings("room-a", self.TRANSCRIPT) is True
+        assert json.loads((sd / "room-a.json").read_text()) == {"muted": False, "persona": "claude-chill", "speed": 1.8}
+
+    def test_project_persona_pin_becomes_the_session_persona(self, tts_home, patched_env):
+        from claude_code_tts.cli import _inherit_session_settings
+        cfg_path = tts_home / ".claude-tts" / "config.json"
+        config = json.loads(cfg_path.read_text())
+        config["project_personas"] = {"-Users-dev-repo": "claude-chill"}
+        cfg_path.write_text(json.dumps(config))
+        assert _inherit_session_settings("room-a", self.TRANSCRIPT) is True
+        assert json.loads((self._sd(tts_home) / "room-a.json").read_text()) == {"persona": "claude-chill"}
+
+    def test_existing_session_file_is_never_touched(self, tts_home, patched_env):
+        from claude_code_tts.cli import _inherit_session_settings
+        sd = self._sd(tts_home)
+        (sd / "-Users-dev-repo.json").write_text(json.dumps({"persona": "claude-chill"}))
+        (sd / "room-a.json").write_text(json.dumps({"persona": "claude-prime"}))
+        assert _inherit_session_settings("room-a", self.TRANSCRIPT) is False
+        assert json.loads((sd / "room-a.json").read_text()) == {"persona": "claude-prime"}
+
+    def test_nothing_to_inherit_writes_nothing(self, tts_home, patched_env):
+        from claude_code_tts.cli import _inherit_session_settings
+        assert _inherit_session_settings("room-a", self.TRANSCRIPT) is False
+        assert not (self._sd(tts_home) / "room-a.json").exists()
+
+    def test_same_id_from_env_and_path_is_a_no_op(self, tts_home, patched_env):
+        from claude_code_tts.cli import _inherit_session_settings
+        assert _inherit_session_settings("-Users-dev-repo", self.TRANSCRIPT) is False

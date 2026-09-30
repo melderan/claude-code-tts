@@ -83,6 +83,7 @@ just release --check        # preflight and gate only; prints the plan
 - `default_muted: false` - new sessions speak; `claude-tts mute --all` sets it true and mutes every session, `unmute --all` reverts
 - Use `/tts-mute` and `/tts-unmute` for one session
 - Each session can have its own persona, speed, and mute state
+- When `CLAUDE_TTS_SESSION` names a session the hook has not seen, it inherits the directory-keyed session's persona, speed and mute once (9.26.0), so a rebuilt room keeps its voice
 
 ## Commands
 

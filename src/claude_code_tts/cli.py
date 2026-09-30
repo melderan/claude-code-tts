@@ -32,6 +32,7 @@ from claude_code_tts.config import (
     load_raw_config,
     save_raw_config,
     session_del,
+    session_file,
     session_read,
     session_set,
 )
@@ -2038,6 +2039,34 @@ def extract_pai_summary(text: str) -> str | None:
     return summary if summary else None
 
 
+def _inherit_session_settings(session_id: str, transcript_path: str) -> bool:
+    """First sight of a session named by CLAUDE_TTS_SESSION: copy what its directory already chose.
+
+    Sessions were keyed by Claude Code's project folder until the claude-house kit started exporting
+    the sandbox name (2026-09-30). The persona, speed and mute a room had picked stayed under the old
+    key, so every rebuilt room came up as claude-prime and JMO had to set each one again. When the
+    new key has no session file yet, the directory-keyed session file is copied to it, and a
+    `project_personas` pin for that directory becomes the session's persona. Runs once per new key,
+    and never touches an existing session file. Returns True when something was inherited.
+    """
+    if session_file(session_id).exists():
+        return False
+    m = re.search(r"/projects/([^/]+)/", transcript_path)
+    if not m or m.group(1) == session_id:
+        return False
+    project_id = m.group(1)
+    inherited = dict(session_read(project_id))
+    if "persona" not in inherited:
+        pin = load_raw_config().get("project_personas", {}).get(project_id)
+        if pin:
+            inherited["persona"] = pin
+    if not inherited:
+        return False
+    atomic_write_json(session_file(session_id), inherited)
+    debug(f"session {session_id}: inherited {', '.join(sorted(inherited))} from {project_id}")
+    return True
+
+
 def _speak_from_hook(args: argparse.Namespace) -> None:
     """Handle --from-hook mode: read hook JSON from stdin, process transcript."""
     from claude_code_tts.audio import speak
@@ -2070,7 +2099,9 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
 
     # Detect session from transcript path
     session_id = os.environ.get("CLAUDE_TTS_SESSION", "")
-    if not session_id:
+    if session_id:
+        _inherit_session_settings(session_id, transcript_path)
+    else:
         m = re.search(r"/projects/([^/]+)/", transcript_path)
         if m:
             session_id = m.group(1)
