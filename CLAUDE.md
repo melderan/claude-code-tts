@@ -155,6 +155,7 @@ scripts/
   check-version.sh         # Version consistency checker
   up.py                    # `just up`: rebuild, install, restart, verify, log to .logs/just/
   gate.py                  # `just gate` and the git hooks: lint, mypy, ty, version, tests [, build]
+  test-audit.py            # `just test-audit`: per-test mutation audit, which tests would notice a change
   build-check.sh           # `just build`: wheel + cold-install proof
   tts-builder.py           # Voice builder TUI (Textual, standalone)
 docs/
@@ -245,7 +246,10 @@ pyproject reads it at build time (hatch dynamic version) and the installer impor
 check, tests, wheel build with a cold install. `just gate` runs the same through `scripts/gate.py` with
 real exit codes, and `just hooks` installs it as the pre-commit (fast) and pre-push (full) hook. Run
 `just hooks` once per clone. Never judge a check through a pipe (`pytest | tail`): the pipe's exit
-code wins and a failure disappears, which is how a flaky test once reached a signed commit. `just up` is the operator side: it rebuilds, installs,
+code wins and a failure disappears, which is how a flaky test once reached a signed commit. `just test-audit` answers a different question: which tests
+would notice a one-line change to the source. It mutates every covered line and runs each mutant
+against the tests that cover it; the tests that never kill anything are listed for a reader to
+judge (9.32.2 pruned 42 that re-implemented the logic they claimed to test). `just up` is the operator side: it rebuilds, installs,
 restarts the daemon, verifies the heartbeat, writes the full output of the run to
 `.logs/just/up-<time>-<git ref>.log`, and appends one line (time, version, git ref, branch, daemon,
 bridge and mic state, run file) to `.logs/just/timeline.log`, which `just timeline` prints. The

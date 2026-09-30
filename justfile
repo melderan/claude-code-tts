@@ -58,6 +58,11 @@ gate FULL="":
 private-sync:
     scripts/private-words-sync.py
 
+# Which tests would notice a one-line change to the source: per-test mutation audit, lists to read
+# in .logs/test-audit/<time>/report.txt. `just test-audit -k filter` for a subset, --workers N
+test-audit *ARGS:
+    uv run --with pytest --with pytest-cov scripts/test-audit.py {{ARGS}}
+
 # Point git at .githooks: pre-commit runs the fast gate, pre-push the full one
 hooks:
     git config core.hooksPath .githooks
