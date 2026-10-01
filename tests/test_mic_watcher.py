@@ -34,6 +34,16 @@ class TestRegexPatterns:
         # This is the secondary "started" line — we match on "binding transcribe" specifically
         assert not _RE_RECORDING_START.search(line)
 
+    def test_cancel_counts_as_stop(self):
+        """Escape during a dictation: Handy logs the cancellation, never a stop line."""
+        line = "[2026-09-30][19:19:12][handy_app_lib::utils][INFO] Initiating operation cancellation..."
+        assert _RE_RECORDING_STOP.search(line)
+        assert not _RE_RECORDING_START.search(line)
+
+    def test_cancel_completed_line_is_not_a_second_stop(self):
+        line = "[2026-09-30][19:19:12][handy_app_lib::utils][INFO] Operation cancellation completed - returned to idle state"
+        assert not _RE_RECORDING_STOP.search(line)
+
     def test_stop_pattern_no_false_positive(self):
         line = "[2026-03-15][10:55:33][handy_app_lib::actions][DEBUG] Recording completed"
         assert not _RE_RECORDING_STOP.search(line)
@@ -193,6 +203,17 @@ class TestCheckInitialMicState:
         log_file.write_text(
             "[10:55:33][handy_app_lib::managers::audio][DEBUG] Recording started for binding transcribe\n"
             "[10:55:52][handy_app_lib::actions][DEBUG] Recording stopped and samples retrieved in 35ms\n"
+        )
+        w = self._make_watcher(log_file, monkeypatch)
+        assert w._check_initial_mic_state() is False
+
+    def test_start_then_cancel_is_not_recording(self, tmp_path, monkeypatch):
+        """A daemon started after a cancelled dictation must not pause on the orphan start."""
+        log_file = tmp_path / "handy.log"
+        log_file.write_text(
+            "[19:18:59][handy_app_lib::actions][DEBUG] TranscribeAction::start called for binding: transcribe\n"
+            "[19:19:12][handy_app_lib::utils][INFO] Initiating operation cancellation...\n"
+            "[19:19:12][handy_app_lib::utils][INFO] Operation cancellation completed - returned to idle state\n"
         )
         w = self._make_watcher(log_file, monkeypatch)
         assert w._check_initial_mic_state() is False

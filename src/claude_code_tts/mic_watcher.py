@@ -37,6 +37,12 @@ _RE_RECORDING_START = re.compile(
 # A recording that never began ends the same way: Handy logs "start called" and then
 # returns early (no microphone, no model) without ever logging a stop. Through 9.36.5
 # that left the queue paused until the daemon was restarted (2026-09-30, six minutes).
+# A cancelled recording (the cancel shortcut, Escape by default) never reaches
+# TranscribeAction::stop: CancelAction calls utils::cancel_current_operation, which logs
+# "Initiating operation cancellation..." at INFO and discards the samples, so no stop line
+# and no WAV follow (Handy src-tauri/src/utils.rs, read 2026-10-01). Through 9.37.0 the
+# watcher took that for a recording still open and held the queue until the cap or a restart,
+# and the restarted daemon's tail scan re-read the same start and paused again (19:18:59).
 _RE_RECORDING_STOP = re.compile(
     r"TranscribeAction::stop called for binding"
     r"|Recording stopped and samples retrieved"
@@ -44,6 +50,7 @@ _RE_RECORDING_STOP = re.compile(
     r"|No samples retrieved from recording stop"
     r"|Failed to start recording"
     r"|Not starting recording"
+    r"|Initiating operation cancellation"
 )
 
 # Handy's log_level setting: string since 0.7, numeric 1-5 before that
