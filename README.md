@@ -135,7 +135,7 @@ Add to `~/.claude-tts/config.json`:
 {
   "mic_aware_pause": true,
   "mic_resume_delay_ms": 1500,
-  "mic_pause_max_s": 180
+  "mic_pause_max_s": 600
 }
 ```
 
@@ -312,7 +312,7 @@ reach it (a userscript can; a script inline in a CSP-locked page cannot).
   "default_muted": false,
   "mic_aware_pause": true,
   "mic_resume_delay_ms": 1500,
-  "mic_pause_max_s": 180,
+  "mic_pause_max_s": 600,
   "speech_unit": "message",
   "active_persona": "claude-prime",
   "queue": {

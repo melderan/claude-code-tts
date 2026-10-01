@@ -321,7 +321,22 @@ def rewind_amount(speed: float, speed_method: str) -> float:
 # A mic hold longer than this is a recording whose end the watcher never saw (Handy has
 # paths that log no stop line, and there may be more). "mic_pause_max_s" in config.json
 # overrides it; 0 disables the limit. A person's pause is never limited.
-MIC_PAUSE_MAX_S = 180.0
+# 180 through 9.37.1 was too short: of 341 mic holds in the daemon log to 2026-09-30, seven
+# ran past 180 s (longest 450 s), and on 09-30 alone three real dictations of 3 to 4 minutes
+# were cut by the cap and a brother spoke over JMO each time. A stuck hold is visible (the
+# "Still paused" line below, every minute) and the hotkey ends it; being talked over is not.
+MIC_PAUSE_MAX_S = 600.0
+
+# While the queue is held, say so this often: who holds it, for how long, how much waits.
+# A hold nobody can see is how 2026-09-30 14:54 to 16:58 went by with 60 messages waiting.
+HOLD_NOTICE_EVERY_S = 60.0
+
+
+def hold_notices_due(held_s: float, every_s: float = HOLD_NOTICE_EVERY_S) -> int:
+    """How many "still paused" lines a hold of held_s seconds should have produced so far."""
+    if every_s <= 0 or held_s <= 0:
+        return 0
+    return int(held_s // every_s)
 
 
 def mic_hold_expired(state: dict, held_s: float, max_s: float) -> bool:
@@ -1492,6 +1507,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             ledger.mark(True)
         log("Started paused; holding the queue since the pause")
     last_reap = time.monotonic()
+    hold_notices = 0  # "Still paused" lines logged for the current hold
     prefetch = Prefetch()
     while not _shutdown_requested:
         try:
@@ -1509,7 +1525,15 @@ def daemon_loop(lockpick: bool = False) -> None:
             if state.get("paused"):
                 # Paused holds the queue: nothing expires, nothing is trimmed.
                 if not was_paused:
+                    hold_notices = 0
                     log(f"Paused by {state.get('paused_by') or 'user'}; holding the queue")
+                due = hold_notices_due(ledger.open_for(), HOLD_NOTICE_EVERY_S)
+                if due > hold_notices:
+                    hold_notices = due
+                    log(
+                        f"Still paused by {state.get('paused_by') or 'user'} for "
+                        f"{ledger.open_for():.0f}s, {len(get_queue_messages())} message(s) waiting"
+                    )
                 if mic_hold_expired(state, ledger.open_for(), mic_pause_max_s):
                     log(
                         f"Mic hold of {ledger.open_for():.0f}s passed mic_pause_max_s={mic_pause_max_s:.0f}"

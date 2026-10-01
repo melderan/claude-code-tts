@@ -245,7 +245,26 @@ class TestMicHoldLimit:
     def test_mic_hold_expired(self, state, held, max_s, expect):
         assert d.mic_hold_expired(state, held, max_s) is expect
 
-    def test_loop_releases_a_mic_hold_nobody_ends(self, tmp_path):
+    def test_default_cap_outlasts_a_long_dictation(self):
+        """Three 3-to-4-minute dictations were cut by 180 on 2026-09-30; the longest seen is 450 s."""
+        assert d.MIC_PAUSE_MAX_S >= 600
+
+    @pytest.mark.parametrize(
+        ("held", "every", "expect"),
+        [
+            (0.0, 60.0, 0),
+            (59.9, 60.0, 0),
+            (60.0, 60.0, 1),
+            (185.0, 60.0, 3),
+            (185.0, 0.0, 0),
+            (-5.0, 60.0, 0),
+        ],
+    )
+    def test_hold_notices_due(self, held, every, expect):
+        assert d.hold_notices_due(held, every) == expect
+
+    def _loop_harness(self, tmp_path, raw_config):
+        """State dir, queue dir, the texts spoken, and the patches that run daemon_loop on them."""
         state_dir = tmp_path / ".claude-tts"
         state_dir.mkdir()
         queue_dir = state_dir / "queue"
@@ -294,8 +313,12 @@ class TestMicHoldLimit:
                     "idle_poll_ms": 20,
                 },
             ),
-            patch.object(d, "load_raw_config", return_value={"mic_pause_max_s": 0.3}),
+            patch.object(d, "load_raw_config", return_value=raw_config),
         ]
+        return state_dir, queue_dir, spoken, patches
+
+    def test_loop_releases_a_mic_hold_nobody_ends(self, tmp_path):
+        state_dir, queue_dir, spoken, patches = self._loop_harness(tmp_path, {"mic_pause_max_s": 0.3})
         for p in patches:
             p.start()
         try:
@@ -334,3 +357,47 @@ class TestMicHoldLimit:
         log = (state_dir / "daemon.log").read_text()
         assert "passed mic_pause_max_s=0" in log and "resuming" in log
         assert json.loads((state_dir / "playback.json").read_text())["paused"] is False
+
+    def test_loop_says_still_paused_every_interval(self, tmp_path):
+        """A hold nobody can see is how 60 messages waited two hours on 2026-09-30."""
+        state_dir, queue_dir, spoken, patches = self._loop_harness(tmp_path, {})
+        patches.append(patch.object(d, "HOLD_NOTICE_EVERY_S", 0.1))
+        for p in patches:
+            p.start()
+        try:
+            write_playback_state(paused=False, paused_by=None, audio_pid=None, current_message=None)
+
+            def run():
+                d._shutdown_requested = False
+                d._daemon_mode = True
+                d.daemon_loop()
+
+            runner = threading.Thread(target=run, daemon=True)
+            runner.start()
+            for _ in range(200):
+                if (state_dir / "daemon.heartbeat").exists():
+                    break
+                time.sleep(0.025)
+            assert (state_dir / "daemon.heartbeat").exists(), "loop never reached its idle pass"
+            time.sleep(0.1)
+            enqueue(queue_dir, "waits through the hold", age_s=0)
+            write_playback_state(paused=True, paused_by="user")
+            time.sleep(0.45)
+            assert spoken == [], "held: nothing may play while paused"
+            write_playback_state(paused=False, paused_by=None)
+            for _ in range(100):
+                if spoken:
+                    break
+                time.sleep(0.05)
+            d._shutdown_requested = True
+            runner.join(timeout=5)
+        finally:
+            d._shutdown_requested = False
+            for p in patches:
+                p.stop()
+        log = (state_dir / "daemon.log").read_text()
+        notices = [ln for ln in log.splitlines() if "Still paused by user for" in ln]
+        assert len(notices) >= 2, log
+        assert "1 message(s) waiting" in notices[0]
+        assert "Resumed with" in log
+        assert spoken == ["waits through the hold"]
