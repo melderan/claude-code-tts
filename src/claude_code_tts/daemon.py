@@ -1710,6 +1710,13 @@ def daemon_loop(lockpick: bool = False) -> None:
                 )
                 continue
 
+            # The pause check at the top of this pass came before this message
+            # existed. The watcher's hold and a hook's message land in the same
+            # instant (2026-10-01: a message spoke 0.2 s into a fresh mic pause),
+            # so look again now that the message is picked; the next pass holds it.
+            if read_playback_state().get("paused"):
+                continue
+
             # The message after the one that just played may be synthesized already.
             taken = prefetch.take(msg_file)
             if taken is not None:
@@ -1788,6 +1795,19 @@ def daemon_loop(lockpick: bool = False) -> None:
                 continue
             if marks is not None:
                 JOBS.update(job_id, marks=marks)
+
+            # Synthesis took time, and a pause that landed meanwhile holds the
+            # message before any audio starts, the way a pause during playback
+            # does: it comes back as the interrupted message at 0.0 s. Checked
+            # before the speaker transition, which speaks too.
+            if read_playback_state().get("paused"):
+                audio_file.unlink(missing_ok=True)
+                current_msg_info["audio_position"] = 0.0
+                write_playback_state(current_message=current_msg_info)
+                JOBS.update(job_id, state="paused", position_ms=0)
+                log(f"Paused before playback of {project}; will resume on unpause")
+                msg_file.unlink(missing_ok=True)
+                continue
 
             # Speaker transition
             if last_speaker and last_speaker != speaker_key:
