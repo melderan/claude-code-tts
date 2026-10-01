@@ -111,3 +111,19 @@ class TestWriteSettings:
         path = tmp_path / "deep" / "settings.json"
         write_settings({"a": 1}, path)
         assert json.loads(path.read_text()) == {"a": 1}
+
+
+def test_rewriting_settings_under_a_running_session_is_said_out_loud():
+    """2026-10-01: the installer rewrote settings.json while a session was open; that session
+    registered the hooks twice and spoke every reply twice until restarted. The notice names
+    the consequence and the remedy; the install flow prints it whenever it writes an existing file."""
+    import inspect
+
+    from claude_code_tts import install
+
+    assert "spoken twice" in install.SETTINGS_REWRITE_NOTICE
+    assert "fresh session" in install.SETTINGS_REWRITE_NOTICE
+    src = inspect.getsource(install)
+    # Both branches that rewrite an existing settings file say it; creating a new file does not.
+    assert src.count("warn(SETTINGS_REWRITE_NOTICE)") == 2
+

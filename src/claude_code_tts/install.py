@@ -269,6 +269,13 @@ def remove_tts_hooks(settings: dict) -> int:
     return removed
 
 
+SETTINGS_REWRITE_NOTICE = (
+    "settings.json changed under running Claude Code sessions: a session re-reads it and may "
+    "register these hooks a second time, so every reply is spoken twice until that session is "
+    "restarted (seen 2026-10-01). Start a fresh session in each project that is open."
+)
+
+
 def write_settings(settings: dict, path: Path | None = None) -> None:
     """Write settings.json atomically, keeping non-ASCII and the file mode."""
     path = path or SETTINGS_FILE
@@ -1131,6 +1138,7 @@ def do_install(
             if ensure_tts_hooks(settings):
                 write_settings(settings)
                 success("Settings updated (speech hooks registered and marked async)")
+                warn(SETTINGS_REWRITE_NOTICE)
             else:
                 info("Upgrade mode: keeping existing settings.json configuration")
                 success("Settings preserved")
@@ -1147,6 +1155,7 @@ def do_install(
             if ensure_tts_hooks(settings):
                 write_settings(settings)
                 success("TTS hooks added to settings.json (preserving existing hooks)")
+                warn(SETTINGS_REWRITE_NOTICE)
             else:
                 success("TTS hooks already configured in settings.json")
     else:

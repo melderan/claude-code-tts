@@ -783,6 +783,46 @@ class TestStopSpeaksFromItsInput:
         cli._take_landed(state, lock, pending, 100, advance_past=True)
         assert state.read_text() == "930"
 
+    def test_twin_stops_split_across_input_and_file_speak_once_input_first(self, tmp_path, fake_state_dir):
+        """14:19:50, 2026-10-01: the reply landed between the twins' reads. One spoke it from the
+        input, the other found it in the file and spoke it again. One claim decides for both."""
+        transcript = self._turn_in_progress(tmp_path, "uuid-split-a")
+        final = "the reply that landed between the twins"
+        assert _run_hook(transcript, "stop", last_assistant_message=final) == final
+        _append(transcript, [_assistant_msg("m2", final)])
+        assert _run_hook(transcript, "stop", last_assistant_message=final) is None
+
+    def test_twin_stops_split_across_input_and_file_speak_once_file_first(self, tmp_path, fake_state_dir):
+        transcript = self._turn_in_progress(tmp_path, "uuid-split-b")
+        final = "the reply that landed between the twins"
+        _append(transcript, [_assistant_msg("m2", final)])
+        assert _run_hook(transcript, "stop", last_assistant_message=final) == final
+        # The twin that read before the line landed: same input, nothing new in its view of the file
+        # is simulated by a transcript state the first hook already covered; it must not speak.
+        assert _run_hook(transcript, "stop", last_assistant_message=final) is None
+        # And a later hook does not find the line again.
+        _append(transcript, [_user("next"), _tool_use("m3"), _tool_result()])
+        assert _run_hook(transcript, "post_tool_use") is None
+
+    def test_a_twin_that_spoke_from_the_file_blocks_the_input_twin(self, tmp_path, fake_state_dir, monkeypatch):
+        """The file-path twin runs first and claims; the input-path twin, scanning a file where the
+        line is missing, must lose the claim. Simulated by hiding the landed line from the second scan."""
+        from claude_code_tts import cli
+
+        transcript = self._turn_in_progress(tmp_path, "uuid-split-c")
+        final = "the reply that landed between the twins"
+        _append(transcript, [_assistant_msg("m2", final)])
+        assert _run_hook(transcript, "stop", last_assistant_message=final) == final
+        real_scan = cli._scan_transcript
+
+        def scan_without_the_landed_line(path, watermark, hook_type):
+            found, n = real_scan(path, max(watermark - 1, 0), hook_type)
+            return [e for e in found if e[2] != final], n
+
+        monkeypatch.setattr("claude_code_tts.cli._scan_transcript", scan_without_the_landed_line)
+        monkeypatch.setattr("claude_code_tts.cli._read_watermark", lambda *a: 2)
+        assert _run_hook(transcript, "stop", last_assistant_message=final) is None
+
     def test_first_stop_of_a_transcript_speaks_the_input_not_an_older_text(self, tmp_path, fake_state_dir):
         transcript = tmp_path / "projects" / "-Users-dev" / "uuid-O.jsonl"
         _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "prose before the tool call"),

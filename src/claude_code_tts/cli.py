@@ -2303,14 +2303,22 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
                 break
     current_lines = max(current_lines, scanned_lines)
     if from_input:
-        # Two Stop hooks for one event (seen 2026-10-01, three of thirteen in one
-        # room) carry the same input; the record is the claim, taken under the
-        # watermark lock, so exactly one of them speaks it.
+        # Two Stop hooks for one event (every Stop of a session whose settings
+        # were rewritten while it ran, 2026-10-01) carry the same input; the
+        # record is the claim, taken under the watermark lock, so exactly one
+        # of them speaks it.
         if _claim_input(pending_file, lock_dir, input_text):
             speakable.append((current_lines, "input", input_text))
             debug(f"stop: response from the hook input ({len(input_text)} chars), not in the transcript yet")
         else:
             debug("stop: another Stop hook already spoke this input, skipping it")
+    elif input_text and landed_key is None and speakable and _same_text(speakable[-1][2], input_text):
+        # The response landed between the twins' reads: this one found it in the
+        # file while its twin spoke it from the input (14:19:50, heard twice).
+        # The same claim decides, whichever path a twin took.
+        if not _claim_input(pending_file, lock_dir, input_text):
+            debug("stop: another Stop hook already spoke this response from its input, skipping the landed line")
+            speakable.pop()
     if hook_type == "stop":
         # A PostToolUse that lagged can have claimed and spoken an intermediate
         # after this hook read the watermark; read-compare-write under the lock,
