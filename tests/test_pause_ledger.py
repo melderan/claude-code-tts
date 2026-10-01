@@ -380,8 +380,10 @@ class TestMicHoldLimit:
                 time.sleep(0.025)
             assert (state_dir / "daemon.heartbeat").exists(), "loop never reached its idle pass"
             time.sleep(0.1)
-            enqueue(queue_dir, "waits through the hold", age_s=0)
+            # Pause first, then enqueue: the other order raced the idle poll (20 ms) once.
             write_playback_state(paused=True, paused_by="user")
+            time.sleep(0.05)
+            enqueue(queue_dir, "waits through the hold", age_s=0)
             time.sleep(0.45)
             assert spoken == [], "held: nothing may play while paused"
             write_playback_state(paused=False, paused_by=None)

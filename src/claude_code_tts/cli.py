@@ -1064,7 +1064,7 @@ def cmd_discover(args: argparse.Namespace) -> None:
     print("")
 
     for fname in [
-        "CLAUDE.md", "README.md", "README", "package.json", "pyproject.toml",
+        "HOUSE.md", "CLAUDE.md", "AGENTS.md", "README.md", "README", "package.json", "pyproject.toml",
         "Cargo.toml", "go.mod", "build.gradle", "pom.xml", "Makefile",
     ]:
         p = Path(fname)
