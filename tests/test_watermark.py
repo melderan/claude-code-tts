@@ -479,3 +479,64 @@ class TestSessionFromEnvOrPath:
         _write_transcript(transcript, [_user("go"), _assistant("\U0001F5E3 Lode: Summary spoken either way.")])
         spoken = _run_hook(transcript, "stop")
         assert spoken is not None and spoken.endswith("Summary spoken either way.")
+
+
+def _append(path: Path, lines: list[dict]) -> None:
+    with open(path, "a") as f:
+        for line in lines:
+            f.write(json.dumps(line) + "\n")
+
+
+class TestStopWaitsForTheResponse:
+    """Claude Code 2.1.286 (2026-09-30) writes the response in the same second it fires Stop,
+    usually after the hook has read the transcript. A Stop that finds the turn's tool lines
+    but no text waits for the text instead of moving the watermark past them, which made
+    every room speak each answer one message late."""
+
+    def test_stop_speaks_a_response_that_lands_after_it_fired(self, tmp_path, fake_state_dir, monkeypatch):
+        transcript = tmp_path / "projects" / "-Users-dev" / "uuid-S.jsonl"
+        _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
+        _run_hook(transcript, "stop")
+        _append(transcript, [_user("go"), _tool_use("m1"), _tool_result()])
+
+        sleeps: list[float] = []
+
+        def late_write(seconds: float) -> None:
+            sleeps.append(seconds)
+            if len(sleeps) == 3:
+                _append(transcript, [_assistant_msg("m2", "the answer that landed after the hook fired")])
+
+        monkeypatch.setattr("claude_code_tts.cli.time.sleep", late_write)
+        assert _run_hook(transcript, "stop") == "the answer that landed after the hook fired"
+        assert len(sleeps) == 3, "the hook stops waiting as soon as the text is there"
+
+    def test_stop_with_no_response_gives_up_within_budget(self, tmp_path, fake_state_dir, monkeypatch):
+        from claude_code_tts.cli import STOP_REREAD_ATTEMPTS
+
+        transcript = tmp_path / "projects" / "-Users-dev" / "uuid-T.jsonl"
+        _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
+        _run_hook(transcript, "stop")
+        _append(transcript, [_user("go"), _tool_use("m1"), _tool_result()])
+
+        sleeps: list[float] = []
+        monkeypatch.setattr("claude_code_tts.cli.time.sleep", sleeps.append)
+        assert _run_hook(transcript, "stop") is None
+        assert len(sleeps) == 1 + STOP_REREAD_ATTEMPTS
+
+        # The watermark covers the tool lines: the next answer is spoken alone.
+        _append(transcript, [_user("again"), _assistant_msg("m2", "the next answer, spoken on its own")])
+        assert _run_hook(transcript, "stop") == "the next answer, spoken on its own"
+
+    def test_first_stop_on_a_transcript_waits_for_the_file_to_settle(self, tmp_path, fake_state_dir, monkeypatch):
+        """With no watermark the Stop takes the last text in the file; the response must get there first."""
+        transcript = tmp_path / "projects" / "-Users-dev" / "uuid-U.jsonl"
+        _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "prose before the tool call"),
+                                       _tool_use("m0"), _tool_result()])
+
+        def late_write(seconds: float) -> None:
+            # The old tenth-of-a-second yield is over before the response lands.
+            if seconds >= 0.5:
+                _append(transcript, [_assistant_msg("m1", "the final answer of the first turn")])
+
+        monkeypatch.setattr("claude_code_tts.cli.time.sleep", late_write)
+        assert _run_hook(transcript, "stop") == "the final answer of the first turn"

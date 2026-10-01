@@ -2208,8 +2208,10 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
     debug(f"{hook_type}: watermark={watermark} current={current_lines}")
 
     if hook_type == "stop":
-        # Brief yield to let concurrent PostToolUse finish
-        time.sleep(0.1)
+        # Brief yield to let concurrent PostToolUse finish. On a transcript
+        # with no watermark the scan below takes the last text in the file,
+        # so give the response time to be that text (see the reread below).
+        time.sleep(STOP_FIRST_SETTLE if watermark == 0 else 0.1)
         watermark = _read_watermark(state_file, lock_dir, transcript)
         current_lines = _count_lines(transcript)
     elif current_lines <= watermark:
@@ -2225,9 +2227,7 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
                 debug(f"{hook_type}: transcript caught up on reread {attempt}: current={current_lines}")
                 break
 
-    if current_lines <= watermark:
-        if hook_type == "stop":
-            _write_watermark(state_file, lock_dir, current_lines)
+    if current_lines <= watermark and hook_type != "stop":
         debug(f"{hook_type}: no new lines since last speak")
         return
 
@@ -2236,7 +2236,25 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
     # watermark written below must cover everything the scan saw, or the
     # next hook finds the same text again (heard twice, 20 s apart, 2026-09-26).
     speakable, scanned_lines = _scan_transcript(transcript, watermark, hook_type)
+    if not speakable and hook_type == "stop":
+        # Since Claude Code 2.1.286 (2026-09-30) the response reaches the
+        # transcript in the same second the Stop hook fires, usually after
+        # the hook has read the file. A Stop that finds tool results but no
+        # text used to move the watermark past them and say nothing; the
+        # response landed just above the watermark and was spoken by the
+        # next hook, one message late (every room, 52 times in a day). So
+        # "no text yet" means "not written yet" until the budget is spent.
+        for attempt in range(1, STOP_REREAD_ATTEMPTS + 1):
+            time.sleep(STOP_REREAD_DELAY)
+            speakable, scanned_lines = _scan_transcript(transcript, watermark, hook_type)
+            if speakable:
+                debug(f"stop: response landed on reread {attempt}: current={scanned_lines}")
+                break
     current_lines = max(current_lines, scanned_lines)
+    if not speakable and current_lines <= watermark:
+        _write_watermark(state_file, lock_dir, current_lines)
+        debug(f"{hook_type}: no new lines since last speak")
+        return
     if not speakable:
         if hook_type == "stop":
             _write_watermark(state_file, lock_dir, current_lines)
@@ -2310,6 +2328,15 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
 # finds nothing new at all. Hooks run async, so this never delays Claude Code.
 HOOK_REREAD_ATTEMPTS = 3
 HOOK_REREAD_DELAY = 0.2
+# How long a Stop hook waits for the response to reach the transcript when the
+# file has grown but holds no new text yet: 20 x 0.25 s. Measured on 2.1.286 the
+# response lands within a second of the hook; a turn with no final text at all
+# (rare) pays the whole 5 s, unheard, because the hook is async.
+STOP_REREAD_ATTEMPTS = 20
+STOP_REREAD_DELAY = 0.25
+# A Stop on a transcript with no watermark yet speaks the last text in the file;
+# this is how long it lets the response become that text first.
+STOP_FIRST_SETTLE = 1.0
 
 
 def _count_lines(path: Path) -> int:
