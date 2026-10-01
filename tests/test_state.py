@@ -111,3 +111,24 @@ def test_acquire_lock_reports_a_non_lock_failure_only_through_the_given_logger(
     seen: list[tuple[str, str]] = []
     assert state_mod.acquire_lock(log=lambda m, level: seen.append((m, level))) is False
     assert len(seen) == 1 and seen[0][1] == "ERROR" and "Lock acquisition failed" in seen[0][0]
+
+
+def test_paused_since_marks_the_start_of_a_hold_and_survives_later_writes(tmp_path, monkeypatch):
+    """A restart reads the hold's true age from paused_since; updated_at moves on every write
+    (review of e6be5c9: two restarts in a row granted a second full cap)."""
+    import time as _time
+
+    from claude_code_tts import state as st
+
+    monkeypatch.setattr(st, "PLAYBACK_STATE_FILE", tmp_path / "playback.json")
+    st.write_playback_state(paused=True, paused_by="mic")
+    since = st.read_playback_state()["paused_since"]
+    _time.sleep(0.01)
+    st.write_playback_state(audio_pid=None)
+    s = st.read_playback_state()
+    assert s["paused_since"] == since and s["updated_at"] > since
+    st.write_playback_state(paused=True, paused_by="mic")  # a repeated pause write does not restart the clock
+    assert st.read_playback_state()["paused_since"] == since
+    st.write_playback_state(paused=False, paused_by=None)
+    assert "paused_since" not in st.read_playback_state()
+

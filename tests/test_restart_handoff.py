@@ -25,7 +25,6 @@ from unittest.mock import patch
 
 import claude_code_tts.daemon as daemon_mod
 import tests.test_daemon_integration as _integ
-from claude_code_tts.state import write_playback_state
 
 daemon_env = _integ.daemon_env  # the shared fixture, registered under its own name in this module
 make_fake_player, make_wav, read_playback_state = _integ.make_fake_player, _integ.make_wav, _integ.read_playback_state
@@ -57,7 +56,7 @@ def _enqueue(queue_dir: Path, text: str) -> Path:
     return path
 
 
-def _run_loop(daemon_env, fake_generate, play_duration, stop_when, before_stop=None):
+def _run_loop(daemon_env, fake_generate, play_duration, stop_when, before_stop=None, extra_patches=()):
     tmp = daemon_env["tmp_path"]
     fake = make_fake_player(tmp, duration=play_duration)
     patches = [
@@ -69,6 +68,7 @@ def _run_loop(daemon_env, fake_generate, play_duration, stop_when, before_stop=N
         patch.object(daemon_mod, "get_queue_config", return_value=dict(QUEUE_CONFIG)),
         patch.object(daemon_mod, "load_raw_config", return_value={}),
         patch("signal.signal"),
+        *extra_patches,
     ]
     for pt in patches:
         pt.start()
@@ -165,10 +165,26 @@ class TestStartupHandoff:
                   stop_when=lambda: "Cleared stale state" in daemon_env["log_file"].read_text())
         assert "current_message" in daemon_env["log_file"].read_text().split("Cleared stale state")[1].splitlines()[0]
 
-    def test_a_recent_mic_hold_survives_the_restart(self, daemon_env):
+    def _mic_message(self, daemon_env, text="held through the restart"):
+        queue_dir = daemon_env["queue_dir"]
+        msg = {"id": "m1", "timestamp": time.time(), "session_id": "s", "project": "p", "text": text,
+               "persona": "claude-prime", "speed": 2.0, "speed_method": "playback"}
+        (queue_dir / f"{time.time():.6f}_m1.json").write_text(json.dumps(msg))
+
+    def test_a_recent_mic_hold_survives_the_restart_until_handy_logs_the_stop(self, daemon_env, tmp_path):
         """2026-10-01: an upgrade restart 139 s into a dictation; the old daemon's mic pause was
-        called stale and the new one spoke over the person dictating. Younger than the cap, the hold is kept."""
-        self._state(daemon_env, paused=True, paused_by="mic", updated_at=time.time() - 139)
+        called stale and the new one spoke over the person dictating. Younger than the cap and with
+        the watcher on, the hold is kept, and Handy's stop line, tailed by the watcher, ends it."""
+        from datetime import datetime
+
+        import claude_code_tts.mic_watcher as mw
+
+        stamp = datetime.now().strftime("[%Y-%m-%d][%H:%M:%S]")
+        handy_log = tmp_path / "handy.log"
+        handy_log.write_text(f"{stamp}[a][DEBUG] Recording started for binding transcribe\n")
+        self._state(daemon_env, paused=True, paused_by="mic", paused_since=time.time() - 139,
+                    updated_at=time.time() - 3)
+        self._mic_message(daemon_env)
         spoken: list[str] = []
 
         def fake_generate(text, persona, output_file, **kw):
@@ -176,23 +192,56 @@ class TestStartupHandoff:
             make_wav(output_file, 1.0)
             return True
 
-        queue_dir = daemon_env["queue_dir"]
-        msg = {"id": "m1", "timestamp": time.time(), "session_id": "s", "project": "p", "text": "held through the restart",
-               "persona": "claude-prime", "speed": 2.0, "speed_method": "playback"}
-        (queue_dir / f"{time.time():.6f}_m1.json").write_text(json.dumps(msg))
-
-        def release():
+        def handy_stops():
             assert spoken == [], "nothing may speak while the carried mic hold stands"
-            write_playback_state(paused=False, paused_by=None)
-            time.sleep(0.5)
+            with handy_log.open("a") as f:
+                f.write(f"{stamp}[a][DEBUG] Recording stopped and samples retrieved\n")
+            for _ in range(100):
+                if spoken:
+                    break
+                time.sleep(0.05)
+
+        with patch.object(mw, "HANDY_LOG", handy_log), patch.object(mw, "handy_settings", return_value={"log_level": "debug"}):
+            _run_loop(daemon_env, fake_generate, play_duration=0.1,
+                      stop_when=lambda: "Keeping the previous daemon's mic hold" in daemon_env["log_file"].read_text(),
+                      before_stop=handy_stops,
+                      extra_patches=[patch.object(daemon_mod, "load_raw_config",
+                                                  return_value={"mic_aware_pause": True, "mic_resume_delay_ms": 10})])
+        log = daemon_env["log_file"].read_text()
+        assert "Keeping the previous daemon's mic hold from 139s ago" in log, "paused_since, not updated_at, is the age"
+        assert "mic-pause" not in log
+        assert spoken == ["held through the restart"]
+
+    def test_a_mic_hold_is_not_kept_when_the_watcher_is_off(self, daemon_env):
+        self._state(daemon_env, paused=True, paused_by="mic", updated_at=time.time() - 139)
+
+        def fake_generate(text, persona, output_file, **kw):
+            make_wav(output_file, 1.0)
+            return True
 
         _run_loop(daemon_env, fake_generate, play_duration=0.1,
-                  stop_when=lambda: "Keeping the previous daemon's mic hold" in daemon_env["log_file"].read_text(),
-                  before_stop=release)
+                  stop_when=lambda: "Cleared stale state" in daemon_env["log_file"].read_text())
+        assert "mic-pause" in daemon_env["log_file"].read_text().split("Cleared stale state")[1].splitlines()[0]
+
+    def test_a_mic_hold_is_released_when_the_watcher_cannot_start(self, daemon_env, tmp_path):
+        import claude_code_tts.mic_watcher as mw
+
+        self._state(daemon_env, paused=True, paused_by="mic", updated_at=time.time() - 139)
+        self._mic_message(daemon_env, "spoken once the hold is released")
+        spoken: list[str] = []
+
+        def fake_generate(text, persona, output_file, **kw):
+            spoken.append(text)
+            make_wav(output_file, 1.0)
+            return True
+
+        with patch.object(mw, "HANDY_LOG", tmp_path / "missing-handy.log"):
+            _run_loop(daemon_env, fake_generate, play_duration=0.1,
+                      stop_when=lambda: bool(spoken),
+                      extra_patches=[patch.object(daemon_mod, "load_raw_config", return_value={"mic_aware_pause": True})])
         log = daemon_env["log_file"].read_text()
-        assert "Keeping the previous daemon's mic hold from 139s ago" in log
-        assert "mic-pause" not in log.split("Cleared stale state")[-1].splitlines()[0] if "Cleared stale state" in log else True
-        assert spoken == ["held through the restart"]
+        assert "Released the previous daemon's mic hold: no watcher to end it" in log
+        assert spoken == ["spoken once the hold is released"]
 
     def test_an_old_mic_hold_is_still_cleared(self, daemon_env):
         self._state(daemon_env, paused=True, paused_by="mic", updated_at=time.time() - 3600)

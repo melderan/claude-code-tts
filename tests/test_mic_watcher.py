@@ -256,15 +256,49 @@ class TestCheckInitialMicState:
         stamp = start_at.strftime("[%Y-%m-%d][%H:%M:%S]")
         chatter = "".join(
             f"{stamp}[handy_app_lib::audio_toolkit::vad][DEBUG] frame {i} energy 0.0123 speech=true\n"
-            for i in range(600)
-        )  # about 50 KB after the start line
+            for i in range(8000)
+        )  # about 700 KB after the start line: a long dictation at debug
         log_file = tmp_path / "handy.log"
         log_file.write_text(
             f"{stamp}[handy_app_lib::managers::audio][DEBUG] Recording started for binding transcribe\n" + chatter
         )
-        assert log_file.stat().st_size > 8192 * 4
+        assert log_file.stat().st_size > 512 * 1024
+        from claude_code_tts import mic_watcher as mw
+
+        assert mw.INITIAL_SCAN_BYTES >= 4 * 1024 * 1024, "the window must outlast a long dictation"
         w = self._make_watcher(log_file, monkeypatch)
         assert w._check_initial_mic_state() is True
+
+    def test_a_start_line_cut_by_the_window_is_not_a_start(self, tmp_path, monkeypatch):
+        from claude_code_tts import mic_watcher as mw
+
+        log_file = tmp_path / "handy.log"
+        start = "[2026-10-01][14:29:35][handy_app_lib::managers::audio][DEBUG] Recording started for binding transcribe\n"
+        filler = "[2026-10-01][14:29:36][x][DEBUG] chatter line\n" * 5
+        log_file.write_text("prefix " * 20 + start + filler)
+        # A window that begins inside the start line
+        monkeypatch.setattr(mw, "INITIAL_SCAN_BYTES", len(filler) + len(start) // 2)
+        w = self._make_watcher(log_file, monkeypatch)
+        assert w._check_initial_mic_state() is False
+
+    def test_the_log_clock_is_read_from_the_file_not_guessed(self):
+        """A start exactly one UTC offset old read 'fresh' under the smaller-of-two rule; the
+        clock the log uses is decided once from its last line against the file's mtime."""
+        from datetime import datetime, timezone
+
+        from claude_code_tts import mic_watcher as mw
+
+        mtime = 1_800_000_000.0
+        utc_now = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("[%Y-%m-%d][%H:%M:%S]")
+        lines = [f"{utc_now}[x][DEBUG] last line"]
+        clock = mw.handy_log_clock(lines, mtime)
+        local_offset = datetime.fromtimestamp(mtime).replace(tzinfo=timezone.utc).timestamp() - mtime
+        if local_offset == 0:
+            assert clock is None  # a UTC machine cannot tell the two apart, and need not
+        else:
+            assert clock == "utc"
+        four_hours_old = datetime.fromtimestamp(mtime - 4 * 3600, tz=timezone.utc).strftime("[%Y-%m-%d][%H:%M:%S]")
+        assert mw.log_line_age_s(f"{four_hours_old}[a][DEBUG] Recording started", now=mtime, clock="utc") == 4 * 3600
 
     def test_an_old_start_far_back_still_does_not_count(self, tmp_path, monkeypatch):
         """However big the file, an old start with no stop is over by its age."""
@@ -376,6 +410,25 @@ class TestStartPausesIfMicOpen:
         assert state["paused_by"] == "mic"
         assert w.recording is True
         w.stop()
+
+    def test_a_carried_hold_whose_stop_landed_during_the_restart_is_released_at_once(self, tmp_path, monkeypatch):
+        """Geordi's reproducer (review of e6be5c9): start and stop both in the log, hold carried;
+        the tail opens at the end of the file, so only the startup scan can see that stop."""
+        from datetime import datetime
+
+        stamp = datetime.now().strftime("[%Y-%m-%d][%H:%M:%S]")
+        log_file = tmp_path / "handy.log"
+        log_file.write_text(f"{stamp}[a][DEBUG] Recording started for binding transcribe\n"
+                            f"{stamp}[a][DEBUG] Recording stopped and samples retrieved\n")
+        monkeypatch.setattr("claude_code_tts.mic_watcher.HANDY_LOG", log_file)
+        state = {"paused": True, "paused_by": "mic"}
+        w = MicWatcher(log_fn=MagicMock(), read_playback_state=lambda: dict(state),
+                       write_playback_state=lambda **kw: state.update(kw), resume_delay_ms=10)
+        w.start(carried_recording=True)
+        try:
+            assert w.recording is False and state["paused"] is False
+        finally:
+            w.stop()
 
     def test_a_carried_mic_hold_starts_as_recording_and_the_stop_line_releases_it(self, tmp_path, monkeypatch):
         """The daemon kept the previous daemon's mic hold; the watcher starts as recording even

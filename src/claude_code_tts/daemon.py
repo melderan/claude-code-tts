@@ -1418,12 +1418,17 @@ def daemon_loop(lockpick: bool = False) -> None:
     raw_config = load_raw_config()
     mic_pause_max_s = float(raw_config.get("mic_pause_max_s", MIC_PAUSE_MAX_S))
     mic_hold_kept = False
+    hold_since = 0.0
     if startup_state.get("paused") and startup_state.get("paused_by") == "mic":
         try:
-            hold_age = time.time() - float(startup_state.get("updated_at") or 0)
+            # paused_since survives later writes; updated_at moves on each of them.
+            hold_since = float(startup_state.get("paused_since") or startup_state.get("updated_at") or 0)
+            hold_age = time.time() - hold_since
         except (TypeError, ValueError):
             hold_age = float("inf")
-        if 0 <= hold_age <= mic_pause_max_s:
+        if 0 <= hold_age <= mic_pause_max_s and raw_config.get("mic_aware_pause", False):
+            # Only the watcher can end it (Handy's stop line); without the watcher it
+            # would stand to the cap for nothing.
             mic_hold_kept = True
             log(f"Keeping the previous daemon's mic hold from {hold_age:.0f}s ago until Handy logs the stop")
         else:
@@ -1477,6 +1482,10 @@ def daemon_loop(lockpick: bool = False) -> None:
         if not mic_watcher.start(carried_recording=mic_hold_kept):
             log("Mic watcher failed to start (Handy log not found)", "WARN")
             mic_watcher = None
+            if mic_hold_kept:
+                mic_hold_kept = False
+                set_paused(False)
+                log("Released the previous daemon's mic hold: no watcher to end it")
     else:
         log("Mic-aware pause disabled (set mic_aware_pause: true in config.json to enable)")
 
@@ -1513,12 +1522,14 @@ def daemon_loop(lockpick: bool = False) -> None:
         threading.Thread(target=_warm_mlx, name="mlx-warm", daemon=True).start()
 
     ledger = PauseLedger()
+    if mic_hold_kept and not read_playback_state().get("paused"):
+        mic_hold_kept = False  # the watcher found Handy's stop in the log and released it
     if startup_state.get("paused") and (startup_state.get("paused_by") != "mic" or mic_hold_kept):
         # A restart while paused (an upgrade mid-meeting, or mid-dictation) keeps
         # the hold from the moment of the pause, which is the last write to the
         # state file; for a mic hold that also starts the cap's clock there.
         try:
-            ledger.mark(True, now=float(startup_state.get("updated_at") or time.time()))
+            ledger.mark(True, now=hold_since or float(startup_state.get("paused_since") or startup_state.get("updated_at") or time.time()))
         except (TypeError, ValueError):
             ledger.mark(True)
         log("Started paused; holding the queue since the pause")

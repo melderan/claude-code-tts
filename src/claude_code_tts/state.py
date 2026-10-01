@@ -258,6 +258,12 @@ def _write_playback_state_locked(
     if audio_pid is not UNSET:
         state["audio_pid"] = audio_pid
     if paused is not None:
+        # paused_since is the moment the hold began, kept across every later write
+        # (updated_at moves on each); a restart reads the hold's true age from it.
+        if paused and not state.get("paused"):
+            state["paused_since"] = time.time()
+        elif not paused:
+            state.pop("paused_since", None)
         state["paused"] = paused
     if paused_by is not UNSET:
         state["paused_by"] = paused_by

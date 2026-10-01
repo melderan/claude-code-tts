@@ -101,8 +101,13 @@ STALE_START_S = 600.0
 INITIAL_SCAN_BYTES = 8 * 1024 * 1024
 
 
-def log_line_age_s(line: str, now: float | None = None) -> float | None:
-    """Seconds since the line's timestamp, or None when the line carries none."""
+def log_line_age_s(line: str, now: float | None = None, clock: str | None = None) -> float | None:
+    """Seconds since the line's timestamp, or None when the line carries none.
+
+    clock "utc" or "local" says which clock the log uses (see handy_log_clock);
+    None keeps the smaller of the two readings, which is right for a line a few
+    minutes old and wrong for one exactly the UTC offset old.
+    """
     m = _RE_LOG_TIMESTAMP.match(line)
     if not m:
         return None
@@ -113,7 +118,35 @@ def log_line_age_s(line: str, now: float | None = None) -> float | None:
     t = time.time() if now is None else now
     as_local = stamp.timestamp()
     as_utc = stamp.replace(tzinfo=timezone.utc).timestamp()
+    if clock == "utc":
+        return abs(t - as_utc)
+    if clock == "local":
+        return abs(t - as_local)
     return min(abs(t - as_local), abs(t - as_utc))
+
+
+def handy_log_clock(lines: list[str], mtime: float) -> str | None:
+    """Which clock stamps the log, "utc" or "local", read from its last stamped line.
+
+    The last line was written about when the file was last modified, so the
+    reading that lands within minutes of mtime is the log's clock. None when
+    the two readings agree (a UTC machine) or neither fits.
+    """
+    for line in reversed(lines):
+        m = _RE_LOG_TIMESTAMP.match(line)
+        if not m:
+            continue
+        try:
+            stamp = datetime.strptime(f"{m[1]} {m[2]}", "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        d_local = abs(mtime - stamp.timestamp())
+        d_utc = abs(mtime - stamp.replace(tzinfo=timezone.utc).timestamp())
+        if d_local == d_utc:
+            return None
+        best, other = (("local", d_local), ("utc", d_utc)) if d_local < d_utc else (("utc", d_utc), ("local", d_local))
+        return best[0] if best[1] <= 600 and other[1] > 600 else None
+    return None
 
 
 # How long to wait after recording stops before resuming TTS (ms).
@@ -157,14 +190,18 @@ class MicWatcher:
         return self._recording
 
     def _check_initial_mic_state(self) -> bool:
-        """Scan the tail of the Handy log to determine if mic is currently recording.
+        """True if Handy's log says the mic is recording now (see _initial_mic_event)."""
+        return self._initial_mic_event() == "recording"
+
+    def _initial_mic_event(self) -> str:
+        """What the tail of Handy's log says: "recording", "stopped" or "none".
 
         Walks the recent lines backwards to the last recording event. Handy at
         debug writes far more than 8 KB in two minutes of recording: on
         2026-10-01 a daemon restarted 139 s into a dictation read an 8 KB tail,
-        found no start in it, and spoke over the person dictating. The walk now covers
-        INITIAL_SCAN_BYTES; the age of the start it finds decides, as before.
-        Returns True if the mic appears to be actively recording.
+        found no start in it, and spoke over the person dictating. The walk
+        covers INITIAL_SCAN_BYTES; a line cut by that boundary is dropped; the
+        age of the start it finds decides, read on the clock the log uses.
         """
         try:
             with open(HANDY_LOG, errors="replace") as f:
@@ -172,14 +209,16 @@ class MicWatcher:
                 size = f.tell()
                 f.seek(max(0, size - INITIAL_SCAN_BYTES))
                 tail = f.read()
+            mtime = os.path.getmtime(HANDY_LOG)
         except OSError:
-            return False
+            return "none"
 
-        # Walk backwards to the most recent recording event
+        lines = tail.splitlines()
+        if size > INITIAL_SCAN_BYTES and lines:
+            lines = lines[1:]  # the first line is cut by the window; a half start line is not a start
         last_start = -1
         last_stop = -1
         start_line = ""
-        lines = tail.splitlines()
         for i in range(len(lines) - 1, -1, -1):
             line = lines[i]
             if _RE_RECORDING_START.search(line):
@@ -194,16 +233,18 @@ class MicWatcher:
             # A start with no stop after it is either a recording in progress or one whose
             # end Handy never logged. 2026-09-30: one such start (19:18:59) paused two
             # successive daemons at startup, 3 and 17 minutes after the fact. Its age decides.
-            age = log_line_age_s(start_line)
+            age = log_line_age_s(start_line, clock=handy_log_clock(lines, mtime))
             if age is not None and 0 < self._stale_start_s < age:
                 self._log(
                     f"Mic watcher: Handy log ends in a recording start from {age:.0f}s ago with no "
                     "stop after it; treating that recording as over"
                 )
-                return False
+                return "stopped"
             self._log("Mic watcher: Handy log shows mic is currently recording")
-            return True
-        return False
+            return "recording"
+        if last_stop >= 0:
+            return "stopped"
+        return "none"
 
     def start(self, carried_recording: bool = False) -> bool:
         """Start the watcher thread. Returns False if log file not found.
@@ -242,9 +283,16 @@ class MicWatcher:
 
         # Check if mic is currently recording before we start tailing.
         # This handles the case where the daemon restarts mid-recording.
-        if carried_recording:
-            self._log("Mic watcher: the previous daemon was paused by the mic; holding until Handy logs the stop")
-        if carried_recording or self._check_initial_mic_state():
+        event = self._initial_mic_event()
+        if carried_recording and event == "stopped":
+            # Handy logged the stop during the restart gap; the tail below opens at the
+            # end of the file and would never see it (review of e6be5c9: silent to the cap).
+            self._log("Mic watcher: the previous daemon's mic hold ended during the restart; resuming")
+            self._recording = False
+            self._resume_after_mic()
+        elif carried_recording or event == "recording":
+            if carried_recording and event == "none":
+                self._log("Mic watcher: the previous daemon was paused by the mic; holding until Handy logs the stop")
             self._recording = True
             self._pause_for_mic()
 
