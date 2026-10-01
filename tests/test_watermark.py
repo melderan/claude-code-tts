@@ -702,6 +702,28 @@ class TestStopSpeaksFromItsInput:
             "and then the final answer"
         )
 
+    def test_two_stop_hooks_for_one_event_speak_the_input_once(self, tmp_path, fake_state_dir):
+        """Claude Code fired Stop twice for one turn end (2026-10-01, this room, three of thirteen);
+        both carry the same input. The record is the claim: exactly one speaks."""
+        transcript = self._turn_in_progress(tmp_path, "uuid-twice-a")
+        first = _run_hook(transcript, "stop", last_assistant_message="the answer both hooks were handed")
+        second = _run_hook(transcript, "stop", last_assistant_message="the answer both hooks were handed")
+        assert [first, second] == ["the answer both hooks were handed", None]
+        # And the landed line is still recognized and skipped afterwards.
+        _append(transcript, [_assistant_msg("m2", "the answer both hooks were handed"), _user("next"),
+                             _tool_use("m3"), _tool_result()])
+        assert _run_hook(transcript, "post_tool_use") is None
+
+    def test_the_second_stop_still_speaks_an_intermediate_the_first_missed(self, tmp_path, fake_state_dir):
+        transcript = self._turn_in_progress(tmp_path, "uuid-twice-b")
+        _run_hook(transcript, "stop", last_assistant_message="the answer both hooks were handed")
+        # An intermediate that landed between the two Stops is new text, and the second hook takes it.
+        _append(transcript, [_assistant_msg("m1b", "a late intermediate only the second hook sees"), _tool_use("m1b"),
+                             _tool_result()])
+        assert _run_hook(transcript, "stop", last_assistant_message="the answer both hooks were handed") == (
+            "a late intermediate only the second hook sees"
+        )
+
     def test_first_stop_of_a_transcript_speaks_the_input_not_an_older_text(self, tmp_path, fake_state_dir):
         transcript = tmp_path / "projects" / "-Users-dev" / "uuid-O.jsonl"
         _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "prose before the tool call"),

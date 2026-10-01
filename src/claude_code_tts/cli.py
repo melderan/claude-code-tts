@@ -2253,12 +2253,14 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
     # Geordi 2026-10-01): then the landed line ends with the spoken text and
     # the blocks before it are what is left to speak.
     landed_line: int | None = None
+    landed_key: str | None = None
     pending = _read_pending(pending_file)
     if pending and speakable:
         line_no, source, msg_text = speakable[0]
         match = _landed_match(msg_text, pending)
         if match is not None:
             landed_line = line_no
+            landed_key = pending
             _clear_pending(pending_file)
             if match:
                 debug(f"{hook_type}: line {line_no} ends with the response the Stop hook spoke; speaking what precedes it")
@@ -2266,13 +2268,16 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
             else:
                 debug(f"{hook_type}: line {line_no} is the response the Stop hook spoke from its input, skipping")
                 del speakable[0]
-    if hook_type == "stop":
-        _clear_pending(pending_file)  # a new Stop supersedes the record either way
+    # A record nothing matched stays: the next claim overwrites it, and a
+    # record older than PENDING_MAX_AGE_S is dropped unread. Wiping it on every
+    # Stop let a second Stop for the same event claim and speak again.
 
     # "Something is coming": the Stop hook has the response but the file does not.
     from_input = False
     if input_text:
-        if speakable and _same_text(speakable[-1][2], input_text):
+        if landed_key is not None and _pending_key(input_text) == landed_key:
+            pass  # this very response landed, and the hook that recorded it spoke it
+        elif speakable and _same_text(speakable[-1][2], input_text):
             pass  # landed already; spoken from the file as before
         else:
             from_input = True
@@ -2294,9 +2299,14 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
                 break
     current_lines = max(current_lines, scanned_lines)
     if from_input:
-        speakable.append((current_lines, "input", input_text))
-        _write_pending(pending_file, input_text)
-        debug(f"stop: response from the hook input ({len(input_text)} chars), not in the transcript yet")
+        # Two Stop hooks for one event (seen 2026-10-01, three of thirteen in one
+        # room) carry the same input; the record is the claim, taken under the
+        # watermark lock, so exactly one of them speaks it.
+        if _claim_input(pending_file, lock_dir, input_text):
+            speakable.append((current_lines, "input", input_text))
+            debug(f"stop: response from the hook input ({len(input_text)} chars), not in the transcript yet")
+        else:
+            debug("stop: another Stop hook already spoke this input, skipping it")
     if hook_type == "stop":
         # A PostToolUse that lagged can have claimed and spoken an intermediate
         # after this hook read the watermark; read-compare-write under the lock,
@@ -2452,6 +2462,22 @@ def _read_pending(pending_file: Path) -> str:
         return pending_file.read_text().strip()
     except OSError:
         return ""
+
+
+def _claim_input(pending_file: Path, lock_dir: Path, text: str) -> bool:
+    """Record the response about to be spoken from the hook input; False if a hook already did.
+
+    Read-compare-write under the watermark lock: the record doubles as the
+    claim between two Stop hooks fired for the same event.
+    """
+    _watermark_lock(lock_dir)
+    try:
+        if _read_pending(pending_file) == _pending_key(text):
+            return False
+        _write_pending(pending_file, text)
+        return True
+    finally:
+        _watermark_unlock(lock_dir)
 
 
 def _write_pending(pending_file: Path, text: str) -> None:
