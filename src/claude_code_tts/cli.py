@@ -2259,9 +2259,13 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
         line_no, source, msg_text = speakable[0]
         match = _landed_match(msg_text, pending)
         if match is not None:
+            # Taking the line clears the record and moves the watermark past it
+            # in one step under the lock. Two hooks fired for one event (2026-10-01)
+            # found the line together; the first cleared the record, the second
+            # read no record before the first had moved the watermark, and spoke it.
             landed_line = line_no
             landed_key = pending
-            _clear_pending(pending_file)
+            _take_landed(state_file, lock_dir, pending_file, line_no, advance_past=not match)
             if match:
                 debug(f"{hook_type}: line {line_no} ends with the response the Stop hook spoke; speaking what precedes it")
                 speakable[0] = (line_no, source, match)
@@ -2320,9 +2324,7 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
         if hook_type == "stop":
             _write_watermark(state_file, lock_dir, current_lines)
         elif landed_line is not None:
-            # Only the landed response was new: cover it, or the next hook finds it again.
-            _claim_watermark(state_file, lock_dir, landed_line, current_lines)
-            debug(f"PostToolUse: watermark updated to {current_lines} past the landed response")
+            debug(f"PostToolUse: watermark past the landed response at line {landed_line}")
         debug(f"{hook_type}: no assistant text in lines {watermark}..{current_lines}")
         return
 
@@ -2462,6 +2464,33 @@ def _read_pending(pending_file: Path) -> str:
         return pending_file.read_text().strip()
     except OSError:
         return ""
+
+
+def _take_landed(state_file: Path, lock_dir: Path, pending_file: Path, line_no: int, advance_past: bool) -> None:
+    """Clear the record of a spoken response and move the watermark to its line, under the lock.
+
+    With advance_past the watermark lands after the line (nothing left to speak
+    there); without it, on the line, so that the prefix left to speak is claimed
+    by exactly one hook through the usual read-compare-write. The watermark never
+    moves backwards here.
+    """
+    _watermark_lock(lock_dir)
+    try:
+        _clear_pending(pending_file)
+        wm = 0
+        if state_file.exists():
+            try:
+                wm = int(state_file.read_text().strip())
+            except (ValueError, OSError):
+                wm = 0
+        target = line_no + 1 if advance_past else line_no
+        if target > wm:
+            try:
+                state_file.write_text(str(target))
+            except OSError:
+                pass
+    finally:
+        _watermark_unlock(lock_dir)
 
 
 def _claim_input(pending_file: Path, lock_dir: Path, text: str) -> bool:

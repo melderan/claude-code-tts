@@ -724,6 +724,65 @@ class TestStopSpeaksFromItsInput:
             "a late intermediate only the second hook sees"
         )
 
+    def test_two_post_tool_use_hooks_meeting_the_landed_line_speak_it_never(
+        self, tmp_path, fake_state_dir, monkeypatch
+    ):
+        """2026-10-01, 14:00:30: two PostToolUse hooks for one event. The first matched the landed
+        line and cleared the record; before it moved the watermark the second read no record,
+        took the line for new text and spoke it, the third hearing of one reply."""
+        from claude_code_tts import cli
+
+        transcript = self._turn_in_progress(tmp_path, "uuid-meet")
+        final = "the reply that was heard three times"
+        _run_hook(transcript, "stop", last_assistant_message=final)
+        _append(transcript, [_assistant_msg("m2", final), _user("next"), _tool_use("m3"), _tool_result()])
+
+        real_match = cli._landed_match
+        inner: list[str | None] = []
+        state = {"nested": False}
+
+        def match_then_let_the_other_hook_run(landed, pending):
+            result = real_match(landed, pending)
+            if not state["nested"]:
+                state["nested"] = True
+                # The other hook runs to completion between this hook's match and its take.
+                inner.append(_run_hook(transcript, "post_tool_use"))
+            return result
+
+        monkeypatch.setattr("claude_code_tts.cli._landed_match", match_then_let_the_other_hook_run)
+        outer = _run_hook(transcript, "post_tool_use")
+        assert inner == [None] and outer is None
+
+    def test_the_hook_that_loses_the_landed_line_still_speaks_newer_text(self, tmp_path, fake_state_dir):
+        transcript = self._turn_in_progress(tmp_path, "uuid-newer")
+        final = "the reply both hooks find landed"
+        _run_hook(transcript, "stop", last_assistant_message=final)
+        _append(transcript, [_assistant_msg("m2", final), _user("next"),
+                             _assistant_msg("m3", "a newer intermediate of the next turn"), _tool_use("m3"),
+                             _tool_result()])
+        assert _run_hook(transcript, "post_tool_use") == "a newer intermediate of the next turn"
+        assert _run_hook(transcript, "post_tool_use") is None
+
+    def test_taking_the_landed_line_clears_the_record_and_moves_the_watermark_as_one_step(self, tmp_path):
+        """The live race (2026-10-01) sat between the clear and the watermark write; they are one call
+        now, under the lock, and a unit test cannot sit inside it. scripts/hook-replay.sh is the
+        proof with real processes; this pins what the call does."""
+        from claude_code_tts import cli
+
+        state, lock, pending = tmp_path / "wm.state", tmp_path / "wm.lock", tmp_path / "wm.pending"
+        state.write_text("926")
+        cli._write_pending(pending, "the reply")
+        cli._take_landed(state, lock, pending, 926, advance_past=True)
+        assert not pending.exists() and state.read_text() == "927"
+        assert not lock.exists(), "the lock is released"
+        # A prefix left to speak keeps the watermark on the line, for the usual claim.
+        cli._write_pending(pending, "the reply")
+        cli._take_landed(state, lock, pending, 930, advance_past=False)
+        assert state.read_text() == "930"
+        # It never moves the watermark backwards.
+        cli._take_landed(state, lock, pending, 100, advance_past=True)
+        assert state.read_text() == "930"
+
     def test_first_stop_of_a_transcript_speaks_the_input_not_an_older_text(self, tmp_path, fake_state_dir):
         transcript = tmp_path / "projects" / "-Users-dev" / "uuid-O.jsonl"
         _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "prose before the tool call"),
