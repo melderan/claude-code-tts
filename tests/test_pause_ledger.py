@@ -406,7 +406,10 @@ class TestMicHoldLimit:
         log = (state_dir / "daemon.log").read_text()
         notices = [ln for ln in log.splitlines() if "Still paused by user for" in ln]
         assert len(notices) >= 2, log
-        assert "1 message(s) waiting" in notices[0]
+        # The first notice is due 0.1 s into the hold and the enqueue lands 0.05 s in; on a
+        # slow runner the enqueue can come second and the first notice says 0 waiting, which
+        # is true at that instant (CI, 2026-10-01). The claim is that a notice counts the queue.
+        assert any("1 message(s) waiting" in n for n in notices), notices
         assert "Resumed with" in log
         assert spoken == ["waits through the hold"]
 
