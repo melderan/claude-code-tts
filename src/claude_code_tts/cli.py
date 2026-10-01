@@ -8,6 +8,7 @@ Replaces all individual bash scripts with a single Python CLI.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -1244,7 +1245,6 @@ def _print_sherpa_catalog() -> None:
 
 def _sha256_file(path: Path, chunk_size: int = 65536) -> str:
     """Compute the hex SHA256 of a file."""
-    import hashlib
     h = hashlib.sha256()
     with open(path, "rb") as f:
         while True:
@@ -2246,16 +2246,26 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
     # next hook finds the same text again (heard twice, 20 s apart, 2026-09-26).
     speakable, scanned_lines = _scan_transcript(transcript, watermark, hook_type)
 
-    # "It came in": the response a Stop hook spoke from its input has landed.
+    # "It came in": the response a Stop hook spoke from its input has landed. It
+    # is the first new assistant text, since it belongs to the turn before any
+    # new one; only that one is compared, and only for equality. A final message
+    # of several text blocks reaches the input as its last block (unmeasured,
+    # Geordi 2026-10-01): then the landed line ends with the spoken text and
+    # the blocks before it are what is left to speak.
     landed_line: int | None = None
     pending = _read_pending(pending_file)
-    if pending:
-        for i, (line_no, _source, msg_text) in enumerate(speakable):
-            if _same_text(msg_text, pending):
+    if pending and speakable:
+        line_no, source, msg_text = speakable[0]
+        match = _landed_match(msg_text, pending)
+        if match is not None:
+            landed_line = line_no
+            _clear_pending(pending_file)
+            if match:
+                debug(f"{hook_type}: line {line_no} ends with the response the Stop hook spoke; speaking what precedes it")
+                speakable[0] = (line_no, source, match)
+            else:
                 debug(f"{hook_type}: line {line_no} is the response the Stop hook spoke from its input, skipping")
-                landed_line = line_no
-                del speakable[i]
-                break
+                del speakable[0]
     if hook_type == "stop":
         _clear_pending(pending_file)  # a new Stop supersedes the record either way
 
@@ -2287,6 +2297,11 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
         speakable.append((current_lines, "input", input_text))
         _write_pending(pending_file, input_text)
         debug(f"stop: response from the hook input ({len(input_text)} chars), not in the transcript yet")
+    if hook_type == "stop":
+        # A PostToolUse that lagged can have claimed and spoken an intermediate
+        # after this hook read the watermark; read-compare-write under the lock,
+        # so what it took is not spoken again (pre-existing, found in review).
+        speakable = _claim_lines(state_file, lock_dir, speakable, current_lines)
     if not speakable and current_lines <= watermark:
         _write_watermark(state_file, lock_dir, current_lines)
         debug(f"{hook_type}: no new lines since last speak")
@@ -2387,31 +2402,66 @@ def _normalize_text(text: str) -> str:
 def _same_text(a: str, b: str) -> bool:
     """Is the transcript text `a` the response `b` that a Stop hook spoke from its input?
 
-    Equal after whitespace normalization, or one inside the other when both
-    are long enough to be no accident: a response of several text blocks may
-    reach the input as its last block only.
+    Equal after whitespace normalization and case folding, nothing looser: a
+    containment rule took an intermediate for the response once (review of
+    9.38.0) and lost the first block of a two-block message.
     """
     na, nb = _normalize_text(a).casefold(), _normalize_text(b).casefold()
-    if not na or not nb:
-        return False
-    if na == nb:
-        return True
-    return min(len(na), len(nb)) >= 20 and (na in nb or nb in na)
+    return bool(na) and na == nb
+
+
+def _pending_key(text: str) -> str:
+    """What the pending record holds: the length and digest of the normalized text, not the text."""
+    norm = _normalize_text(text).casefold()
+    return f"{len(norm)} {hashlib.sha256(norm.encode()).hexdigest()}"
+
+
+def _landed_match(landed: str, pending: str) -> str | None:
+    """How the transcript text `landed` relates to the pending record of a spoken response.
+
+    None: unrelated. "": the response itself, nothing left to speak. Otherwise
+    the text before the response: the landed message ended with the spoken
+    block, and the blocks before it are returned, whitespace-normalized.
+    """
+    try:
+        plen_s, pdigest = pending.split(" ", 1)
+        plen = int(plen_s)
+    except ValueError:
+        return None
+    norm = _normalize_text(landed)
+    folded = norm.casefold()
+    if _pending_key(landed) == pending:
+        return ""
+    if len(folded) > plen + 1 and folded[-plen - 1] == " ":
+        if hashlib.sha256(folded[-plen:].encode()).hexdigest() == pdigest:
+            return norm[: -plen - 1].strip()
+    return None
+
+
+# A pending record older than this is a response that never landed on this
+# transcript (a /clear, a resume into another file); it is dropped unread.
+PENDING_MAX_AGE_S = 3600.0
 
 
 def _read_pending(pending_file: Path) -> str:
-    """The response the last Stop hook spoke from its input, if its line has not landed yet."""
+    """The record of the response the last Stop hook spoke, if its line has not landed yet."""
     try:
+        if time.time() - pending_file.stat().st_mtime > PENDING_MAX_AGE_S:
+            pending_file.unlink(missing_ok=True)
+            return ""
         return pending_file.read_text().strip()
     except OSError:
         return ""
 
 
 def _write_pending(pending_file: Path, text: str) -> None:
+    """Record the spoken response as length and digest, in a file only this user can read."""
     try:
-        pending_file.write_text(text)
+        fd = os.open(pending_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     except OSError:
-        pass
+        return
+    with os.fdopen(fd, "w") as f:
+        f.write(_pending_key(text))
 
 
 def _clear_pending(pending_file: Path) -> None:
@@ -2462,6 +2512,33 @@ def _write_watermark(state_file: Path, lock_dir: Path, line_count: int) -> None:
         state_file.write_text(str(line_count))
     except OSError:
         pass
+    finally:
+        _watermark_unlock(lock_dir)
+
+
+def _claim_lines(
+    state_file: Path, lock_dir: Path, speakable: list[tuple[int, str, str]], line_count: int
+) -> list[tuple[int, str, str]]:
+    """Advance the watermark to `line_count` and return the entries another hook has not claimed.
+
+    Read-compare-write under the lock, for the Stop hook: an entry whose line
+    is already below the watermark was spoken by a PostToolUse meanwhile. An
+    entry from the hook's input has no line in the file yet and always stays.
+    """
+    _watermark_lock(lock_dir)
+    try:
+        wm = 0
+        if state_file.exists():
+            try:
+                wm = int(state_file.read_text().strip())
+            except (ValueError, OSError):
+                wm = 0
+        kept = [e for e in speakable if e[1] == "input" or e[0] >= wm]
+        try:
+            state_file.write_text(str(line_count))
+        except OSError:
+            pass
+        return kept
     finally:
         _watermark_unlock(lock_dir)
 

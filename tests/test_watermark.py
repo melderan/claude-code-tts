@@ -603,14 +603,104 @@ class TestStopSpeaksFromItsInput:
         spoken = _run_hook(transcript, "stop", last_assistant_message="then the final answer arrives")
         assert spoken == "an intermediate nobody spoke yet then the final answer arrives"
 
-    def test_input_holding_the_last_block_only_still_matches(self, tmp_path, fake_state_dir):
+    def test_a_final_message_with_an_earlier_block_speaks_only_that_block(self, tmp_path, fake_state_dir):
+        """Unmeasured whether Claude Code ever stores two text blocks in one message (Geordi,
+        2026-10-01); if it does, the input carries the last one and the first must not be lost."""
         transcript = self._turn_in_progress(tmp_path, "uuid-N")
-        _run_hook(transcript, "stop", last_assistant_message="and the second block of the same message")
+        _run_hook(transcript, "stop", last_assistant_message="And the second block of the same message.")
         _append(transcript, [{"type": "assistant", "message": {"id": "m2", "content": [
             {"type": "text", "text": "The first block of the final message."},
             {"type": "text", "text": "And the second block of the same message."}]}}])
         _append(transcript, [_user("next"), _tool_use("m3"), _tool_result()])
+        assert _run_hook(transcript, "post_tool_use") == "The first block of the final message."
+
+    def test_a_short_last_block_is_spoken_once_and_the_first_block_once(self, tmp_path, fake_state_dir):
+        transcript = self._turn_in_progress(tmp_path, "uuid-N2")
+        assert _run_hook(transcript, "stop", last_assistant_message="All done, ship it.") == "All done, ship it."
+        _append(transcript, [{"type": "assistant", "message": {"id": "m2", "content": [
+            {"type": "text", "text": "The first block of the final message."},
+            {"type": "text", "text": "All done, ship it."}]}}])
+        _append(transcript, [_user("next"), _tool_use("m3"), _tool_result()])
+        assert _run_hook(transcript, "post_tool_use") == "The first block of the final message."
+
+    def test_an_intermediate_containing_the_response_is_not_the_response(self, tmp_path, fake_state_dir):
+        transcript = self._turn_in_progress(tmp_path, "uuid-N3")
+        _append(transcript, [_assistant_msg("m1b", "Running the tests to confirm the fix works."), _tool_use("m1b"),
+                             _tool_result()])
+        spoken = _run_hook(transcript, "stop", last_assistant_message="the tests to confirm the fix")
+        assert spoken == "Running the tests to confirm the fix works. the tests to confirm the fix"
+        _append(transcript, [_assistant_msg("m2", "the tests to confirm the fix"), _user("n"), _tool_use("m3"),
+                             _tool_result()])
         assert _run_hook(transcript, "post_tool_use") is None
+
+    def test_a_post_tool_use_match_clears_the_record(self, tmp_path, fake_state_dir):
+        transcript = self._turn_in_progress(tmp_path, "uuid-N4")
+        final = "I fixed the parser and all forty tests pass now."
+        _run_hook(transcript, "stop", last_assistant_message=final)
+        _append(transcript, [_assistant_msg("m2", final), _user("next"), _tool_use("m3"), _tool_result()])
+        assert _run_hook(transcript, "post_tool_use") is None
+        _append(transcript, [_assistant_msg("m4", "all forty tests pass now"), _tool_use("m4"), _tool_result()])
+        assert _run_hook(transcript, "post_tool_use") == "all forty tests pass now"
+
+    def test_only_the_first_new_text_is_compared(self, tmp_path, fake_state_dir):
+        transcript = self._turn_in_progress(tmp_path, "uuid-N5")
+        _run_hook(transcript, "stop", last_assistant_message="the same words, later in the turn")
+        # A different response landed (the record is stale); a later text equal to the record is new.
+        _append(transcript, [_assistant_msg("m2", "a different response landed here instead"), _user("next"),
+                             _assistant_msg("m3", "the same words, later in the turn"), _tool_use("m3"), _tool_result()])
+        spoken = _run_hook(transcript, "post_tool_use")
+        assert spoken == "the same words, later in the turn"
+
+    def test_the_record_holds_no_text_and_only_this_user_reads_it(self, tmp_path, fake_state_dir):
+        import stat
+
+        transcript = self._turn_in_progress(tmp_path, "uuid-N6")
+        secret = "the quarterly numbers are in the attached draft"
+        _run_hook(transcript, "stop", last_assistant_message=secret)
+        pending = next(fake_state_dir.glob("claude_tts_spoken_uuid-N6.pending"))
+        assert "quarterly" not in pending.read_text()
+        assert stat.S_IMODE(pending.stat().st_mode) == 0o600
+
+    def test_a_stale_record_is_dropped_unread(self, tmp_path, fake_state_dir):
+        import os
+
+        transcript = self._turn_in_progress(tmp_path, "uuid-N7")
+        _run_hook(transcript, "stop", last_assistant_message="a response from an hour ago")
+        pending = next(fake_state_dir.glob("claude_tts_spoken_uuid-N7.pending"))
+        old = pending.stat().st_mtime - 4000
+        os.utime(pending, (old, old))
+        _append(transcript, [_assistant_msg("m2", "a response from an hour ago"), _user("next"), _tool_use("m3"),
+                             _tool_result()])
+        assert _run_hook(transcript, "post_tool_use") == "a response from an hour ago"
+        assert not pending.exists()
+
+    def test_stop_does_not_speak_an_intermediate_a_lagging_post_tool_use_took(
+        self, tmp_path, fake_state_dir, monkeypatch
+    ):
+        from claude_code_tts import cli
+
+        transcript = self._turn_in_progress(tmp_path, "uuid-N8")
+        _append(transcript, [_assistant_msg("m1b", "an intermediate both hooks can see"), _tool_use("m1b"),
+                             _tool_result()])
+        real_scan = cli._scan_transcript
+        taken = {"done": False}
+
+        def scan_then_other_hook_claims(path, watermark, hook_type):
+            result = real_scan(path, watermark, hook_type)
+            if not taken["done"]:
+                taken["done"] = True
+                # The lagging PostToolUse claims and speaks the intermediate right after the Stop's read.
+                cli._claim_watermark(
+                    cli.Path(f"/tmp/claude_tts_spoken_{path.stem}.state"),
+                    cli.Path(f"/tmp/claude_tts_wm_{path.stem}.lock"),
+                    result[0][0][0], result[1],
+                )
+            return result
+
+        monkeypatch.setattr("claude_code_tts.cli._scan_transcript", scan_then_other_hook_claims)
+        assert _run_hook(transcript, "stop", last_assistant_message="and then the final answer") == (
+            "and then the final answer"
+        )
 
     def test_first_stop_of_a_transcript_speaks_the_input_not_an_older_text(self, tmp_path, fake_state_dir):
         transcript = tmp_path / "projects" / "-Users-dev" / "uuid-O.jsonl"
