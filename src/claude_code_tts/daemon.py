@@ -1458,6 +1458,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             read_playback_state=read_playback_state,
             write_playback_state=write_playback_state,
             resume_delay_ms=resume_delay,
+            stale_start_s=mic_pause_max_s,
         )
         if not mic_watcher.start():
             log("Mic watcher failed to start (Handy log not found)", "WARN")

@@ -15,6 +15,7 @@ from claude_code_tts.mic_watcher import (
     MicWatcher,
     handy_file_log_level,
     handy_log_level_hides_recording,
+    log_line_age_s,
 )
 
 # --- Regex tests ---
@@ -217,6 +218,55 @@ class TestCheckInitialMicState:
         )
         w = self._make_watcher(log_file, monkeypatch)
         assert w._check_initial_mic_state() is False
+
+    def _stamp(self, age_s: float, utc: bool) -> str:
+        from datetime import datetime, timedelta, timezone
+
+        t = datetime.now(timezone.utc) - timedelta(seconds=age_s)
+        if not utc:
+            t = t.astimezone()
+        return t.strftime("[%Y-%m-%d][%H:%M:%S]")
+
+    def test_old_start_with_no_stop_is_over(self, tmp_path, monkeypatch):
+        """2026-09-30 19:18:59: one orphan start paused two restarted daemons, 3 and 17 min later."""
+        log_file = tmp_path / "handy.log"
+        log_file.write_text(
+            f"{self._stamp(17 * 60, utc=False)}[handy_app_lib::actions][DEBUG] TranscribeAction::start called for binding: transcribe\n"
+            f"{self._stamp(17 * 60 - 1, utc=False)}[handy_app_lib::actions][DEBUG] Microphone mode - always_on: false\n"
+        )
+        w = self._make_watcher(log_file, monkeypatch)
+        assert w._check_initial_mic_state() is False
+        assert "treating that recording as over" in str(w._log.call_args_list)
+
+    def test_recent_start_with_no_stop_is_recording_whatever_clock_handy_uses(self, tmp_path, monkeypatch):
+        for utc in (True, False):
+            log_file = tmp_path / "handy.log"
+            log_file.write_text(
+                f"{self._stamp(20, utc=utc)}[handy_app_lib::actions][DEBUG] TranscribeAction::start called for binding: transcribe\n"
+            )
+            w = self._make_watcher(log_file, monkeypatch)
+            assert w._check_initial_mic_state() is True, f"utc={utc}"
+
+    def test_stale_start_limit_zero_disables_the_age_check(self, tmp_path, monkeypatch):
+        log_file = tmp_path / "handy.log"
+        log_file.write_text(
+            f"{self._stamp(3600, utc=False)}[handy_app_lib::actions][DEBUG] TranscribeAction::start called for binding: transcribe\n"
+        )
+        monkeypatch.setattr("claude_code_tts.mic_watcher.HANDY_LOG", log_file)
+        w = MicWatcher(
+            log_fn=MagicMock(),
+            read_playback_state=MagicMock(return_value={}),
+            write_playback_state=MagicMock(),
+            stale_start_s=0,
+        )
+        assert w._check_initial_mic_state() is True
+
+    def test_start_without_a_timestamp_still_counts(self, tmp_path, monkeypatch):
+        """The old fixtures have no date; a line the clock cannot read keeps the old behaviour."""
+        log_file = tmp_path / "handy.log"
+        log_file.write_text("[10:55:33][handy_app_lib::managers::audio][DEBUG] Recording started for binding transcribe\n")
+        w = self._make_watcher(log_file, monkeypatch)
+        assert w._check_initial_mic_state() is True
 
     def test_no_recording_events(self, tmp_path, monkeypatch):
         """No recording events in log -> not recording."""
@@ -605,3 +655,18 @@ class TestRecordingThatNeverBegan:
         time.sleep(0.3)
         assert state["paused"] is False and state["paused_by"] is None
         w.stop()
+
+
+class TestLogLineAge:
+    def test_reads_utc_and_local_and_keeps_the_smaller(self):
+        now = 1_790_821_139.0  # 2026-10-01 02:18:59Z, 2026-09-30 19:18:59 in UTC-7
+        assert log_line_age_s("[2026-10-01][02:18:59][x][DEBUG] start", now=now) == 0.0
+        age = log_line_age_s("[2026-10-01][02:00:59][x][DEBUG] start", now=now)
+        assert age == 18 * 60
+
+    def test_no_timestamp_is_none(self):
+        assert log_line_age_s("[10:55:33][x][DEBUG] start") is None
+        assert log_line_age_s("plain line") is None
+
+    def test_bad_date_is_none(self):
+        assert log_line_age_s("[2026-13-45][99:00:00][x] start") is None

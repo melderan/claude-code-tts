@@ -15,6 +15,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any
 
@@ -87,6 +88,32 @@ def handy_log_level_hides_recording(level: str | None) -> bool:
     """True when Handy's file log will never contain recording start/stop lines."""
     return level is not None and level not in _LEVELS_THAT_SHOW_RECORDING
 
+# tauri-plugin-log stamps every line "[YYYY-MM-DD][HH:MM:SS]". Whether that clock is UTC or
+# local is the app's choice, so an age is read both ways and the smaller wins: a recording
+# that is really open is recent under one of them, and a start from twenty minutes ago is old
+# under both (the readings differ by the UTC offset, hours, never minutes).
+_RE_LOG_TIMESTAMP = re.compile(r"^\[(\d{4}-\d\d-\d\d)\]\[(\d\d:\d\d:\d\d)\]")
+
+# A recording start this old with no stop after it is over, whatever Handy failed to log.
+# The daemon passes mic_pause_max_s so the startup scan and the live cap agree; 0 disables.
+STALE_START_S = 600.0
+
+
+def log_line_age_s(line: str, now: float | None = None) -> float | None:
+    """Seconds since the line's timestamp, or None when the line carries none."""
+    m = _RE_LOG_TIMESTAMP.match(line)
+    if not m:
+        return None
+    try:
+        stamp = datetime.strptime(f"{m[1]} {m[2]}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    t = time.time() if now is None else now
+    as_local = stamp.timestamp()
+    as_utc = stamp.replace(tzinfo=timezone.utc).timestamp()
+    return min(abs(t - as_local), abs(t - as_utc))
+
+
 # How long to wait after recording stops before resuming TTS (ms).
 # Gives Handy time to transcribe + paste before TTS resumes.
 RESUME_DELAY_MS = 1500
@@ -106,11 +133,13 @@ class MicWatcher:
         read_playback_state: Callable[..., Any],
         write_playback_state: Callable[..., Any],
         resume_delay_ms: int = RESUME_DELAY_MS,
+        stale_start_s: float = STALE_START_S,
     ) -> None:
         self._log = log_fn
         self._read_state = read_playback_state
         self._write_state = write_playback_state
         self._resume_delay = resume_delay_ms / 1000.0
+        self._stale_start_s = stale_start_s
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._recording = False
@@ -144,13 +173,25 @@ class MicWatcher:
         # Find the last recording start and stop events
         last_start = -1
         last_stop = -1
+        start_line = ""
         for i, line in enumerate(tail.splitlines()):
             if _RE_RECORDING_START.search(line):
                 last_start = i
+                start_line = line
             elif _RE_RECORDING_STOP.search(line):
                 last_stop = i
 
         if last_start > last_stop:
+            # A start with no stop after it is either a recording in progress or one whose
+            # end Handy never logged. 2026-09-30: one such start (19:18:59) paused two
+            # successive daemons at startup, 3 and 17 minutes after the fact. Its age decides.
+            age = log_line_age_s(start_line)
+            if age is not None and 0 < self._stale_start_s < age:
+                self._log(
+                    f"Mic watcher: Handy log ends in a recording start from {age:.0f}s ago with no "
+                    "stop after it; treating that recording as over"
+                )
+                return False
             self._log("Mic watcher: Handy log shows mic is currently recording")
             return True
         return False
