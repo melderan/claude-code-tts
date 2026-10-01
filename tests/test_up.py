@@ -132,3 +132,36 @@ def test_tool_python_is_empty_without_the_tool(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(up.shutil, "which", lambda name: None)
     assert up.tool_python() == ""
     assert up.tool_python_version() == "-"
+
+
+def test_ledger_row_pins_the_version_in_field_two(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Readers of the shared ledger (the house kit's update line) take field 2 as the version."""
+    monkeypatch.setattr(up, "git", lambda *a: "v9.38.1 - the Stop hook speaks from its input")
+    row = up.ledger_row("9.38.1", at="2026-10-01T19:40:00Z")
+    fields = row.split("\t")
+    assert len(fields) == 5
+    assert fields[0] == "claude-tts"
+    assert fields[1] == "9.38.1"
+    assert fields[2] == "2026-10-01T19:40:00Z"
+    assert fields[3] == "v9.38.1 - the Stop hook speaks from its input"
+    assert fields[4] == "uv tool install --force --build git+https://github.com/melderan/claude-code-tts@v9.38.1"
+    assert "\n" not in row
+
+
+def test_announce_appends_to_the_ledger_the_pointer_names(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ledger = tmp_path / "host" / "tool-versions.tsv"
+    pointer = tmp_path / ".tool-versions-ledger"
+    pointer.write_text(f"{ledger}\n")
+    monkeypatch.setattr(up, "LEDGER_POINTER", pointer)
+    monkeypatch.setattr(up, "git", lambda *a: "v9.38.2 - the landed-response match is exact")
+    assert up.announce("9.38.2") == str(ledger)
+    assert up.announce("9.38.2") == str(ledger)
+    rows = ledger.read_text().splitlines()
+    assert len(rows) == 2, "append-only, one row per deploy"
+    assert all(r.split("\t")[1] == "9.38.2" for r in rows)
+
+
+def test_announce_is_silent_without_a_pointer(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(up, "LEDGER_POINTER", tmp_path / "missing")
+    assert up.announce("9.38.2") is None
+

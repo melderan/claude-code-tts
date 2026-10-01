@@ -34,6 +34,14 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 LOGDIR = REPO / ".logs" / "just"
+# Optional, gitignored: the path of a shared tool-versions ledger. When the file
+# exists, every deploy appends one TSV row to the path it names, so machines
+# that share the mount can tell their rooms an update is waiting (one line at
+# the prompt, once per version). Append-only, no header, last row per tool wins:
+# tool<TAB>version<TAB>at<TAB>subject<TAB>pull
+LEDGER_POINTER = REPO / ".tool-versions-ledger"
+TOOL = "claude-tts"
+PULL_LINE = "uv tool install --force --build git+https://github.com/melderan/claude-code-tts@v{ver}"
 HOME = Path.home()
 TTS_DIR = HOME / ".claude-tts"
 HEARTBEAT_MAX_AGE = 10.0
@@ -152,6 +160,37 @@ def unchanged(ver: str) -> str | None:
     return f"installed and running daemon are already v{ver}"
 
 
+def tag_subject(ver: str) -> str:
+    """The release tag's subject line, "v<ver> - <what changed>", or the bare tag when unknown."""
+    out = git("tag", "-n1", "--format=%(contents:subject)", f"v{ver}")
+    return out.strip() or f"v{ver}"
+
+
+def ledger_row(ver: str, at: str | None = None) -> str:
+    """One ledger row for this deploy; field 2 is the version, which readers pin."""
+    fields = [TOOL, ver, at or stamp(), tag_subject(ver).replace("\t", " "), PULL_LINE.format(ver=ver)]
+    return "\t".join(fields)
+
+
+def announce(ver: str) -> str | None:
+    """Append the deploy to the shared ledger the pointer file names; the path written, or None."""
+    try:
+        target = LEDGER_POINTER.read_text().strip()
+    except OSError:
+        return None
+    if not target:
+        return None
+    path = Path(target).expanduser()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as f:
+            f.write(ledger_row(ver) + "\n")
+    except OSError as e:
+        print(f"up: ledger {path}: {e}", file=sys.stderr)
+        return None
+    return str(path)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if_changed = "--if-changed" in args
@@ -241,6 +280,11 @@ def main(argv: list[str] | None = None) -> int:
         f"bridge={config_flag(['http', 'enabled'])} mic={config_flag(['mic_aware_pause'])} "
         f"took={int(time.time() - started)}s run={run.name}"
     )
+    if daemon == "running":
+        ledger = announce(ver)
+        if ledger:
+            with run.open("a") as f:
+                f.write(f"== {stamp()} ledger row appended to {ledger}\n")
     return 0 if daemon == "running" else 1
 
 

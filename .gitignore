@@ -68,3 +68,5 @@ htmlcov/
 # organizations whose non-public repository names scripts/private-words-sync.py feeds into it
 .private-words
 .private-orgs
+# Pointer to the shared tool-versions ledger `just up` appends to; one per machine
+.tool-versions-ledger
