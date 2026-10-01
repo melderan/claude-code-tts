@@ -205,6 +205,69 @@ def _tts_hook_entry(event: str, hooks_dir: Path) -> dict:
     return {"matcher": "*", "hooks": [hook]}
 
 
+# Where else Claude Code can take hook registrations from. A room built by a kit
+# starts `claude --settings <file>`; the installer could not see that file and
+# added a second registration on 2026-10-01, and every hook fired twice.
+HOOKS_MANAGED_ENV = "CLAUDE_TTS_HOOKS_MANAGED"
+
+
+def other_settings_sources(cwd: Path | None = None) -> list[Path]:
+    """Settings files besides ~/.claude/settings.json that may register hooks.
+
+    The user and project local files, ~/.config/claude/*.json, and any file a
+    running `claude --settings <file>` names (read from the process list).
+    """
+    cwd = cwd or Path.cwd()
+    found: list[Path] = [
+        CLAUDE_DIR / "settings.local.json",
+        cwd / ".claude" / "settings.json",
+        cwd / ".claude" / "settings.local.json",
+    ]
+    found += sorted((Path.home() / ".config" / "claude").glob("*.json"))
+    try:
+        out = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    for line in out.splitlines():
+        parts = line.split()
+        for i, part in enumerate(parts):
+            if part == "--settings" and i + 1 < len(parts):
+                found.append(Path(parts[i + 1]).expanduser())
+            elif part.startswith("--settings="):
+                found.append(Path(part.split("=", 1)[1]).expanduser())
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in found:
+        if path != SETTINGS_FILE and path not in seen:
+            seen.add(path)
+            unique.append(path)
+    return unique
+
+
+def tts_hooks_registered_elsewhere(cwd: Path | None = None) -> Path | None:
+    """The first other settings source that already registers one of our hooks, or None.
+
+    The environment wins: CLAUDE_TTS_HOOKS_MANAGED=<file> says a kit owns the
+    registration, whether or not the file is readable from here.
+    """
+    managed = os.environ.get(HOOKS_MANAGED_ENV, "").strip()
+    if managed:
+        return Path(managed).expanduser()
+    for path in other_settings_sources(cwd):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        hooks = data.get("hooks", {}) if isinstance(data, dict) else {}
+        for entries in hooks.values():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if any(_is_tts_hook(h) for h in _entry_hooks(entry)):
+                    return path
+    return None
+
+
 def ensure_tts_hooks(settings: dict, hooks_dir: Path | None = None) -> bool:
     """Register our Stop, PostToolUse and UserPromptSubmit hooks in a settings dict.
 
@@ -1130,7 +1193,12 @@ def do_install(
     # --- Configure settings.json ---
 
     print()
-    if upgrade:
+    elsewhere = tts_hooks_registered_elsewhere()
+    if elsewhere is not None:
+        info(f"Hooks are registered in {elsewhere}; nothing written to settings.json")
+        if HOOKS_MANAGED_ENV in os.environ:
+            info(f"({HOOKS_MANAGED_ENV} names that file)")
+    elif upgrade:
         # In upgrade mode, check if PostToolUse hook needs to be added
         if SETTINGS_FILE.exists():
             with open(SETTINGS_FILE) as fh:

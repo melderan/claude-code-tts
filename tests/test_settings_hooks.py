@@ -127,3 +127,42 @@ def test_rewriting_settings_under_a_running_session_is_said_out_loud():
     # Both branches that rewrite an existing settings file say it; creating a new file does not.
     assert src.count("warn(SETTINGS_REWRITE_NOTICE)") == 2
 
+
+class TestHooksRegisteredElsewhere:
+    """2026-10-01: a kit room starts `claude --settings house.json`, which registers our hooks; the
+    installer saw only settings.json, added a second registration, and every hook fired twice."""
+
+    def test_the_environment_names_the_owner(self, monkeypatch):
+        from claude_code_tts import install
+
+        monkeypatch.setenv(install.HOOKS_MANAGED_ENV, "/home/x/.config/claude/house.json")
+        assert install.tts_hooks_registered_elsewhere() == Path("/home/x/.config/claude/house.json")
+
+    def test_a_settings_file_passed_to_a_running_claude_is_scanned(self, tmp_path, monkeypatch):
+        from claude_code_tts import install
+
+        monkeypatch.delenv(install.HOOKS_MANAGED_ENV, raising=False)
+        house = tmp_path / "house.json"
+        house.write_text(json.dumps({"hooks": {"Stop": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": "~/.claude/hooks/speak-response.sh"}]}]}}))
+        monkeypatch.setattr(install, "CLAUDE_DIR", tmp_path / "nowhere")
+        monkeypatch.setattr(install, "SETTINGS_FILE", tmp_path / "nowhere" / "settings.json")
+        monkeypatch.setattr(install.Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        fake_ps = f"claude --dangerously-skip-permissions --settings {house}\nbash\n"
+        monkeypatch.setattr(install.subprocess, "run",
+                            lambda *a, **k: type("R", (), {"stdout": fake_ps})())
+        assert install.tts_hooks_registered_elsewhere(cwd=tmp_path) == house
+
+    def test_other_files_without_our_hooks_do_not_block(self, tmp_path, monkeypatch):
+        from claude_code_tts import install
+
+        monkeypatch.delenv(install.HOOKS_MANAGED_ENV, raising=False)
+        other = tmp_path / ".claude" / "settings.local.json"
+        other.parent.mkdir()
+        other.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "mine.sh"}]}]}}))
+        monkeypatch.setattr(install, "CLAUDE_DIR", tmp_path / "nowhere")
+        monkeypatch.setattr(install, "SETTINGS_FILE", tmp_path / "nowhere" / "settings.json")
+        monkeypatch.setattr(install.Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        monkeypatch.setattr(install.subprocess, "run", lambda *a, **k: type("R", (), {"stdout": "bash\n"})())
+        assert install.tts_hooks_registered_elsewhere(cwd=tmp_path) is None
+
