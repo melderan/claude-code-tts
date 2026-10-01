@@ -247,6 +247,35 @@ class TestCheckInitialMicState:
             w = self._make_watcher(log_file, monkeypatch)
             assert w._check_initial_mic_state() is True, f"utc={utc}"
 
+    def test_a_start_buried_under_two_minutes_of_debug_chatter_is_found(self, tmp_path, monkeypatch):
+        """2026-10-01: a daemon restarted 139 s into a dictation read an 8 KB tail, saw no start,
+        and spoke over the person dictating. The walk goes back by time, not by a byte count."""
+        from datetime import datetime, timedelta
+
+        start_at = datetime.now() - timedelta(seconds=139)
+        stamp = start_at.strftime("[%Y-%m-%d][%H:%M:%S]")
+        chatter = "".join(
+            f"{stamp}[handy_app_lib::audio_toolkit::vad][DEBUG] frame {i} energy 0.0123 speech=true\n"
+            for i in range(600)
+        )  # about 50 KB after the start line
+        log_file = tmp_path / "handy.log"
+        log_file.write_text(
+            f"{stamp}[handy_app_lib::managers::audio][DEBUG] Recording started for binding transcribe\n" + chatter
+        )
+        assert log_file.stat().st_size > 8192 * 4
+        w = self._make_watcher(log_file, monkeypatch)
+        assert w._check_initial_mic_state() is True
+
+    def test_an_old_start_far_back_still_does_not_count(self, tmp_path, monkeypatch):
+        """However big the file, an old start with no stop is over by its age."""
+        log_file = tmp_path / "handy.log"
+        log_file.write_text(
+            "[2020-01-01][10:00:00][handy_app_lib::managers::audio][DEBUG] Recording started for binding transcribe\n"
+            + "".join(f"[2020-01-01][10:00:01][x][DEBUG] old chatter {i}\n" for i in range(50))
+        )
+        w = self._make_watcher(log_file, monkeypatch)
+        assert w._check_initial_mic_state() is False
+
     def test_stale_start_limit_zero_disables_the_age_check(self, tmp_path, monkeypatch):
         log_file = tmp_path / "handy.log"
         log_file.write_text(
@@ -347,6 +376,36 @@ class TestStartPausesIfMicOpen:
         assert state["paused_by"] == "mic"
         assert w.recording is True
         w.stop()
+
+    def test_a_carried_mic_hold_starts_as_recording_and_the_stop_line_releases_it(self, tmp_path, monkeypatch):
+        """The daemon kept the previous daemon's mic hold; the watcher starts as recording even
+        though the log tail shows nothing, and Handy's stop line resumes the queue."""
+        log_file = tmp_path / "handy.log"
+        log_file.write_text("[10:57:00][x][DEBUG] nothing about a recording here\n")
+        monkeypatch.setattr("claude_code_tts.mic_watcher.HANDY_LOG", log_file)
+        state = {"paused": True, "paused_by": "mic"}
+
+        def read_state():
+            return dict(state)
+
+        def write_state(**kwargs):
+            state.update(kwargs)
+
+        w = MicWatcher(log_fn=MagicMock(), read_playback_state=read_state, write_playback_state=write_state,
+                       resume_delay_ms=10)
+        w.start(carried_recording=True)
+        try:
+            assert w.recording is True and state["paused"] is True
+            time.sleep(0.2)
+            with log_file.open("a") as f:
+                f.write("[10:59:10][handy_app_lib::actions][DEBUG] Recording stopped and samples retrieved\n")
+            for _ in range(100):
+                if not state["paused"]:
+                    break
+                time.sleep(0.02)
+            assert state["paused"] is False and w.recording is False
+        finally:
+            w.stop()
 
     def test_start_does_not_pause_when_mic_closed(self, tmp_path, monkeypatch):
         log_file = tmp_path / "handy.log"

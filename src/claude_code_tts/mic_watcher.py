@@ -97,6 +97,8 @@ _RE_LOG_TIMESTAMP = re.compile(r"^\[(\d{4}-\d\d-\d\d)\]\[(\d\d:\d\d:\d\d)\]")
 # A recording start this old with no stop after it is over, whatever Handy failed to log.
 # The daemon passes mic_pause_max_s so the startup scan and the live cap agree; 0 disables.
 STALE_START_S = 600.0
+# How far back the startup scan reads at most. 8 KB missed a start 139 s back on 2026-10-01.
+INITIAL_SCAN_BYTES = 8 * 1024 * 1024
 
 
 def log_line_age_s(line: str, now: float | None = None) -> float | None:
@@ -157,29 +159,36 @@ class MicWatcher:
     def _check_initial_mic_state(self) -> bool:
         """Scan the tail of the Handy log to determine if mic is currently recording.
 
-        Reads the last ~50 lines and finds the most recent recording event.
+        Walks the recent lines backwards to the last recording event. Handy at
+        debug writes far more than 8 KB in two minutes of recording: on
+        2026-10-01 a daemon restarted 139 s into a dictation read an 8 KB tail,
+        found no start in it, and spoke over the person dictating. The walk now covers
+        INITIAL_SCAN_BYTES; the age of the start it finds decides, as before.
         Returns True if the mic appears to be actively recording.
         """
         try:
-            with open(HANDY_LOG) as f:
-                # Read last 8KB -- enough for ~50 lines
+            with open(HANDY_LOG, errors="replace") as f:
                 f.seek(0, os.SEEK_END)
                 size = f.tell()
-                f.seek(max(0, size - 8192))
+                f.seek(max(0, size - INITIAL_SCAN_BYTES))
                 tail = f.read()
         except OSError:
             return False
 
-        # Find the last recording start and stop events
+        # Walk backwards to the most recent recording event
         last_start = -1
         last_stop = -1
         start_line = ""
-        for i, line in enumerate(tail.splitlines()):
+        lines = tail.splitlines()
+        for i in range(len(lines) - 1, -1, -1):
+            line = lines[i]
             if _RE_RECORDING_START.search(line):
                 last_start = i
                 start_line = line
-            elif _RE_RECORDING_STOP.search(line):
+                break
+            if _RE_RECORDING_STOP.search(line):
                 last_stop = i
+                break
 
         if last_start > last_stop:
             # A start with no stop after it is either a recording in progress or one whose
@@ -196,8 +205,13 @@ class MicWatcher:
             return True
         return False
 
-    def start(self) -> bool:
-        """Start the watcher thread. Returns False if log file not found."""
+    def start(self, carried_recording: bool = False) -> bool:
+        """Start the watcher thread. Returns False if log file not found.
+
+        carried_recording: the previous daemon was paused by the mic moments ago
+        (the daemon keeps that hold across a restart); start as recording, so the
+        stop line Handy logs next resumes the queue, whatever the log tail shows.
+        """
         if not HANDY_LOG.exists():
             self._log(f"Mic watcher: Handy log not found at {HANDY_LOG}", "WARN")
             return False
@@ -228,7 +242,9 @@ class MicWatcher:
 
         # Check if mic is currently recording before we start tailing.
         # This handles the case where the daemon restarts mid-recording.
-        if self._check_initial_mic_state():
+        if carried_recording:
+            self._log("Mic watcher: the previous daemon was paused by the mic; holding until Handy logs the stop")
+        if carried_recording or self._check_initial_mic_state():
             self._recording = True
             self._pause_for_mic()
 

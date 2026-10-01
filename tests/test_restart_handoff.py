@@ -25,6 +25,7 @@ from unittest.mock import patch
 
 import claude_code_tts.daemon as daemon_mod
 import tests.test_daemon_integration as _integ
+from claude_code_tts.state import write_playback_state
 
 daemon_env = _integ.daemon_env  # the shared fixture, registered under its own name in this module
 make_fake_player, make_wav, read_playback_state = _integ.make_fake_player, _integ.make_wav, _integ.read_playback_state
@@ -163,6 +164,46 @@ class TestStartupHandoff:
         _run_loop(daemon_env, fake_generate, play_duration=0.1,
                   stop_when=lambda: "Cleared stale state" in daemon_env["log_file"].read_text())
         assert "current_message" in daemon_env["log_file"].read_text().split("Cleared stale state")[1].splitlines()[0]
+
+    def test_a_recent_mic_hold_survives_the_restart(self, daemon_env):
+        """2026-10-01: an upgrade restart 139 s into a dictation; the old daemon's mic pause was
+        called stale and the new one spoke over the person dictating. Younger than the cap, the hold is kept."""
+        self._state(daemon_env, paused=True, paused_by="mic", updated_at=time.time() - 139)
+        spoken: list[str] = []
+
+        def fake_generate(text, persona, output_file, **kw):
+            spoken.append(text)
+            make_wav(output_file, 1.0)
+            return True
+
+        queue_dir = daemon_env["queue_dir"]
+        msg = {"id": "m1", "timestamp": time.time(), "session_id": "s", "project": "p", "text": "held through the restart",
+               "persona": "claude-prime", "speed": 2.0, "speed_method": "playback"}
+        (queue_dir / f"{time.time():.6f}_m1.json").write_text(json.dumps(msg))
+
+        def release():
+            assert spoken == [], "nothing may speak while the carried mic hold stands"
+            write_playback_state(paused=False, paused_by=None)
+            time.sleep(0.5)
+
+        _run_loop(daemon_env, fake_generate, play_duration=0.1,
+                  stop_when=lambda: "Keeping the previous daemon's mic hold" in daemon_env["log_file"].read_text(),
+                  before_stop=release)
+        log = daemon_env["log_file"].read_text()
+        assert "Keeping the previous daemon's mic hold from 139s ago" in log
+        assert "mic-pause" not in log.split("Cleared stale state")[-1].splitlines()[0] if "Cleared stale state" in log else True
+        assert spoken == ["held through the restart"]
+
+    def test_an_old_mic_hold_is_still_cleared(self, daemon_env):
+        self._state(daemon_env, paused=True, paused_by="mic", updated_at=time.time() - 3600)
+
+        def fake_generate(text, persona, output_file, **kw):
+            make_wav(output_file, 1.0)
+            return True
+
+        _run_loop(daemon_env, fake_generate, play_duration=0.1,
+                  stop_when=lambda: "Cleared stale state" in daemon_env["log_file"].read_text())
+        assert "mic-pause" in daemon_env["log_file"].read_text().split("Cleared stale state")[1].splitlines()[0]
 
     def test_old_interrupted_message_is_history(self, daemon_env):
         stale = {"session_id": "s", "project": "p", "persona": "claude-prime", "text": "ancient", "speed": 2.0, "audio_position": 3.0}

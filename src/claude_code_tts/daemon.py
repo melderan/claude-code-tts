@@ -1410,8 +1410,24 @@ def daemon_loop(lockpick: bool = False) -> None:
                 f"Killed the previous daemon's player (PID {startup_state['audio_pid']}) still speaking"
             )
         stale_fields.append("audio_pid")
+    # A mic hold the previous daemon left is live if it is younger than the cap:
+    # an upgrade restart lands mid-dictation (2026-10-01, 139 s into a 147 s one;
+    # the old rule called every mic pause stale and the new daemon spoke over JMO).
+    # Handy's stop line, which the watcher tails for, releases it; the cap is the
+    # bound if that line never comes.
+    raw_config = load_raw_config()
+    mic_pause_max_s = float(raw_config.get("mic_pause_max_s", MIC_PAUSE_MAX_S))
+    mic_hold_kept = False
     if startup_state.get("paused") and startup_state.get("paused_by") == "mic":
-        stale_fields.append("mic-pause")
+        try:
+            hold_age = time.time() - float(startup_state.get("updated_at") or 0)
+        except (TypeError, ValueError):
+            hold_age = float("inf")
+        if 0 <= hold_age <= mic_pause_max_s:
+            mic_hold_kept = True
+            log(f"Keeping the previous daemon's mic hold from {hold_age:.0f}s ago until Handy logs the stop")
+        else:
+            stale_fields.append("mic-pause")
     # Shutdown lets a message finish (graceful above all: never lose the place,
     # never two voices), so a current_message left behind is either a sentence
     # stream stopped at a boundary (sentence_index), a pause (audio_position),
@@ -1449,8 +1465,6 @@ def daemon_loop(lockpick: bool = False) -> None:
     # If Handy is actively recording, the watcher will pause us before
     # we start talking over the user.
     mic_watcher: MicWatcher | None = None
-    raw_config = load_raw_config()
-    mic_pause_max_s = float(raw_config.get("mic_pause_max_s", MIC_PAUSE_MAX_S))
     if raw_config.get("mic_aware_pause", False):
         resume_delay = raw_config.get("mic_resume_delay_ms", 800)
         mic_watcher = MicWatcher(
@@ -1460,7 +1474,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             resume_delay_ms=resume_delay,
             stale_start_s=mic_pause_max_s,
         )
-        if not mic_watcher.start():
+        if not mic_watcher.start(carried_recording=mic_hold_kept):
             log("Mic watcher failed to start (Handy log not found)", "WARN")
             mic_watcher = None
     else:
@@ -1499,9 +1513,10 @@ def daemon_loop(lockpick: bool = False) -> None:
         threading.Thread(target=_warm_mlx, name="mlx-warm", daemon=True).start()
 
     ledger = PauseLedger()
-    if startup_state.get("paused") and startup_state.get("paused_by") != "mic":
-        # A restart while paused (an upgrade mid-meeting) keeps the hold from the
-        # moment of the pause, which is the last write to the state file.
+    if startup_state.get("paused") and (startup_state.get("paused_by") != "mic" or mic_hold_kept):
+        # A restart while paused (an upgrade mid-meeting, or mid-dictation) keeps
+        # the hold from the moment of the pause, which is the last write to the
+        # state file; for a mic hold that also starts the cap's clock there.
         try:
             ledger.mark(True, now=float(startup_state.get("updated_at") or time.time()))
         except (TypeError, ValueError):
