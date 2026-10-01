@@ -5,6 +5,10 @@
 # Install just: brew install just  (or: uv tool install rust-just)
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
+# Recipes that forward arguments use "$@" so a quoted argument with spaces survives:
+# `{{ARGS}}` is pasted into the shell line and re-split, which broke `just release --notes "a b"`
+# on 2026-10-01 (the CLI saw "--notes a" and five stray words).
+set positional-arguments
 
 default:
     @just --list
@@ -102,11 +106,11 @@ hooks:
 
 # Maintainer: signed tag on HEAD's version, push, wait for GitHub to publish. `just release --check` to rehearse.
 release *ARGS:
-    PYTHONPATH=src {{HOST_PY}} -m claude_code_tts.cli release {{ARGS}}
+    PYTHONPATH=src {{HOST_PY}} -m claude_code_tts.cli release "$@"
 
 # Operator, on the daemon's machine: rebuild from this checkout, deploy hooks, restart, verify; logs in .logs/just/
 up *ARGS:
-    @scripts/up.py {{ARGS}}
+    @scripts/up.py "$@"
 
 # Operator: the timeline of `just up` runs, newest last
 timeline N="20":

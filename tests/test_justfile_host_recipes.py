@@ -62,3 +62,17 @@ def test_host_py_comes_from_the_resolver_script():
     assert m, "HOST_PY definition missing"
     assert m.group(1) == "scripts/host-python.sh"
     assert os.access(JUSTFILE.parent / "scripts" / "host-python.sh", os.X_OK)
+
+
+def test_forwarding_recipes_quote_their_arguments():
+    """`just release --notes "a b"` must reach the CLI as one argument.
+
+    {{ARGS}} is pasted into the shell line and re-split by bash; "$@" (with
+    `set positional-arguments`) forwards each argument intact.
+    """
+    text = JUSTFILE.read_text()
+    assert re.search(r"^set positional-arguments\s*$", text, re.M), "justfile needs `set positional-arguments`"
+    body = recipes()
+    for name in ("release", "up"):
+        assert any('"$@"' in ln for ln in body[name]), f"{name} must forward arguments as \"$@\""
+        assert not any("{{ARGS}}" in ln for ln in body[name]), f"{name} still pastes {{{{ARGS}}}} into the shell line"
