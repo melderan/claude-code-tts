@@ -366,11 +366,16 @@ Claude Code supports [hooks](https://docs.anthropic.com/en/docs/claude-code/hook
 - **PostToolUse hook** (`play-sound.sh`) — optional notification sounds
 
 The hooks are thin shims (2-3 lines) that call `claude-tts speak --from-hook`, which:
-1. Reads the conversation transcript from the hook's JSON input
-2. Finds the last assistant message with text content
-3. Filters out code blocks, markdown formatting, tables, and frontmatter
-4. Generates speech via Piper TTS
-5. Plays audio (directly or through the daemon queue)
+1. Takes the response from the hook's JSON input (`last_assistant_message`) at Stop, and reads
+   the conversation transcript for the text written between tool calls
+2. Filters out code blocks, markdown formatting, tables, and frontmatter
+3. Generates speech via Piper TTS
+4. Plays audio (directly or through the daemon queue)
+
+Since Claude Code 2.1.286 the transcript receives the response only after the Stop hook has
+fired, so the Stop hook speaks what its input carries and remembers it; when the line lands,
+the next hook recognizes and skips it. Hooks run asynchronously, so Claude Code never waits on
+speech; the trade is that `claude -p` kills them when it exits, so headless runs stay silent.
 
 ### Smart filtering
 

@@ -77,14 +77,16 @@ def base_config():
     )
 
 
-def _run_hook(transcript_path: Path, hook_type: str, tool_name: str = "Bash") -> str | None:
+def _run_hook(
+    transcript_path: Path, hook_type: str, tool_name: str = "Bash", last_assistant_message: str | None = None
+) -> str | None:
     """Invoke _speak_from_hook with mocked speak() and return what was spoken."""
     spoken: list[str] = []
 
-    hook_input = json.dumps({
-        "transcript_path": str(transcript_path),
-        "tool_name": tool_name,
-    })
+    payload: dict = {"transcript_path": str(transcript_path), "tool_name": tool_name}
+    if last_assistant_message is not None:
+        payload["last_assistant_message"] = last_assistant_message
+    hook_input = json.dumps(payload)
 
     args = argparse.Namespace(hook_type=hook_type)
 
@@ -540,3 +542,93 @@ class TestStopWaitsForTheResponse:
 
         monkeypatch.setattr("claude_code_tts.cli.time.sleep", late_write)
         assert _run_hook(transcript, "stop") == "the final answer of the first turn"
+
+
+class TestStopSpeaksFromItsInput:
+    """The Stop hook's input carries the response (last_assistant_message); since Claude Code
+    2.1.286 the transcript gets it only after the hook fires. Stop speaks from the input at
+    once and records what it said; the hook that later finds the line skips it."""
+
+    def _turn_in_progress(self, tmp_path, name: str) -> Path:
+        transcript = tmp_path / "projects" / "-Users-dev" / f"{name}.jsonl"
+        _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "opening reply text here")])
+        _run_hook(transcript, "stop", last_assistant_message="opening reply text here")
+        _append(transcript, [_user("go"), _tool_use("m1"), _tool_result()])
+        return transcript
+
+    def test_stop_speaks_the_input_without_waiting(self, tmp_path, fake_state_dir, monkeypatch):
+        transcript = self._turn_in_progress(tmp_path, "uuid-I")
+        sleeps: list[float] = []
+        monkeypatch.setattr("claude_code_tts.cli.time.sleep", sleeps.append)
+        assert _run_hook(transcript, "stop", last_assistant_message="the answer, straight from the input") == (
+            "the answer, straight from the input"
+        )
+        assert len(sleeps) == 1, "the yield only; no reread loop, no settle"
+
+    def test_the_landed_response_is_not_spoken_again(self, tmp_path, fake_state_dir):
+        transcript = self._turn_in_progress(tmp_path, "uuid-J")
+        _run_hook(transcript, "stop", last_assistant_message="the answer, straight from the input")
+        # The response lands, then the next turn begins with an intermediate text.
+        _append(transcript, [_assistant_msg("m2", "the answer, straight from the input")])
+        assert _run_hook(transcript, "stop", last_assistant_message="") is None, "a Stop with nothing new is silent"
+        _append(transcript, [_user("next"), _assistant_msg("m3", "working on the next thing now"), _tool_use("m3"),
+                             _tool_result()])
+        assert _run_hook(transcript, "post_tool_use") == "working on the next thing now"
+
+    def test_post_tool_use_covers_a_landed_response_it_skipped(self, tmp_path, fake_state_dir):
+        transcript = self._turn_in_progress(tmp_path, "uuid-K")
+        _run_hook(transcript, "stop", last_assistant_message="the answer, straight from the input")
+        _append(transcript, [_assistant_msg("m2", "the answer, straight from the input"), _user("next"),
+                             _tool_use("m3"), _tool_result()])
+        assert _run_hook(transcript, "post_tool_use") is None
+        # Watermark moved past the landed line: a later hook does not find it either.
+        _append(transcript, [_tool_use("m3"), _tool_result()])
+        assert _run_hook(transcript, "post_tool_use") is None
+        assert _run_hook(transcript, "stop", last_assistant_message="") is None
+
+    def test_a_response_already_in_the_file_is_spoken_once(self, tmp_path, fake_state_dir):
+        transcript = self._turn_in_progress(tmp_path, "uuid-L2")
+        _append(transcript, [_assistant_msg("m2", "the answer, already written down")])
+        assert _run_hook(transcript, "stop", last_assistant_message="the answer, already written down") == (
+            "the answer, already written down"
+        )
+        _append(transcript, [_user("next"), _tool_use("m3"), _tool_result()])
+        assert _run_hook(transcript, "post_tool_use") is None
+        assert _run_hook(transcript, "stop", last_assistant_message="") is None
+
+    def test_unspoken_intermediates_come_before_the_input(self, tmp_path, fake_state_dir):
+        transcript = self._turn_in_progress(tmp_path, "uuid-M")
+        _append(transcript, [_assistant_msg("m1b", "an intermediate nobody spoke yet"), _tool_use("m1b"),
+                             _tool_result()])
+        spoken = _run_hook(transcript, "stop", last_assistant_message="then the final answer arrives")
+        assert spoken == "an intermediate nobody spoke yet then the final answer arrives"
+
+    def test_input_holding_the_last_block_only_still_matches(self, tmp_path, fake_state_dir):
+        transcript = self._turn_in_progress(tmp_path, "uuid-N")
+        _run_hook(transcript, "stop", last_assistant_message="and the second block of the same message")
+        _append(transcript, [{"type": "assistant", "message": {"id": "m2", "content": [
+            {"type": "text", "text": "The first block of the final message."},
+            {"type": "text", "text": "And the second block of the same message."}]}}])
+        _append(transcript, [_user("next"), _tool_use("m3"), _tool_result()])
+        assert _run_hook(transcript, "post_tool_use") is None
+
+    def test_first_stop_of_a_transcript_speaks_the_input_not_an_older_text(self, tmp_path, fake_state_dir):
+        transcript = tmp_path / "projects" / "-Users-dev" / "uuid-O.jsonl"
+        _write_transcript(transcript, [_user("hi"), _assistant_msg("m0", "prose before the tool call"),
+                                       _tool_use("m0"), _tool_result()])
+        assert _run_hook(transcript, "stop", last_assistant_message="the final answer of the first turn") == (
+            "the final answer of the first turn"
+        )
+
+    def test_without_the_input_field_the_reread_still_catches_a_late_line(self, tmp_path, fake_state_dir, monkeypatch):
+        transcript = self._turn_in_progress(tmp_path, "uuid-P")
+        sleeps: list[float] = []
+
+        def late_write(seconds: float) -> None:
+            sleeps.append(seconds)
+            if len(sleeps) == 3:
+                _append(transcript, [_assistant_msg("m2", "the answer that landed after the hook fired")])
+
+        monkeypatch.setattr("claude_code_tts.cli.time.sleep", late_write)
+        assert _run_hook(transcript, "stop") == "the answer that landed after the hook fired"
+

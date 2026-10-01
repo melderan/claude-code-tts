@@ -2202,6 +2202,15 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
     transcript_key = transcript.stem or session_id
     state_file = Path(f"/tmp/claude_tts_spoken_{transcript_key}.state")
     lock_dir = Path(f"/tmp/claude_tts_wm_{transcript_key}.lock")
+    pending_file = Path(f"/tmp/claude_tts_spoken_{transcript_key}.pending")
+
+    # The Stop hook's input carries the response itself (last_assistant_message,
+    # Claude Code 2.1.47+), and since 2.1.286 the transcript gets that response
+    # only after the hook has fired. So a Stop speaks from its input and leaves
+    # a record of what it said; the hook that finds the line later skips it.
+    # "Something is coming" is the record, "it came in" is the skip (JMO, 10-01).
+    has_input_field = hook_type == "stop" and "last_assistant_message" in hook_data
+    input_text = str(hook_data.get("last_assistant_message") or "").strip() if hook_type == "stop" else ""
 
     watermark = _read_watermark(state_file, lock_dir, transcript)
     current_lines = _count_lines(transcript)
@@ -2209,9 +2218,9 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
 
     if hook_type == "stop":
         # Brief yield to let concurrent PostToolUse finish. On a transcript
-        # with no watermark the scan below takes the last text in the file,
-        # so give the response time to be that text (see the reread below).
-        time.sleep(STOP_FIRST_SETTLE if watermark == 0 else 0.1)
+        # with no watermark and no response in the input, the scan below takes
+        # the last text in the file, so give the response time to be that text.
+        time.sleep(STOP_FIRST_SETTLE if watermark == 0 and not input_text else 0.1)
         watermark = _read_watermark(state_file, lock_dir, transcript)
         current_lines = _count_lines(transcript)
     elif current_lines <= watermark:
@@ -2236,14 +2245,37 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
     # watermark written below must cover everything the scan saw, or the
     # next hook finds the same text again (heard twice, 20 s apart, 2026-09-26).
     speakable, scanned_lines = _scan_transcript(transcript, watermark, hook_type)
-    if not speakable and hook_type == "stop":
-        # Since Claude Code 2.1.286 (2026-09-30) the response reaches the
-        # transcript in the same second the Stop hook fires, usually after
-        # the hook has read the file. A Stop that finds tool results but no
-        # text used to move the watermark past them and say nothing; the
-        # response landed just above the watermark and was spoken by the
-        # next hook, one message late (every room, 52 times in a day). So
-        # "no text yet" means "not written yet" until the budget is spent.
+
+    # "It came in": the response a Stop hook spoke from its input has landed.
+    landed_line: int | None = None
+    pending = _read_pending(pending_file)
+    if pending:
+        for i, (line_no, _source, msg_text) in enumerate(speakable):
+            if _same_text(msg_text, pending):
+                debug(f"{hook_type}: line {line_no} is the response the Stop hook spoke from its input, skipping")
+                landed_line = line_no
+                del speakable[i]
+                break
+    if hook_type == "stop":
+        _clear_pending(pending_file)  # a new Stop supersedes the record either way
+
+    # "Something is coming": the Stop hook has the response but the file does not.
+    from_input = False
+    if input_text:
+        if speakable and _same_text(speakable[-1][2], input_text):
+            pass  # landed already; spoken from the file as before
+        else:
+            from_input = True
+            if watermark == 0:
+                speakable = []  # the reverse scan found an older text, not this response
+    elif not speakable and hook_type == "stop" and not has_input_field:
+        # No response field in the input (Claude Code before 2.1.47). Since
+        # 2.1.286 the response reaches the transcript in the same second the
+        # Stop hook fires, usually after the hook has read the file, so "no
+        # text yet" means "not written yet" until the budget is spent; a Stop
+        # that gave up here once moved the watermark past the turn and the
+        # next hook spoke the response one message late. A field that is
+        # present but empty means the turn ended without a response: no wait.
         for attempt in range(1, STOP_REREAD_ATTEMPTS + 1):
             time.sleep(STOP_REREAD_DELAY)
             speakable, scanned_lines = _scan_transcript(transcript, watermark, hook_type)
@@ -2251,6 +2283,10 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
                 debug(f"stop: response landed on reread {attempt}: current={scanned_lines}")
                 break
     current_lines = max(current_lines, scanned_lines)
+    if from_input:
+        speakable.append((current_lines, "input", input_text))
+        _write_pending(pending_file, input_text)
+        debug(f"stop: response from the hook input ({len(input_text)} chars), not in the transcript yet")
     if not speakable and current_lines <= watermark:
         _write_watermark(state_file, lock_dir, current_lines)
         debug(f"{hook_type}: no new lines since last speak")
@@ -2258,6 +2294,10 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
     if not speakable:
         if hook_type == "stop":
             _write_watermark(state_file, lock_dir, current_lines)
+        elif landed_line is not None:
+            # Only the landed response was new: cover it, or the next hook finds it again.
+            _claim_watermark(state_file, lock_dir, landed_line, current_lines)
+            debug(f"PostToolUse: watermark updated to {current_lines} past the landed response")
         debug(f"{hook_type}: no assistant text in lines {watermark}..{current_lines}")
         return
 
@@ -2337,6 +2377,48 @@ STOP_REREAD_DELAY = 0.25
 # A Stop on a transcript with no watermark yet speaks the last text in the file;
 # this is how long it lets the response become that text first.
 STOP_FIRST_SETTLE = 1.0
+
+
+def _normalize_text(text: str) -> str:
+    """One space between words, so a text compares equal however it was wrapped."""
+    return " ".join(text.split())
+
+
+def _same_text(a: str, b: str) -> bool:
+    """Is the transcript text `a` the response `b` that a Stop hook spoke from its input?
+
+    Equal after whitespace normalization, or one inside the other when both
+    are long enough to be no accident: a response of several text blocks may
+    reach the input as its last block only.
+    """
+    na, nb = _normalize_text(a).casefold(), _normalize_text(b).casefold()
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    return min(len(na), len(nb)) >= 20 and (na in nb or nb in na)
+
+
+def _read_pending(pending_file: Path) -> str:
+    """The response the last Stop hook spoke from its input, if its line has not landed yet."""
+    try:
+        return pending_file.read_text().strip()
+    except OSError:
+        return ""
+
+
+def _write_pending(pending_file: Path, text: str) -> None:
+    try:
+        pending_file.write_text(text)
+    except OSError:
+        pass
+
+
+def _clear_pending(pending_file: Path) -> None:
+    try:
+        pending_file.unlink()
+    except OSError:
+        pass
 
 
 def _count_lines(path: Path) -> int:
