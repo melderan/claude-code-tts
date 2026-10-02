@@ -241,6 +241,11 @@ def kill_orphan_player(pid: int | None) -> bool:
 # If less than this many seconds of audio remain, skip replay entirely
 NEAR_END_THRESHOLD = 2.0
 
+# A play killed sooner than this was never heard: a pause that landed between
+# the last look and the player's first poll. It is not "near the end", however
+# short the audio, so it replays instead of being dropped.
+BARELY_STARTED_S = 0.1
+
 # On resume, rewind this many REAL seconds (what you hear) from where
 # we were interrupted. Converted to WAV-time using playback speed,
 # so it feels like the same amount of re-listening regardless of speed.
@@ -569,6 +574,12 @@ def daemon_play_audio(
     if not player:
         log("No audio player available", "ERROR")
         return (False, False, 0.0)
+    if JOBS.state(job_id) == "cancelled":
+        # A /stop landed between the caller's last look and here: start nothing.
+        return (False, False, 0.0)
+    if read_playback_state().get("paused"):
+        # So did a pause: report it as a kill at 0 s without making a sound.
+        return (False, True, 0.0)
 
     try:
         cmd = list(player)
@@ -597,7 +608,7 @@ def daemon_play_audio(
                     f"Still playing (PID {proc.pid}, {now - start_time:.0f}s, paused={state.get('paused')})"
                 )
                 last_status_log = now
-            if JOBS.take_cancel(job_id):
+            if JOBS.cancelled(job_id):
                 elapsed = time.monotonic() - start_time
                 log(f"Audio cancelled by bridge (PID {proc.pid}) after {elapsed:.1f}s")
                 try:
@@ -761,29 +772,39 @@ def play_sentences(
         JOBS.update(job_id, state="cancelled", position_ms=round(played_s * 1000))
         return StreamResult("cancelled", i, parts, played_s=played_s)
 
+    def held(i: int) -> StreamResult | None:
+        """The stream's end if a stop, pause or shutdown is waiting, else None."""
+        # A bridge /stop between plays marks the job cancelled without a cancel
+        # request (there is no player to kill); JOBS.cancelled checks both.
+        if JOBS.cancelled(job_id):
+            return cancelled(i)
+        if read_playback_state().get("paused") or _shutdown_requested:
+            return StreamResult("paused", i, parts, played_s=played_s)
+        return None
+
     try:
         for i in range(start_index, n):
             while not ready[i].wait(timeout=0.2):
-                # A bridge /stop between plays marks the job cancelled without a
-                # cancel request (there is no player to kill), so check both.
-                if JOBS.take_cancel(job_id) or JOBS.state(job_id) == "cancelled":
-                    return cancelled(i)
-                if read_playback_state().get("paused") or _shutdown_requested:
-                    return StreamResult("paused", i, parts, played_s=played_s)
-            if _shutdown_requested:
-                return StreamResult("paused", i, parts, played_s=played_s)
+                if (end := held(i)) is not None:
+                    return end
+            # Also when the sentence was ready before the first look: a stop or
+            # pause that landed while it synthesized must not wait for the poll.
+            if (end := held(i)) is not None:
+                return end
             if not ok[i]:
                 return StreamResult("failed", i, parts, played_s=played_s)
             parts.append(part_paths[i])
             part_s = get_wav_duration(part_paths[i])
             if i == start_index:
                 log(f"Sentence stream: first audio, sentence {i + 1}/{n}")
-                JOBS.update(
+                if not JOBS.update_live(
                     job_id,
                     state="playing",
                     started_at=time.time(),
                     offset_ms=round(played_s * 1000),
-                )
+                ):
+                    parts.pop()  # never played
+                    return cancelled(i)
             _, was_killed, elapsed = daemon_play_audio(part_paths[i], play_speed, job_id)
             slots.release()
             if JOBS.state(job_id) == "cancelled":
@@ -795,7 +816,7 @@ def play_sentences(
                     "paused",
                     i,
                     parts,
-                    cut_played=True,
+                    cut_played=elapsed >= BARELY_STARTED_S,
                     remaining_s=max(0.0, part_s - pos),
                     played_s=played_s,
                 )
@@ -838,8 +859,14 @@ def stream_message(
 
     msg_info = dict(msg_info)
     msg_info["sentence_index"] = start_index
+    # Before current_message names it: a /stop that cannot see it as current
+    # flushes its queue file and marks it cancelled, and that must stand.
+    if not JOBS.update_live(job_id, state="synthesizing", speed=speed):
+        log(f"Cancelled by bridge before speaking: {project}")
+        if msg_file is not None:
+            msg_file.unlink(missing_ok=True)
+        return
     write_playback_state(current_message=msg_info)
-    JOBS.update(job_id, state="synthesizing", speed=speed)
     if start_index:
         log(f"Resuming at sentence {start_index + 1}/{n}: {sentences[start_index][:50]}...")
 
@@ -1700,7 +1727,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                         )
 
                     write_playback_state(current_message=interrupted)
-                    JOBS.update(
+                    JOBS.update_live(
                         i_job_id,
                         state="playing",
                         started_at=time.time(),
@@ -1837,7 +1864,10 @@ def daemon_loop(lockpick: bool = False) -> None:
                 )
                 prefetched = False
             if not prefetched:
-                JOBS.update(job_id, state="synthesizing")
+                if not JOBS.update_live(job_id, state="synthesizing"):
+                    log(f"Cancelled by bridge before speaking: {project}")
+                    msg_file.unlink(missing_ok=True)
+                    continue
                 ok, marks = synthesize_prepared(p)
             if not ok:
                 log(
@@ -1855,6 +1885,12 @@ def daemon_loop(lockpick: bool = False) -> None:
             # message before any audio starts, the way a pause during playback
             # does: it comes back as the interrupted message at 0.0 s. Checked
             # before the speaker transition, which speaks too.
+            if JOBS.state(job_id) == "cancelled":
+                # Stopped while it synthesized; a pause now must not revive it.
+                log(f"Cancelled by bridge before speaking: {project}")
+                audio_file.unlink(missing_ok=True)
+                msg_file.unlink(missing_ok=True)
+                continue
             if read_playback_state().get("paused"):
                 audio_file.unlink(missing_ok=True)
                 current_msg_info["audio_position"] = 0.0
@@ -1901,7 +1937,7 @@ def daemon_loop(lockpick: bool = False) -> None:
 
             wav_duration = get_wav_duration(audio_file)
 
-            JOBS.update(
+            JOBS.update_live(
                 job_id,
                 state="playing",
                 started_at=time.time(),
@@ -1923,7 +1959,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             elif was_killed:
                 audio_pos = calculate_audio_position(elapsed, effective_speed, effective_speed_method)
                 remaining = wav_duration - audio_pos
-                if remaining <= NEAR_END_THRESHOLD:
+                if elapsed >= BARELY_STARTED_S and remaining <= NEAR_END_THRESHOLD:
                     log(f"Interrupted near end ({remaining:.1f}s remaining), skipping replay")
                     clear_current_message()
                     msg_file.unlink(missing_ok=True)

@@ -123,6 +123,36 @@ class JobRegistry:
             job.update(fields)
             job["updated_at"] = time.time()
 
+    def update_live(self, job_id: str | None, **fields: Any) -> bool:
+        """Update a job unless a /stop already cancelled it; False if it did.
+
+        The daemon marks a job playing just before it starts a player. A /stop
+        that found no player marks it cancelled; a plain update in between would
+        write over that and speak a message the listener stopped.
+        """
+        if not job_id:
+            return True
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return True
+            if job.get("state") == "cancelled":
+                return False
+            job.update(fields)
+            job["updated_at"] = time.time()
+            return True
+
+    def cancelled(self, job_id: str | None) -> bool:
+        """True if a cancel was requested (consumed here) or the job is marked cancelled.
+
+        A /stop asks for a cancel when it sees a player and marks the job
+        cancelled when it does not; it reads the player pid first, so a player
+        the daemon starts in between gets the mark, not the request.
+        """
+        if self.take_cancel(job_id):
+            return True
+        return self.state(job_id) == "cancelled"
+
     def advance(self, job_id: str | None, *, when: str, to: str) -> bool:
         """Move a job to `to` only if it is in state `when`; True if it moved.
 
