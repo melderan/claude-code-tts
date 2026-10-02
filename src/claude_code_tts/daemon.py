@@ -330,7 +330,13 @@ def rewind_amount(speed: float, speed_method: str) -> float:
 # ran past 180 s (longest 450 s), and on 09-30 alone three real dictations of 3 to 4 minutes
 # were cut by the cap and a brother spoke over JMO each time. A stuck hold is visible (the
 # "Still paused" line below, every minute) and the hotkey ends it; being talked over is not.
-MIC_PAUSE_MAX_S = 600.0
+# 600 through 9.41.2 was still too short: every cap release in the log to 2026-10-02 (five)
+# was a real dictation, the longest 14 min, and one of 10 min 20 s was cut 20 s early with
+# the person still speaking. Since 9.41.3 the recording file Handy saves at the stop ends the
+# hold too (MicWatcher polls Handy's recordings directory while a recording is open), so the
+# cap is only for a recording that left neither a stop line nor a file, and 30 minutes is that
+# last resort.
+MIC_PAUSE_MAX_S = 1800.0
 
 # While the queue is held, say so this often: who holds it, for how long, how much waits.
 # A hold nobody can see is how 2026-09-30 14:54 to 16:58 went by with 60 messages waiting.

@@ -13,6 +13,7 @@ not just WHAT they said. "JMO said this, and he was animated."
 from __future__ import annotations
 
 import math
+import re
 import shutil
 import sqlite3
 import struct
@@ -574,6 +575,26 @@ def get_handy_timestamp(file_name: str) -> int:
         return row[0] if row else 0
     except sqlite3.Error:
         return 0
+
+
+_RE_HANDY_FILE_EPOCH = re.compile(r"^handy-(\d{9,})\.wav$")
+
+
+def recording_saved_at(wav_path: Path) -> float:
+    """When Handy saved this recording: the epoch second in its name, else the file's mtime.
+
+    Handy names a recording handy-<epoch>.wav by the second it stopped (two on 2026-10-02
+    were stamped 2 s before the daemon's own "resumed after recording" line). A name in
+    another shape falls back to the mtime; a file that is gone reads as 0.0, which no hold
+    is older than.
+    """
+    m = _RE_HANDY_FILE_EPOCH.match(wav_path.name)
+    if m:
+        return float(m.group(1))
+    try:
+        return wav_path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def analyze_recording(wav_path: Path) -> AnalysisResult | None:

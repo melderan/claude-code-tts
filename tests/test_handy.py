@@ -451,3 +451,22 @@ class TestAnalyzerStartDoesNotBlock:
             time.sleep(0.05)
         t.stop()
         assert sorted(analyzed) == ["r0.wav", "r1.wav", "r2.wav"]
+
+
+class TestRecordingSavedAt:
+    def test_handy_name_is_the_stop_epoch(self, tmp_path):
+        from claude_code_tts.handy import recording_saved_at
+
+        assert recording_saved_at(tmp_path / "handy-1790976116.wav") == 1790976116.0
+
+    def test_other_names_fall_back_to_mtime_and_a_missing_file_is_zero(self, tmp_path):
+        import os
+
+        from claude_code_tts.handy import recording_saved_at
+
+        p = tmp_path / "r0.wav"
+        p.write_bytes(b"RIFF")
+        os.utime(p, (1_700_000_000, 1_700_000_000))
+        assert recording_saved_at(p) == 1_700_000_000.0
+        assert recording_saved_at(tmp_path / "gone.wav") == 0.0
+

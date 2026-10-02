@@ -782,3 +782,113 @@ class TestLogLineAge:
 
     def test_bad_date_is_none(self):
         assert log_line_age_s("[2026-13-45][99:00:00][x] start") is None
+
+
+
+class TestSavedRecordingEndsTheHold:
+    """Handy saves the WAV when a recording stops; that file is the second stop signal (9.41.3).
+
+    2026-10-02 14:11:36 PDT: a 10 min 20 s dictation; the 600 s cap released the hold at 14:21:36
+    and a brother spoke over JMO; Handy's file is stamped 14:21:56. The watcher polls the
+    recordings directory itself while a recording is open, so the release never waits on the
+    analyzer (whose analysis of a long recording takes tens of seconds).
+    """
+
+    def _watcher(self, tmp_path, monkeypatch, state, poll_s=0.05):
+        log_file = tmp_path / "handy.log"
+        log_file.write_text("")
+        monkeypatch.setattr("claude_code_tts.mic_watcher.HANDY_LOG", log_file)
+        monkeypatch.setattr("claude_code_tts.mic_watcher.SAVED_RECORDING_POLL_S", poll_s)
+        rec = tmp_path / "recordings"
+        rec.mkdir()
+
+        def write_state(**kwargs):
+            state.update(kwargs)
+
+        w = MicWatcher(
+            log_fn=MagicMock(),
+            read_playback_state=lambda: dict(state),
+            write_playback_state=write_state,
+            resume_delay_ms=50,
+            recordings_dir=rec,
+        )
+        return w, log_file, rec
+
+    def _start_recording(self, w, log_file):
+        w.start()
+        time.sleep(0.1)
+        with open(log_file, "a") as f:
+            f.write("[DEBUG] TranscribeAction::start called for binding: transcribe\n")
+        time.sleep(0.2)
+
+    def test_the_saved_file_releases_the_hold_with_no_stop_line(self, tmp_path, monkeypatch):
+        state = {"paused": False, "paused_by": None}
+        w, log_file, rec = self._watcher(tmp_path, monkeypatch, state)
+        try:
+            (rec / "handy-1790958850.wav").write_bytes(b"RIFF")  # an older recording, already there
+            self._start_recording(w, log_file)
+            assert state == {"paused": True, "paused_by": "mic"} and w.recording
+            (rec / f"handy-{int(time.time())}.wav").write_bytes(b"RIFF")
+            deadline = time.monotonic() + 2
+            while state["paused"] and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert state == {"paused": False, "paused_by": None} and not w.recording
+        finally:
+            w.stop()
+
+    def test_a_file_from_before_the_start_is_the_previous_recording(self, tmp_path, monkeypatch):
+        """14:22:03 a new recording began; the 14:21:56 file of the one before landed 7 s later."""
+        state = {"paused": False, "paused_by": None}
+        w, log_file, rec = self._watcher(tmp_path, monkeypatch, state)
+        try:
+            self._start_recording(w, log_file)
+            (rec / f"handy-{int(time.time()) - 7}.wav").write_bytes(b"RIFF")
+            time.sleep(0.3)
+            assert state == {"paused": True, "paused_by": "mic"} and w.recording
+        finally:
+            w.stop()
+
+    def test_a_file_stamped_the_same_second_as_the_start_counts(self, tmp_path, monkeypatch):
+        """Handy truncates to the second; a short recording can be stamped before its own start."""
+        state = {"paused": False, "paused_by": None}
+        w, log_file, _ = self._watcher(tmp_path, monkeypatch, state)
+        try:
+            self._start_recording(w, log_file)
+            assert w.recording_saved(float(int(w._recording_since))) is True
+            assert state["paused"] is False
+        finally:
+            w.stop()
+
+    def test_nothing_recording_means_nothing_to_release(self, tmp_path, monkeypatch):
+        state = {"paused": True, "paused_by": "user"}
+        w, _, rec = self._watcher(tmp_path, monkeypatch, state)
+        (rec / f"handy-{int(time.time())}.wav").write_bytes(b"RIFF")
+        assert w.recording_saved(time.time()) is False
+        assert w._poll_saved_recording() is False
+        assert state == {"paused": True, "paused_by": "user"}
+
+    def test_the_log_stop_after_a_saved_file_is_not_a_second_resume(self, tmp_path, monkeypatch):
+        state = {"paused": False, "paused_by": None}
+        w, log_file, _ = self._watcher(tmp_path, monkeypatch, state)
+        try:
+            self._start_recording(w, log_file)
+            assert w.recording_saved(time.time()) is True
+            state.update(paused=True, paused_by="user")  # the person paused by hand meanwhile
+            with open(log_file, "a") as f:
+                f.write("[DEBUG] TranscribeAction::stop called for binding: transcribe\n")
+            time.sleep(0.3)
+            assert state == {"paused": True, "paused_by": "user"}, "a stale stop line must not lift a hand pause"
+        finally:
+            w.stop()
+
+    def test_a_missing_recordings_dir_is_not_an_error(self, tmp_path, monkeypatch):
+        state = {"paused": False, "paused_by": None}
+        w, log_file, rec = self._watcher(tmp_path, monkeypatch, state)
+        rec.rmdir()
+        try:
+            self._start_recording(w, log_file)
+            assert state == {"paused": True, "paused_by": "mic"}
+            time.sleep(0.2)
+            assert w._poll_saved_recording() is False
+        finally:
+            w.stop()

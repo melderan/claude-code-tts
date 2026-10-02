@@ -307,8 +307,10 @@ class TestMicHoldLimit:
         assert d.mic_hold_expired(state, held, max_s) is expect
 
     def test_default_cap_outlasts_a_long_dictation(self):
-        """Three 3-to-4-minute dictations were cut by 180 on 2026-09-30; the longest seen is 450 s."""
-        assert d.MIC_PAUSE_MAX_S >= 600
+        """Every cap release in the log to 2026-10-02 (five) was a real dictation; the longest was 14 min
+        and a 10 min 20 s one was cut 20 s early at 600. The saved recording now ends the hold; the cap
+        is the last resort and must outlast any dictation seen."""
+        assert d.MIC_PAUSE_MAX_S >= 1800
 
     @pytest.mark.parametrize(
         ("held", "every", "expect"),
