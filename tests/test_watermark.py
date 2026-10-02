@@ -661,19 +661,6 @@ class TestStopSpeaksFromItsInput:
         assert "quarterly" not in pending.read_text()
         assert stat.S_IMODE(pending.stat().st_mode) == 0o600
 
-    def test_a_stale_record_is_dropped_unread(self, tmp_path, fake_state_dir):
-        import os
-
-        transcript = self._turn_in_progress(tmp_path, "uuid-N7")
-        _run_hook(transcript, "stop", last_assistant_message="a response from an hour ago")
-        pending = next(fake_state_dir.glob("claude_tts_spoken_uuid-N7.pending"))
-        old = pending.stat().st_mtime - 4000
-        os.utime(pending, (old, old))
-        _append(transcript, [_assistant_msg("m2", "a response from an hour ago"), _user("next"), _tool_use("m3"),
-                             _tool_result()])
-        assert _run_hook(transcript, "post_tool_use") == "a response from an hour ago"
-        assert not pending.exists()
-
     def test_stop_does_not_speak_an_intermediate_a_lagging_post_tool_use_took(
         self, tmp_path, fake_state_dir, monkeypatch
     ):
@@ -714,15 +701,20 @@ class TestStopSpeaksFromItsInput:
                              _tool_use("m3"), _tool_result()])
         assert _run_hook(transcript, "post_tool_use") is None
 
-    def test_the_second_stop_still_speaks_an_intermediate_the_first_missed(self, tmp_path, fake_state_dir):
+    def test_the_stop_that_loses_the_claim_does_nothing_at_all(self, tmp_path, fake_state_dir):
+        """Review of design v2 (2026-10-01): the twin that loses the spoken-store claim must not
+        rewrite .pending or move the watermark. Until 9.39.6 the second Stop here spoke a late
+        intermediate and moved the watermark; now it leaves both files exactly as the winner
+        wrote them, and the intermediate waits for the next hook's scan."""
         transcript = self._turn_in_progress(tmp_path, "uuid-twice-b")
         _run_hook(transcript, "stop", last_assistant_message="the answer both hooks were handed")
-        # An intermediate that landed between the two Stops is new text, and the second hook takes it.
+        state = fake_state_dir / "claude_tts_spoken_uuid-twice-b.state"
+        pending = fake_state_dir / "claude_tts_spoken_uuid-twice-b.pending"
+        before = (state.read_text(), pending.read_text(), pending.stat().st_mtime_ns)
         _append(transcript, [_assistant_msg("m1b", "a late intermediate only the second hook sees"), _tool_use("m1b"),
                              _tool_result()])
-        assert _run_hook(transcript, "stop", last_assistant_message="the answer both hooks were handed") == (
-            "a late intermediate only the second hook sees"
-        )
+        assert _run_hook(transcript, "stop", last_assistant_message="the answer both hooks were handed") is None
+        assert (state.read_text(), pending.read_text(), pending.stat().st_mtime_ns) == before
 
     def test_two_post_tool_use_hooks_meeting_the_landed_line_speak_it_never(
         self, tmp_path, fake_state_dir, monkeypatch

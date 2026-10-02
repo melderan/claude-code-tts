@@ -749,8 +749,12 @@ def daemon_healthy() -> bool:
     return True
 
 
-def speak(text: str, config: TTSConfig) -> None:
-    """Speak text using the configured mode (direct or queue)."""
+def speak(text: str, config: TTSConfig) -> bool:
+    """Speak text using the configured mode (direct or queue).
+
+    False when nothing was queued because the daemon is not healthy, so the hook can give its
+    spoken-store claim back; an exception from the queue write propagates for the same reason.
+    """
     # Truncate to max chars
     if len(text) > config.max_chars:
         text = text[:config.max_chars] + "..."
@@ -759,7 +763,8 @@ def speak(text: str, config: TTSConfig) -> None:
         if daemon_healthy():
             debug("Queue mode: writing to daemon queue")
             write_queue_message(text, config)
-        else:
-            debug("Daemon not healthy, skipping speech")
-    else:
-        speak_direct(text, config)
+            return True
+        debug("Daemon not healthy, skipping speech")
+        return False
+    speak_direct(text, config)
+    return True

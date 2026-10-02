@@ -21,6 +21,18 @@ def _no_inherited_tts_session(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _own_spoken_store(monkeypatch, tmp_path_factory):
+    """Every test gets its own spoken stores: the hook's ($TMPDIR/claude-tts-spoken) and the daemon's.
+
+    The store outlives a process by design (a 30 s claim per utterance), so a shared TMPDIR
+    would let one test's claim silence the same utterance in the next. tempfile has cached
+    its directory before this runs, so tmp_path is unaffected.
+    """
+    monkeypatch.setenv("TMPDIR", str(tmp_path_factory.mktemp("tmpdir")))
+    monkeypatch.setattr("claude_code_tts.state.SPOKEN_DIR", tmp_path_factory.mktemp("daemon-spoken"))
+
+
+@pytest.fixture(autouse=True)
 def _own_audio_dir(monkeypatch, tmp_path_factory):
     """Every test gets its own directory for the daemon's WAVs.
 
