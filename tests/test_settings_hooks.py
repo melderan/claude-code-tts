@@ -36,6 +36,18 @@ class TestEnsureTtsHooks:
         assert stop["async"] is True
         assert "async" not in s["hooks"]["UserPromptSubmit"][0]["hooks"][0]
 
+    def test_one_event_carries_two_of_our_hooks_each_added_once(self):
+        """UserPromptSubmit runs the tone context and, separately, the supersede."""
+        s = {"hooks": {"UserPromptSubmit": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": str(HOOKS_DIR / "voice-context.sh"), "timeout": 5},
+        ]}]}}
+        assert ensure_tts_hooks(s, HOOKS_DIR) is True
+        commands = [h["command"] for e in s["hooks"]["UserPromptSubmit"] for h in e["hooks"]]
+        assert commands == [str(HOOKS_DIR / "voice-context.sh"), str(HOOKS_DIR / "prompt-submitted.sh")]
+        added = s["hooks"]["UserPromptSubmit"][1]["hooks"][0]
+        assert added["timeout"] == 5 and "async" not in added  # written before the turn queues anything
+        assert ensure_tts_hooks(s, HOOKS_DIR) is False
+
     def test_idempotent(self):
         s: dict = {}
         ensure_tts_hooks(s, HOOKS_DIR)
@@ -68,10 +80,10 @@ class TestEnsureTtsHooks:
 
 
 class TestRemoveTtsHooks:
-    def test_removes_all_three_and_prunes(self):
+    def test_removes_all_four_and_prunes(self):
         s: dict = {"env": {"X": "1"}}
         ensure_tts_hooks(s, HOOKS_DIR)
-        assert remove_tts_hooks(s) == 3
+        assert remove_tts_hooks(s) == 4
         assert "hooks" not in s
         assert s["env"] == {"X": "1"}
 
@@ -166,3 +178,37 @@ class TestHooksRegisteredElsewhere:
         monkeypatch.setattr(install.subprocess, "run", lambda *a, **k: type("R", (), {"stdout": "bash\n"})())
         assert install.tts_hooks_registered_elsewhere(cwd=tmp_path) is None
 
+
+class TestManagedFileReport:
+    """A kit's file owns registration: the installer names each of our hooks it lacks."""
+
+    def test_names_each_missing_script_one_line_each(self, tmp_path, capsys):
+        from claude_code_tts.install import missing_tts_hooks, report_missing_tts_hooks
+        kit = tmp_path / "house.json"
+        kit.write_text(json.dumps({"hooks": {
+            "Stop": [{"hooks": [{"type": "command", "command": "~/.claude/hooks/speak-response.sh"}]}],
+            "PostToolUse": [{"hooks": [{"type": "command", "command": "~/.claude/hooks/speak-intermediate.sh"}]}],
+            "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "~/.local/bin/post unread"}]}],
+        }}))
+        assert missing_tts_hooks(kit) == [
+            ("UserPromptSubmit", "voice-context.sh"), ("UserPromptSubmit", "prompt-submitted.sh"),
+        ]
+        assert report_missing_tts_hooks(kit) == 2
+        out = capsys.readouterr().out
+        assert f"UserPromptSubmit: prompt-submitted.sh not registered in {kit}" in out
+        assert len([ln for ln in out.splitlines() if "not registered in" in ln]) == 2
+
+    def test_unreadable_file_says_so_and_names_nothing(self, tmp_path, capsys):
+        from claude_code_tts.install import missing_tts_hooks, report_missing_tts_hooks
+        assert missing_tts_hooks(tmp_path / "absent.json") is None
+        assert report_missing_tts_hooks(tmp_path / "absent.json") == 0
+        assert "Cannot read" in capsys.readouterr().out
+
+    def test_the_installer_reports_when_another_file_owns_registration(self):
+        import inspect
+
+        from claude_code_tts import install
+        src = inspect.getsource(install)
+        owner = src.index("elsewhere = tts_hooks_registered_elsewhere()")
+        branch = src[owner:src.index("elif upgrade:", owner)]
+        assert "report_missing_tts_hooks(elsewhere)" in branch

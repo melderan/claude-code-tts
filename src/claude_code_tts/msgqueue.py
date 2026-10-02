@@ -16,6 +16,7 @@ Moved out of daemon.py, audio.py and bridge.py as the second cut of docs/redesig
 from __future__ import annotations
 
 import json
+import math
 import secrets
 import time
 from collections.abc import Callable
@@ -89,7 +90,14 @@ def depth() -> int:
 #                                      remove_source
 #   want_marks          bridge         daemon.py:prepare_message
 #   lane                bridge, opt.   play_order ("background"), register_queued_bridge_jobs
-#   pre_action          control, opt.  daemon.py:handle_control_message ("drain")
+#   pre_action          control, opt.  daemon.py:handle_control_message ("drain"); "supersede"
+#                                      is taken by Supersedes before the loop picks anything
+#   supersede_session   control, opt.  Supersedes: the session whose older messages are stale
+#   supersede_project   control, opt.  Supersedes log line only
+#   supersede_claude_session control, opt.  Supersedes: Claude Code's session id of the prompt
+#   claude_session_id   hook, opt.     Supersedes: matched against supersede_claude_session
+#   hook_started        hook, opt.     Supersedes: when the writing hook started (the turn's
+#                                      end); compared to the cutoff instead of timestamp
 #   post_action         control, opt.  daemon.py:handle_control_message (restart, reload_config,
 #                                      stop)
 
@@ -132,6 +140,173 @@ def write_control_message(
     queue_file, _ = write_message(fields)
     _say(log, f"Control message written: {queue_file.name}")
     return queue_file
+
+
+SUPERSEDE = "supersede"
+
+# Sessions that are not a room: the bridge's pages and the daemon's own control path.
+_NOT_A_ROOM = ("", "system", "browser")
+
+
+def write_supersede_message(
+    session_id: str, project: str = "", claude_session: str = "", log: Log | None = None
+) -> Path | None:
+    """Say "a new prompt arrived in session_id now": its older queued messages are stale.
+
+    Written by the UserPromptSubmit hook. The cutoff is this message's own timestamp, taken
+    by write_message from the same clock the hook writers of that room use. claude_session
+    is Claude Code's own session id from the hook input: two instances in one folder share
+    session_id, and with it a prompt in one leaves the other's messages alone.
+    An older daemon logs "Control message: pre=supersede" at INFO, speaks nothing and
+    removes the file.
+    """
+    if session_id in _NOT_A_ROOM:
+        return None
+    fields: dict = {
+        "type": "control",
+        "session_id": "system",
+        "text": "",
+        "pre_action": SUPERSEDE,
+        "supersede_session": session_id,
+    }
+    if project:
+        fields["supersede_project"] = project
+    if claude_session:
+        fields["supersede_claude_session"] = claude_session
+    queue_file, _ = write_message(fields)
+    _say(log, f"Supersede written for {session_id}: {queue_file.name}", "DEBUG")
+    return queue_file
+
+
+def is_supersede(msg: dict) -> bool:
+    """A supersede control: taken by Supersedes.apply(), never handed to the control handler."""
+    return msg.get("type") == "control" and msg.get("pre_action") == SUPERSEDE
+
+
+def _stamp(value: object) -> float | None:
+    """A time a comparison can trust, or None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        when = float(value)
+    except ValueError:
+        return None
+    return when if math.isfinite(when) else None
+
+
+def _spoken_since(msg: dict) -> float | None:
+    """When the message's turn ended as far as its writer knows: hook_started, else timestamp.
+
+    The Stop hook waits and rereads for up to several seconds before it writes, so its
+    write time can fall after the next prompt; the time the hook started cannot.
+    """
+    started = _stamp(msg.get("hook_started"))
+    return started if started is not None else _stamp(msg.get("timestamp"))
+
+
+class Supersedes:
+    """The cutoffs of recent supersede controls, kept in memory after their files are gone.
+
+    A Stop hook can write its reply seconds after the control for the next prompt was taken,
+    so a cutoff is remembered for keep_s (the queue's max_age_seconds: anything older ages
+    out anyway). Keyed by (session_id, Claude Code session or ""). A daemon restart forgets
+    them, the way PauseLedger forgets pauses.
+    """
+
+    def __init__(self, keep_s: float = 300.0) -> None:
+        self.keep_s = keep_s
+        self._cutoffs: dict[tuple[str, str], tuple[float, str, float]] = {}  # -> (cutoff, project, taken)
+        self._unremovable: set[str] = set()
+
+    def _take(self, c: dict, log: Log | None, now: float) -> None:
+        name = str(c.get("_file", ""))
+        try:
+            Path(c["_file"]).unlink(missing_ok=True)
+        except (OSError, KeyError, TypeError) as e:
+            if name not in self._unremovable:  # said once, not on every pass
+                self._unremovable.add(name)
+                _say(log, f"Could not remove supersede control {name}: {e}", "WARN")
+        session = c.get("supersede_session")
+        when = _stamp(c.get("timestamp"))
+        if not isinstance(session, str) or session in _NOT_A_ROOM or when is None:
+            if name not in self._unremovable:
+                _say(log, f"Ignored a supersede control without a session or time: {c.get('id')}", "WARN")
+            return
+        claude = c.get("supersede_claude_session")
+        key = (session, claude if isinstance(claude, str) else "")
+        project = str(c.get("supersede_project") or session)
+        if key not in self._cutoffs or self._cutoffs[key][0] < when:
+            self._cutoffs[key] = (when, project, now)
+
+    def cutoff_for(self, msg: dict) -> tuple[float, str] | None:
+        """The latest cutoff that applies to msg, with its project; None when none does.
+
+        Claude Code's session id decides when both sides carry it; a side without it falls
+        back to the folder-or-room session_id alone.
+        """
+        session = msg.get("session_id")
+        if not isinstance(session, str) or session in _NOT_A_ROOM:
+            return None
+        raw = msg.get("claude_session_id")
+        mine = raw if isinstance(raw, str) else ""
+        best: tuple[float, str] | None = None
+        for (s, claude), (when, project, _taken) in self._cutoffs.items():
+            if s != session or (claude and mine and claude != mine):
+                continue
+            if best is None or when > best[0]:
+                best = (when, project)
+        return best
+
+    def apply(
+        self, messages: list[dict], log: Log | None = None, now: float | None = None,
+        ledger: PauseLedger | None = None,
+    ) -> list[dict]:
+        """Take every supersede control in messages, then drop what a cutoff makes stale.
+
+        Returns the messages left, in the same order, without the controls. A message is
+        dropped when a cutoff applies to it and its hook started before that cutoff:
+        replies and intermediate narration alike. Only queue files are touched, so the
+        message playing now (the loop is busy playing it and never calls this meanwhile)
+        is never cut, and playback.json is untouched on purpose: a message interrupted by a
+        pause resumes after a new prompt, a design call left open. Never dropped: control
+        messages, bridge messages (any source), and a message with no session or no
+        usable time. The control itself never speaks. A cutoff ages like the messages it
+        guards: paused time in ledger does not count toward keep_s.
+        """
+        t = time.time() if now is None else now
+        for key, (_when, _project, taken) in list(self._cutoffs.items()):
+            if t - taken - (ledger.held_since(taken, t) if ledger else 0.0) > self.keep_s:
+                del self._cutoffs[key]
+        for c in messages:
+            if is_supersede(c):
+                self._take(c, log, t)
+        if not self._cutoffs:
+            return [m for m in messages if not is_supersede(m)]
+
+        kept: list[dict] = []
+        for m in messages:
+            if is_supersede(m):
+                continue
+            cutoff = None if m.get("type") == "control" or m.get("source") else self.cutoff_for(m)
+            when = _spoken_since(m)
+            if cutoff is None or when is None or when >= cutoff[0]:
+                kept.append(m)
+                continue
+            try:
+                Path(m["_file"]).unlink()
+            except OSError:
+                continue  # gone already: aged out or flushed meanwhile
+            _say(
+                log,
+                f"Dropped stale message {m.get('id', '?')} from {m.get('project') or cutoff[1]}: "
+                f"a new prompt in {m.get('session_id')} came {cutoff[0] - when:.1f}s after its turn ended",
+            )
+        return kept
+
+
+def supersede(messages: list[dict], log: Log | None = None) -> list[dict]:
+    """Supersedes.apply with no memory: only the controls in this very list count."""
+    return Supersedes().apply(messages, log=log)
 
 
 class _NotAMessage(ValueError):
@@ -265,24 +440,31 @@ def cleanup_old_messages(
     ledger: PauseLedger | None = None,
     log: Log | None = None,
     on_removed: OnRemoved | None = None,
+    messages: list[dict] | None = None,
 ) -> int:
     """Remove messages older than max_age, not counting paused time. Returns count removed.
 
     on_removed is called with each aged-out message, so the caller can settle what this
     module does not know about: a bridge message's job would otherwise read "queued"
     forever. A file that is not a message is deleted with a WARN and not reported.
+    Given messages (a scan the caller already made), works on that list instead of the
+    directory and removes what it ages out from the list too.
     """
     removed = 0
     now = time.time()
 
-    for f in QUEUE_DIR.glob("*.json"):
-        try:
-            msg = _load(f)
-        except (OSError, json.JSONDecodeError, _NotAMessage) as e:
-            _say(log, f"Failed to read queue file {f}: {e}", "WARN")
-            f.unlink(missing_ok=True)
-            removed += 1
-            continue
+    def from_disk():
+        for f in QUEUE_DIR.glob("*.json"):
+            try:
+                yield f, _load(f)
+            except (OSError, json.JSONDecodeError, _NotAMessage) as e:
+                _say(log, f"Failed to read queue file {f}: {e}", "WARN")
+                f.unlink(missing_ok=True)
+                nonlocal removed
+                removed += 1
+
+    entries = from_disk() if messages is None else [(Path(m["_file"]), m) for m in messages]
+    for f, msg in list(entries):
         try:
             ts = float(msg.get("timestamp", 0))
         except (TypeError, ValueError):
@@ -295,6 +477,8 @@ def cleanup_old_messages(
                 continue  # gone already: the loop or a flush took it
             removed += 1
             _say(log, f"Removed stale message: {f.name}")
+            if messages is not None:
+                messages.remove(msg)
             if on_removed is not None:
                 on_removed(msg)
 
@@ -306,8 +490,12 @@ def enforce_max_depth(
     ledger: PauseLedger | None = None,
     log: Log | None = None,
     on_removed: OnRemoved | None = None,
+    messages: list[dict] | None = None,
 ) -> int:
     """Remove oldest messages if queue exceeds max depth.
+
+    Given messages (a scan the caller already made, in timestamp order), works on that
+    list instead of a new scan and removes what it trims from the list too.
 
     Messages that waited through a pause are held, not trimmed: they neither
     count toward the depth nor get removed. Control messages are never trimmed
@@ -316,17 +504,20 @@ def enforce_max_depth(
     on_removed is called with each trimmed message (see cleanup_old_messages).
     """
     now = time.time()
-    messages = [
+    source = scan(log) if messages is None else messages
+    candidates = [
         m
-        for m in scan(log)
+        for m in source
         if m.get("type") != "control"
         and (not ledger or ledger.held_since(float(m.get("timestamp", 0) or 0), now) <= 0)
     ]
     removed = 0
 
-    while len(messages) > max_depth:
-        oldest = messages.pop(0)
-        oldest["_file"].unlink(missing_ok=True)
+    while len(candidates) > max_depth:
+        oldest = candidates.pop(0)
+        Path(oldest["_file"]).unlink(missing_ok=True)
+        if messages is not None:
+            messages.remove(oldest)
         removed += 1
         _say(log, f"Queue overflow, removed: {oldest.get('project', 'unknown')}")
         if on_removed is not None:

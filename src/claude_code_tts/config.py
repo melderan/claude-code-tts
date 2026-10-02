@@ -112,6 +112,10 @@ class TTSConfig:
     active_persona: str = "claude-prime"
     session_id: str = ""
     project_name: str = ""
+    # Set by the hook path only (queue fields hook_started and claude_session_id): when the
+    # hook started, before any wait, and Claude Code's own session id from the hook input.
+    hook_started: float = 0.0
+    claude_session_id: str = ""
     default_muted: bool = False
     global_muted: bool = False
     # Raw dicts for commands that need more detail

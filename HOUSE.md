@@ -89,6 +89,7 @@ just release --check        # preflight and gate only; prints the plan
 - `default_muted: false` - new sessions speak; `claude-tts mute --all` sets it true and mutes every session, `unmute --all` reverts
 - Use `/tts-mute` and `/tts-unmute` for one session
 - Each session can have its own persona, speed, and mute state
+- A new prompt in a session drops that session's queued speech that has not started playing (hooks/prompt-submitted.sh on UserPromptSubmit runs `claude-tts supersede --from-hook`, which writes a supersede control; the playing message finishes, other sessions and the bridge are untouched; counted as `stale dropped` in `claude-tts daemon stats`)
 - When `CLAUDE_TTS_SESSION` names a session the hook has not seen, it inherits the directory-keyed session's persona, speed and mute once (9.26.0), so a rebuilt room keeps its voice
 
 ## Commands
@@ -154,6 +155,7 @@ hooks/
   speak-response.sh        # Thin shim -> claude-tts speak --from-hook
   speak-intermediate.sh    # Thin shim -> claude-tts speak --from-hook
   play-sound.sh            # Sound effects hook
+  prompt-submitted.sh      # UserPromptSubmit -> claude-tts supersede --from-hook (silent, never blocks)
 commands/tts-*.md          # Slash command definitions (call claude-tts CLI)
 scripts/
   commit-feature.sh        # Commit helper (version bump + feature in one)

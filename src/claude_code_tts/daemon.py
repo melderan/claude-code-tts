@@ -1060,14 +1060,35 @@ def _cancel_removed_job(msg: dict) -> None:
         JOBS.update(msg.get("id"), state="cancelled", position_ms=0)
 
 
-def cleanup_old_messages(max_age_seconds: int, ledger: PauseLedger | None = None) -> int:
+def cleanup_old_messages(
+    max_age_seconds: int, ledger: PauseLedger | None = None, messages: list[dict] | None = None
+) -> int:
     """Remove messages older than max_age, not counting paused time. Returns count removed."""
-    return msgqueue.cleanup_old_messages(max_age_seconds, ledger, log=log, on_removed=_cancel_removed_job)
+    return msgqueue.cleanup_old_messages(
+        max_age_seconds, ledger, log=log, on_removed=_cancel_removed_job, messages=messages
+    )
 
 
-def enforce_max_depth(max_depth: int, ledger: PauseLedger | None = None) -> int:
+def drop_superseded(
+    messages: list[dict], supersedes: msgqueue.Supersedes, ledger: PauseLedger | None = None
+) -> list[dict]:
+    """messages without what a newer prompt in its session made stale, controls taken.
+
+    The loop runs it first on its one scan of the pass, before ageing, trimming and the
+    pick, so stale messages never cost another room a trim, and a supersede acts as soon as the
+    loop sees it, not in its timestamp turn behind the messages it drops, and never reaches
+    handle_control_message. supersedes remembers the cutoffs for a reply written late.
+    """
+    return supersedes.apply(messages, log=log, ledger=ledger)
+
+
+def enforce_max_depth(
+    max_depth: int, ledger: PauseLedger | None = None, messages: list[dict] | None = None
+) -> int:
     """Remove oldest messages if queue exceeds max depth; held and control messages are exempt."""
-    return msgqueue.enforce_max_depth(max_depth, ledger, log=log, on_removed=_cancel_removed_job)
+    return msgqueue.enforce_max_depth(
+        max_depth, ledger, log=log, on_removed=_cancel_removed_job, messages=messages
+    )
 
 
 DEFAULT_NORMALIZE_DBFS = -16.0
@@ -1536,6 +1557,7 @@ def daemon_loop(lockpick: bool = False) -> None:
     last_reap = time.monotonic()
     hold_notices = 0  # "Still paused" lines logged for the current hold
     prefetch = Prefetch()
+    supersedes = msgqueue.Supersedes(keep_s=float(config["max_age_seconds"]))
     while not _shutdown_requested:
         try:
             write_heartbeat()
@@ -1573,8 +1595,13 @@ def daemon_loop(lockpick: bool = False) -> None:
                 continue
             if was_paused:
                 log(f"Resumed with {len(get_queue_messages())} message(s) waiting")
-            cleanup_old_messages(config["max_age_seconds"], ledger)
-            enforce_max_depth(config["max_depth"], ledger)
+            # One scan per pass, in this order: supersedes (the controls on it and the
+            # remembered cutoffs), then ageing, then trimming, then the pick. Stale
+            # messages go first, so an overflow trims a stale reply, not another
+            # room's older one.
+            queued = drop_superseded(get_queue_messages(), supersedes, ledger)
+            cleanup_old_messages(config["max_age_seconds"], ledger, queued)
+            enforce_max_depth(config["max_depth"], ledger, queued)
             JOBS.evict_finished()
 
             # Check for interrupted message to replay first
@@ -1714,13 +1741,15 @@ def daemon_loop(lockpick: bool = False) -> None:
 
             # Get pending messages
             prefetch.discard_if_gone()
-            messages = play_order(get_queue_messages())
+            messages = play_order(queued)  # the interrupted branch above always continues
             if not messages:
                 time.sleep(poll_interval)
                 continue
 
             msg = messages[0]
             msg_file = msg["_file"]
+            if not msg_file.exists():
+                continue  # flushed (a bridge /stop) since this pass's scan; the next pass rescans
 
             # Control messages
             if msg.get("type") == "control":
@@ -2169,7 +2198,7 @@ def log_stats(lines: Iterable[str]) -> dict:
     count = 0
     first: str | None = None
     last: str | None = None
-    messages = streams = mic_pauses = errors = 0
+    messages = streams = mic_pauses = errors = stale = 0
     pending: datetime | None = None
     gaps: list[float] = []
     kinds: dict[str, int] = {}
@@ -2199,6 +2228,8 @@ def log_stats(lines: Iterable[str]) -> dict:
             pending = None
         elif msg.startswith("Mic watcher: paused"):
             mic_pauses += 1
+        elif msg.startswith("Dropped stale message "):
+            stale += 1
     gaps.sort()
 
     def pick(p: float) -> float:
@@ -2212,6 +2243,7 @@ def log_stats(lines: Iterable[str]) -> dict:
         "streams": streams,
         "mic_pauses": mic_pauses,
         "errors": errors,
+        "stale_dropped": stale,
         "latency": {
             "n": len(gaps),
             "median": pick(0.5),
@@ -2234,7 +2266,8 @@ def format_log_stats(stats: dict, name: str, size_bytes: int) -> str:
     out = [
         f"{name}: {stats['lines']} lines, {size}{span}",
         f"messages spoken: {stats['messages']}   streamed: {stats['streams']}   "
-        f"mic pauses: {stats['mic_pauses']}   errors: {stats['errors']}",
+        f"mic pauses: {stats['mic_pauses']}   errors: {stats['errors']}   "
+        f"stale dropped: {stats.get('stale_dropped', 0)}",
         f"queue to first audio: median {lat['median']:.1f}s  p90 {lat['p90']:.1f}s  "
         f"max {lat['max']:.1f}s  (n={lat['n']})",
         "line kinds:",

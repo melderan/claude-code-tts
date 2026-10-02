@@ -364,6 +364,7 @@ Claude Code supports [hooks](https://docs.anthropic.com/en/docs/claude-code/hook
 - **Stop hook** (`speak-response.sh`) — triggers after each response, speaks the assistant's message
 - **PostToolUse hook** (`speak-intermediate.sh`) — optional narration between tool calls
 - **PostToolUse hook** (`play-sound.sh`) — optional notification sounds
+- **UserPromptSubmit hook** (`prompt-submitted.sh`) — a new prompt drops that session's queued speech that has not started playing (queue mode)
 
 The hooks are thin shims (2-3 lines) that call `claude-tts speak --from-hook`, which:
 1. Takes the response from the hook's JSON input (`last_assistant_message`) at Stop, and reads
@@ -399,6 +400,7 @@ When Claude runs tools (file reads, bash commands, etc.), the transcript contain
     speak-response.sh         # Stop hook (thin shim -> claude-tts speak --from-hook)
     speak-intermediate.sh     # PostToolUse hook (intermediate narration)
     play-sound.sh             # PostToolUse hook (sound effects)
+    prompt-submitted.sh       # UserPromptSubmit hook (drops stale queued speech)
   commands/
     tts-*.md                  # 13 slash command definitions
   settings.json               # Hook registration

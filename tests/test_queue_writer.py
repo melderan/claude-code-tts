@@ -113,6 +113,13 @@ class TestHookWriterGolden:
         assert msg["engine"] == "mlx"
         _check_file(path, msg, renames)
 
+    def test_from_a_hook_with_its_start_time_and_claude_session(self, queue, renames):
+        cfg = _cfg()
+        cfg.hook_started, cfg.claude_session_id = 1700000000.25, "uuid-a"
+        msg = _read(audio_mod.write_queue_message("hello", cfg))
+        assert set(msg) == HOOK_KEYS | {"hook_started", "claude_session_id"} | ADDED
+        assert (msg["hook_started"], msg["claude_session_id"]) == (1700000000.25, "uuid-a")
+
 
 class TestBridgeWriterGolden:
     def test_without_lane(self, queue, renames):

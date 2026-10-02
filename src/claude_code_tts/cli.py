@@ -2122,11 +2122,66 @@ def _inherit_session_settings(session_id: str, transcript_path: str) -> bool:
     return True
 
 
+def _supersede_from_hook(hook_data: dict) -> Path | None:
+    """UserPromptSubmit: tell the daemon this session's queued speech is stale; the file written.
+
+    A reply or narration still waiting in a deep queue when the next prompt is typed is
+    heard after the person moved on, which costs more than silence. The daemon drops the
+    room's messages written before this one (msgqueue.supersede); the one playing finishes.
+    Same session as the Stop hook derives, from CLAUDE_TTS_SESSION or the transcript path.
+    Only in queue mode with a live daemon, where the hook would queue its speech too.
+    Never prints: this hook's stdout reaches Claude's context.
+    """
+    from claude_code_tts import msgqueue
+    from claude_code_tts.audio import daemon_healthy
+
+    if os.environ.get("CLAUDE_TTS_ENABLED", "1") != "1":
+        return None
+    prompt = hook_data.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        debug("user_prompt_submit: no prompt in the input, no supersede")
+        return None
+    session_id = os.environ.get("CLAUDE_TTS_SESSION", "")
+    if not session_id:
+        m = re.search(r"/projects/([^/]+)/", str(hook_data.get("transcript_path") or ""))
+        session_id = m.group(1) if m else ""
+    if not session_id:
+        debug("user_prompt_submit: no session, no supersede")
+        return None
+    cfg = load_config(session_id)
+    if cfg.mode != "queue" or not daemon_healthy():
+        return None
+    claude_session = hook_data.get("session_id")
+    queue_file = msgqueue.write_supersede_message(
+        session_id, cfg.project_name, claude_session if isinstance(claude_session, str) else ""
+    )
+    debug(f"user_prompt_submit: supersede for {session_id} written: {queue_file}")
+    return queue_file
+
+
+def cmd_supersede(args: argparse.Namespace) -> None:
+    """`claude-tts supersede --from-hook`: what hooks/prompt-submitted.sh runs on UserPromptSubmit.
+
+    Reads the hook's JSON from stdin and writes a supersede control for its session. Prints
+    nothing and always exits 0, whatever goes wrong: a UserPromptSubmit hook's stdout is
+    added to the prompt, and a failing one must never get in the way of the prompt.
+    """
+    if not args.from_hook:
+        return
+    try:
+        hook_data = json.loads(sys.stdin.read() or "{}")
+        if isinstance(hook_data, dict):
+            _supersede_from_hook(hook_data)
+    except Exception as e:  # noqa: BLE001
+        debug(f"user_prompt_submit: supersede failed: {e}")
+
+
 def _speak_from_hook(args: argparse.Namespace) -> None:
     """Handle --from-hook mode: read hook JSON from stdin, process transcript."""
     from claude_code_tts.audio import speak
     from claude_code_tts.filter import filter_text
 
+    hook_started = time.time()  # before any wait: the stale-reply cutoff compares this
     hook_type = args.hook_type or "stop"
     debug(f"=== {hook_type} hook triggered (Python) ===")
 
@@ -2173,6 +2228,9 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
     pin_session(session_id)
 
     cfg = load_config(session_id)
+    cfg.hook_started = hook_started
+    claude_session = hook_data.get("session_id")
+    cfg.claude_session_id = claude_session if isinstance(claude_session, str) else ""
 
     if cfg.muted:
         debug(f"{hook_type}: muted, skipping")
@@ -3718,6 +3776,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--from-hook", action="store_true", help="Read hook JSON from stdin")
     p.add_argument("--hook-type", choices=["stop", "post_tool_use"], help="Hook type")
     p.set_defaults(func=cmd_speak)
+
+    # --- supersede ---
+    p = subparsers.add_parser(
+        "supersede", help="Drop this session's queued speech that has not started (UserPromptSubmit hook)"
+    )
+    p.add_argument("--from-hook", action="store_true", help="Read UserPromptSubmit hook JSON from stdin")
+    p.set_defaults(func=cmd_supersede)
 
     # --- audition ---
     p = subparsers.add_parser("audition", help="Audition voices interactively")

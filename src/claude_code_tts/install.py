@@ -119,7 +119,7 @@ TTS_SESSIONS_DIR = TTS_CONFIG_DIR / "sessions.d"
 # NOTE: As of v7.0.0, scripts are no longer deployed to ~/.claude-tts/.
 # All functionality is in the `claude-tts` CLI binary (via uv tool install).
 MANIFEST: dict[str, list[str]] = {
-    "hooks": ["speak-response.sh", "speak-intermediate.sh", "play-sound.sh", "voice-context.sh"],
+    "hooks": ["speak-response.sh", "speak-intermediate.sh", "play-sound.sh", "voice-context.sh", "prompt-submitted.sh"],
     "commands": ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md", "tts-persona.md", "tts-personas.md", "tts-voices.md", "tts-status.md", "tts-config.md", "tts-cleanup.md", "tts-random.md", "tts-test.md", "tts-discover.md", "tts-intermediate.md", "tts-release.md"],
 }
 
@@ -175,15 +175,20 @@ def _manifest_entries():
 # ever add or remove entries that are ours, and write the file atomically with
 # the user's non-ASCII intact.
 
-TTS_HOOK_EVENTS: dict[str, tuple[str, int]] = {
-    # event: (script, timeout seconds)
-    "Stop": ("speak-response.sh", 180),
-    "PostToolUse": ("speak-intermediate.sh", 30),
-    "UserPromptSubmit": ("voice-context.sh", 5),
+TTS_HOOK_EVENTS: dict[str, tuple[tuple[str, int], ...]] = {
+    # event: ((script, timeout seconds), ...), each script its own entry
+    "Stop": (("speak-response.sh", 180),),
+    "PostToolUse": (("speak-intermediate.sh", 30),),
+    # prompt-submitted.sh runs in step with the prompt, not async: its supersede must be
+    # written before anything the new turn queues, or the turn's first narration is dropped.
+    "UserPromptSubmit": (("voice-context.sh", 5), ("prompt-submitted.sh", 5)),
 }
 # Both speech hooks run async so Claude Code never waits on synthesis or playback.
 TTS_ASYNC_SCRIPTS = ("speak-response.sh", "speak-intermediate.sh")
-TTS_HOOK_MARKERS = tuple(script for script, _ in TTS_HOOK_EVENTS.values()) + ("claude-tts speak --from-hook",)
+TTS_HOOK_MARKERS = tuple(script for pairs in TTS_HOOK_EVENTS.values() for script, _ in pairs) + (
+    "claude-tts speak --from-hook",
+    "claude-tts supersede --from-hook",
+)
 
 
 def _is_tts_hook(hook: dict) -> bool:
@@ -197,8 +202,7 @@ def _entry_hooks(entry: dict) -> list[dict]:
     return [h for h in hooks if isinstance(h, dict)]
 
 
-def _tts_hook_entry(event: str, hooks_dir: Path) -> dict:
-    script, timeout = TTS_HOOK_EVENTS[event]
+def _tts_hook_entry(script: str, timeout: int, hooks_dir: Path) -> dict:
     hook: dict = {"type": "command", "command": str(hooks_dir / script), "timeout": timeout}
     if script in TTS_ASYNC_SCRIPTS:
         hook["async"] = True
@@ -268,6 +272,42 @@ def tts_hooks_registered_elsewhere(cwd: Path | None = None) -> Path | None:
     return None
 
 
+def missing_tts_hooks(path: Path) -> list[tuple[str, str]] | None:
+    """(event, script) for each of our hooks the settings file at path does not register.
+
+    None when the file cannot be read as JSON: a kit's file may live where this process
+    cannot see it. Used when another file owns the registration, so a room hears which of
+    our hooks its kit has not adopted yet instead of nothing.
+    """
+    try:
+        data = json.loads(Path(path).expanduser().read_text())
+    except (OSError, ValueError):
+        return None
+    hooks = data.get("hooks", {}) if isinstance(data, dict) else {}
+    hooks = hooks if isinstance(hooks, dict) else {}
+    missing: list[tuple[str, str]] = []
+    for event, scripts in TTS_HOOK_EVENTS.items():
+        entries = hooks.get(event, [])
+        commands = [
+            h.get("command", "")
+            for entry in (entries if isinstance(entries, list) else [])
+            for h in _entry_hooks(entry)
+        ]
+        missing += [(event, script) for script, _ in scripts if not any(script in c for c in commands)]
+    return missing
+
+
+def report_missing_tts_hooks(path: Path) -> int:
+    """Name, one line each, our hooks the managed file at path lacks; the count named."""
+    missing = missing_tts_hooks(path)
+    if missing is None:
+        warn(f"Cannot read {path} to check which of our hooks it registers")
+        return 0
+    for event, script in missing:
+        warn(f"{event}: {script} not registered in {path}")
+    return len(missing)
+
+
 def ensure_tts_hooks(settings: dict, hooks_dir: Path | None = None) -> bool:
     """Register our Stop, PostToolUse and UserPromptSubmit hooks in a settings dict.
 
@@ -278,22 +318,23 @@ def ensure_tts_hooks(settings: dict, hooks_dir: Path | None = None) -> bool:
     hooks_dir = hooks_dir or HOOKS_DIR
     changed = False
     hooks = settings.setdefault("hooks", {})
-    for event, (script, _timeout) in TTS_HOOK_EVENTS.items():
+    for event, scripts in TTS_HOOK_EVENTS.items():
         entries = hooks.setdefault(event, [])
-        present = any(
-            script in hook.get("command", "")
-            for entry in entries
-            for hook in _entry_hooks(entry)
-        )
-        if not present:
-            entries.append(_tts_hook_entry(event, hooks_dir))
-            changed = True
-        if script in TTS_ASYNC_SCRIPTS:
-            for entry in entries:
-                for hook in _entry_hooks(entry):
-                    if script in hook.get("command", "") and hook.get("async") is not True:
-                        hook["async"] = True
-                        changed = True
+        for script, timeout in scripts:
+            present = any(
+                script in hook.get("command", "")
+                for entry in entries
+                for hook in _entry_hooks(entry)
+            )
+            if not present:
+                entries.append(_tts_hook_entry(script, timeout, hooks_dir))
+                changed = True
+            if script in TTS_ASYNC_SCRIPTS:
+                for entry in entries:
+                    for hook in _entry_hooks(entry):
+                        if script in hook.get("command", "") and hook.get("async") is not True:
+                            hook["async"] = True
+                            changed = True
     return changed
 
 
@@ -1198,6 +1239,7 @@ def do_install(
         info(f"Hooks are registered in {elsewhere}; nothing written to settings.json")
         if HOOKS_MANAGED_ENV in os.environ:
             info(f"({HOOKS_MANAGED_ENV} names that file)")
+        report_missing_tts_hooks(elsewhere)
     elif upgrade:
         # In upgrade mode, check if PostToolUse hook needs to be added
         if SETTINGS_FILE.exists():
