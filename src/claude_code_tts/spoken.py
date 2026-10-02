@@ -14,7 +14,7 @@ What a key names (the callers build it, this module only hashes):
   daemon: the queue message's own id; (project, text) only for a message without one.
 
 No text is kept: the file name is a sha256 and the file holds only the claim's TTL in
-seconds. There is no sweeper. A claim older than its TTL is taken over at the next claim of
+seconds and a random token naming the claimant. There is no sweeper. A claim older than its TTL is taken over at the next claim of
 the same key (see _take_over), and a claim of a key starting "00" (one in 256) also prunes
 claims older than PRUNE_AGE_S, so the directory stays bounded without a background thread:
 the daemon's directory would otherwise gain one file per message for good.
@@ -89,25 +89,36 @@ def _moved_name(path: Path) -> Path:
 class Claim:
     """A won claim. release() gives it back so a retry can speak; refresh() restarts its TTL.
 
+    The file holds "<ttl> <token>", the token random per claim. release() and refresh() act
+    only while the file at the path still carries this claim's token, checked under the
+    directory lock: a claimant that stalled past its TTL, whose claim another process took
+    over, must not remove or extend that other claim (review of 1e92b8e).
+
     path is None for a claim granted without a file (the directory could not be used): the
     store fails open, since the watermark and .pending still guard most doubles, and silence
     is the worse failure.
     """
 
-    def __init__(self, path: Path | None) -> None:
+    def __init__(self, path: Path | None, token: str = "") -> None:
         self.path = path
+        self.token = token
 
     @property
     def stored(self) -> bool:
         return self.path is not None
 
+    def _still_ours(self) -> bool:
+        assert self.path is not None
+        return _read_claim(self.path)[1] == self.token
+
     def release(self) -> None:
-        """Remove the claim, under the directory lock (see _locked), so a retry can speak."""
+        """Remove the claim if it is still ours, under the directory lock (see _locked)."""
         if self.path is None:
             return
         try:
             with _locked(self.path.parent):
-                self.path.unlink()
+                if self._still_ours():
+                    self.path.unlink()
         except OSError:
             pass
         self.path = None
@@ -117,11 +128,14 @@ class Claim:
         if self.path is None:
             return
         try:
-            fd = os.open(self.path, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+            with _locked(self.path.parent):
+                if not self._still_ours():
+                    return
+                fd = os.open(self.path, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+                with os.fdopen(fd, "w") as f:
+                    f.write(f"{ttl:.3f} {self.token}\n")
         except OSError:
             return
-        with os.fdopen(fd, "w") as f:
-            f.write(f"{ttl:.3f}\n")
 
 
 def _usable_dir(directory: Path) -> bool:
@@ -141,21 +155,32 @@ def _usable_dir(directory: Path) -> bool:
     return True
 
 
-def _ttl_of(path: Path, default: float) -> float:
+def _read_claim(path: Path) -> tuple[float | None, str]:
+    """(ttl, token) of the claim file; (None, "") when it is missing or unreadable."""
     try:
-        return float(path.read_text().strip() or default)
-    except (OSError, ValueError):
-        return default
+        parts = path.read_text().split()
+    except OSError:
+        return None, ""
+    try:
+        ttl = float(parts[0]) if parts else None
+    except ValueError:
+        ttl = None
+    return ttl, parts[1] if len(parts) > 1 else ""
 
 
-def _create(path: Path, ttl: float) -> bool:
+def _ttl_of(path: Path, default: float) -> float:
+    ttl = _read_claim(path)[0]
+    return default if ttl is None else ttl
+
+
+def _create(path: Path, ttl: float, token: str = "") -> bool:
     """O_EXCL create; True for the one process that made the file."""
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     except FileExistsError:
         return False
     with os.fdopen(fd, "w") as f:
-        f.write(f"{ttl:.3f}\n")
+        f.write(f"{ttl:.3f} {token}\n")
     return True
 
 
@@ -163,7 +188,7 @@ def _after_stale_stat() -> None:
     """Test seam: called between judging a claim stale and taking it over. Does nothing."""
 
 
-def _take_over(path: Path, ttl: float, now: float) -> bool:
+def _take_over(path: Path, ttl: float, now: float, token: str = "") -> bool:
     """A claim exists at `path`. Take it over if it is older than its TTL; True if we won.
 
     Called with the directory unlocked; takes the lock. Under it: look again (the holder of
@@ -179,12 +204,12 @@ def _take_over(path: Path, ttl: float, now: float) -> bool:
     (tests/test_spoken.py runs six threads on one stale file and saw three winners).
     """
     with _locked(path.parent):
-        if _create(path, ttl):
+        if _create(path, ttl, token):
             return True
         try:
             st = os.lstat(path)
         except FileNotFoundError:
-            return _create(path, ttl)
+            return _create(path, ttl, token)
         if now - st.st_mtime <= _ttl_of(path, ttl):
             return False
         _after_stale_stat()
@@ -192,12 +217,12 @@ def _take_over(path: Path, ttl: float, now: float) -> bool:
         try:
             os.rename(path, moved)
         except FileNotFoundError:
-            return _create(path, ttl)
+            return _create(path, ttl, token)
         try:
             moved.unlink()
         except OSError:
             pass
-        return _create(path, ttl)
+        return _create(path, ttl, token)
 
 
 def prune(directory: Path, max_age_s: float = PRUNE_AGE_S, now: float | None = None) -> int:
@@ -226,12 +251,27 @@ def claim(directory: Path, key: str, ttl: float, now: float | None = None) -> Cl
     if not _usable_dir(directory):
         return Claim(None)
     path = directory / key
+    token = secrets.token_hex(8)
     try:
-        won = _create(path, ttl) or _take_over(path, ttl, t)
+        won = _create(path, ttl, token) or _take_over(path, ttl, t, token)
     except OSError:
         return Claim(None)
     if not won:
         return None
     if key.startswith("00"):
         prune(directory, now=t)
-    return Claim(path)
+    return Claim(path, token)
+
+
+def first_unusable_notice(directory: Path) -> bool:
+    """True the first time this user is told `directory` cannot be used, False after.
+
+    An unusable store (another user made /tmp/claude-tts-spoken first, say) turns dedupe off
+    silently; the caller says so once at INFO. The marker sits beside the directory, per user.
+    """
+    marker = directory.parent / f".{directory.name}.unusable.{os.getuid()}"
+    try:
+        os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+    except OSError:
+        return False
+    return True

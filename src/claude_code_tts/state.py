@@ -36,9 +36,11 @@ PLAYBACK_STATE_FILE = TTS_CONFIG_DIR / "playback.json"
 VERSION_FILE = TTS_CONFIG_DIR / "daemon.version"
 RESPAWN_MARKER = TTS_CONFIG_DIR / "daemon.respawn"
 # The daemon's spoken store (spoken.py): one claim per queue message id, so a replayed or
-# doubled message plays once. On the daemon's own disk: a claim relies on O_EXCL and rename,
-# which a shared mount (virtiofs into a sandbox) does not promise; hooks claim in their own
-# $TMPDIR, never here.
+# doubled message plays once. It lives in the daemon's state directory because that is where
+# the daemon's files live and this module is their one reader and writer; on the daemon's
+# machine it is local disk, which O_EXCL, rename and flock need. Hooks never claim here: in a
+# sandbox this directory is a shared mount, so they claim in their own $TMPDIR. Anyone who can
+# see the mount sees only sha256 file names and "<ttl> <token>" contents, never text.
 SPOKEN_DIR = TTS_CONFIG_DIR / "spoken"
 
 CONTROL_PROTOCOL = "control-v1"

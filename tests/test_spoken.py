@@ -111,7 +111,7 @@ def _case2(tmp_path, name, monkeypatch):
     a = _hook(transcript, "stop", text=final, prompt="p1")  # spoke from the input; wrote .pending
     _append(transcript, [_assistant_msg("m2", final)])
     # Twin B read .pending before A wrote it, then found the line landed in the file.
-    monkeypatch.setattr(cli, "_read_pending", lambda _p: "")
+    monkeypatch.setattr(cli, "_read_pending_record", lambda _p: ("", ""))
     b = _hook(transcript, "stop", text=final, prompt="p1")
     return [a, b]
 
@@ -178,6 +178,21 @@ def _case_a(tmp_path, name):
 
 def test_case_a_the_same_words_in_two_turns_both_speak(tmp_path, fake_state_dir):
     assert _case_a(tmp_path, "ca") == [["All done, the tests pass."]] * 2
+
+
+def test_case_a_the_same_words_in_the_next_turn_with_no_tool_call_both_speak(tmp_path, fake_state_dir):
+    """Review of 1e92b8e: with no tool call between, the turn-two Stop is the first hook to
+    see turn one's landed line; it takes the line, and the record of turn one (same words)
+    must not be taken for turn two's response."""
+    transcript = _turn(tmp_path, "ca-notool")
+    done = "All done, the tests pass."
+    first = _hook(transcript, "stop", text=done, prompt="p1")
+    _append(transcript, [_assistant_msg("m2", done), _user("and the other one")])
+    second = _hook(transcript, "stop", text=done, prompt="p2")
+    assert [first, second] == [[done], [done]]
+    # and turn two's own line, when it lands, is still skipped once
+    _append(transcript, [_assistant_msg("m3", done), _user("next"), _tool_use("m4"), _tool_result()])
+    assert _hook(transcript, "post_tool_use") == []
 
 
 def test_case_a_control_a_content_only_key_drops_the_second_turn(tmp_path, fake_state_dir, content_only_key):
@@ -412,9 +427,9 @@ def _names(directory: Path) -> list[str]:
     return sorted(p.name for p in directory.iterdir() if p.name != ".lock")
 
 
-def test_two_claimants_on_one_stale_file_one_wins(tmp_path, monkeypatch):
-    """A judges the claim stale and stops there; B arrives on the same stale file. B must
-    wait for A and then find A's fresh claim, not take the file over a second time."""
+def _a_stops_at_the_seam_then_b(tmp_path, monkeypatch) -> tuple[dict[str, bool], bool, Path, str]:
+    """A judges the claim stale and stops there; B arrives on the same stale file; then A
+    goes on. Returns who won, whether B was still waiting when A was let go, the path, key."""
     key, path = _stale(tmp_path)
     at_seam, go = threading.Event(), threading.Event()
     results: dict[str, bool] = {}
@@ -435,35 +450,46 @@ def test_two_claimants_on_one_stale_file_one_wins(tmp_path, monkeypatch):
     assert at_seam.wait(5)
     b.start()
     b.join(timeout=0.3)
-    assert b.is_alive(), "B waits for A's takeover instead of racing it"
+    b_waited = b.is_alive()
     go.set()
     a.join(timeout=5)
     b.join(timeout=5)
+    return results, b_waited, path, key
+
+
+def test_two_claimants_on_one_stale_file_one_wins(tmp_path, monkeypatch):
+    results, b_waited, path, key = _a_stops_at_the_seam_then_b(tmp_path, monkeypatch)
+    assert b_waited, "B waits for A's takeover instead of racing it"
     assert results == {"A": True, "B": False}
     assert path.exists() and time.time() - path.stat().st_mtime < 5
     assert _names(tmp_path) == [key]
 
 
-def test_two_claimants_control_a_takeover_without_the_lock_claims_twice(tmp_path, monkeypatch):
-    """v2's first takeover (unlink, retry O_EXCL), lock-free. A judged the file stale; B runs
-    its whole takeover before A goes on; A then removes the fresh claim B just made, and
-    both speak. A rename in place of the unlink, lock-free, has the same hole."""
-    state = {"inside": False}
-    results: list[bool] = []
+def test_two_claimants_control_without_the_lock_both_win(tmp_path, monkeypatch):
+    """The real _take_over with the lock acquire made a no-op: B takes the stale file over
+    while A waits at the seam, then A renames B's fresh claim away and both speak."""
+    monkeypatch.setattr(spoken.fcntl, "flock", lambda fd, op: None)
+    results, b_waited, _, _ = _a_stops_at_the_seam_then_b(tmp_path, monkeypatch)
+    assert not b_waited
+    assert results == {"A": True, "B": True}
 
-    def naive(path: Path, ttl: float, now: float) -> bool:
-        if now - path.stat().st_mtime <= ttl:
-            return False
-        if not state["inside"]:
-            state["inside"] = True
-            results.append(spoken.claim(path.parent, path.name, ttl) is not None)  # B, whole
-        path.unlink(missing_ok=True)
-        return spoken._create(path, ttl)
 
-    monkeypatch.setattr(spoken, "_take_over", naive)
-    key, _ = _stale(tmp_path)
-    results.insert(0, spoken.claim(tmp_path, key, 30.0) is not None)  # A
-    assert results == [True, True]
+def test_a_stalled_claimant_cannot_release_or_refresh_the_claim_that_took_its_place(tmp_path):
+    """A claims, stalls past the TTL, C takes over and speaks, then A's write fails and A
+    gives its claim back: that must not remove C's, or C's twin speaks again."""
+    key = spoken.digest("stalled")
+    a = spoken.claim(tmp_path, key, 30.0)
+    assert a is not None
+    os.utime(tmp_path / key, (time.time() - 31, time.time() - 31))
+    c = spoken.claim(tmp_path, key, 30.0)
+    assert c is not None
+    before = (tmp_path / key).read_text()
+    a.refresh(999.0)
+    a.release()
+    assert (tmp_path / key).read_text() == before, "C's claim is untouched"
+    assert spoken.claim(tmp_path, key, 30.0) is None, "C's twin is still refused"
+    c.release()
+    assert spoken.claim(tmp_path, key, 30.0) is not None, "C's own release still works"
 
 
 def test_two_claimants_threads_on_one_stale_file_one_wins(tmp_path):
@@ -494,6 +520,18 @@ def test_a_stale_file_that_vanishes_mid_takeover_is_claimed_once(tmp_path, monke
     assert spoken.claim(tmp_path, key, 30.0) is None
 
 
+def test_prune_keeps_the_lock_file_however_old(tmp_path):
+    key = spoken.digest("k")
+    c = spoken.claim(tmp_path, key, 30.0)
+    assert c is not None
+    c.release()  # creates the lock file
+    lock = tmp_path / ".lock"
+    assert lock.exists()
+    os.utime(lock, (time.time() - 99999, time.time() - 99999))
+    spoken.prune(tmp_path)
+    assert lock.exists()
+
+
 def test_prune_removes_only_old_claims(tmp_path):
     old, fresh = spoken.digest("old"), spoken.digest("fresh")
     spoken.claim(tmp_path, old, 30.0)
@@ -520,7 +558,9 @@ def test_case7_the_hook_store_is_private_and_holds_no_text(tmp_path, fake_state_
         assert len(e.name) == 64 and all(c in "0123456789abcdef" for c in e.name)
         body = e.read_text()
         assert "quarterly" not in body and "opening" not in body
-        float(body)  # the TTL, nothing else
+        ttl, token = body.split()
+        float(ttl)  # the TTL and the claimant's random token, nothing else
+        assert len(token) == 16 and all(c in "0123456789abcdef" for c in token)
 
 
 def test_case7_tmpdir_unset_falls_to_tmp(monkeypatch):
@@ -555,7 +595,7 @@ def test_case8_input_path_and_file_path_share_one_key(tmp_path, fake_state_dir, 
     landed = VECTOR.replace("\n\n", "\n").rstrip("\n")
     a = _hook(transcript, "stop", text=VECTOR, prompt="p1")
     _append(transcript, [_assistant_msg("m2", landed)])
-    monkeypatch.setattr(cli, "_read_pending", lambda _p: "")
+    monkeypatch.setattr(cli, "_read_pending_record", lambda _p: ("", ""))
     b = _hook(transcript, "stop", text=VECTOR, prompt="p1")
     assert len(a) == 1 and b == []
     k_in = spoken.utterance_key("sess-1", "prompt:p1", VECTOR.strip())
@@ -569,3 +609,84 @@ def test_landed_match_cuts_at_a_word_boundary_when_casefold_changes_length():
     spoken_block = "Die Straße ist frei."
     landed = "Erster Block. " + spoken_block
     assert cli._landed_match(landed, cli._pending_key(spoken_block)) == "Erster Block."
+
+
+# --- Review of 1e92b8e: the daemon's claim is given back by the loop's catch-all -------------
+
+
+def test_an_exception_between_claim_and_playback_plays_the_message_on_the_next_pass(tmp_path):
+    state_dir, queue_dir, synthesized, patches = loop_harness(tmp_path, {})
+    played = _counting_player(patches)
+    real_prepare = d.prepare_message
+    calls = {"n": 0}
+
+    def prepare_fails_once(msg, raw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom between the claim and the player")
+        return real_prepare(msg, raw)
+
+    patches.append(patch.object(d, "prepare_message", side_effect=prepare_fails_once))
+    (queue_dir / f"{time.time():.6f}_x.json").write_text(json.dumps(
+        {"id": "retry-id", "timestamp": time.time(), "session_id": "s", "project": "p", "text": "plays on retry"}
+    ))
+    _run_loop_until(queue_dir, patches, lambda: len(played) >= 1)
+    log = (state_dir / "daemon.log").read_text()
+    assert "Error in daemon loop: boom" in log
+    assert len(played) == 1, log
+    assert "Duplicate dropped" not in log
+
+
+def test_the_daemon_restarts_the_claim_when_playback_ends(tmp_path):
+    """The claim's TTL becomes max(30 s, WAV duration) and counts from the end of playback."""
+    import wave
+
+    state_dir, queue_dir, synthesized, patches = loop_harness(tmp_path, {})
+    played = _counting_player(patches)
+    ended: list[float] = []
+
+    def forty_seconds(text, persona, output_file, **kw):
+        synthesized.append(text)
+        with wave.open(str(output_file), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(1000)
+            w.writeframes(b"\x00\x00" * 40000)
+        return True
+
+    real_play = d.daemon_play_audio
+
+    def play_then_mark(wav, *a, **k):
+        played.append(str(wav))
+        r = real_play(wav, *a, **k)
+        ended.append(time.time())
+        return r
+
+    patches = [p for p in patches if getattr(p, "attribute", "") not in ("daemon_generate_speech", "daemon_play_audio")]
+    patches += [patch.object(d, "daemon_generate_speech", side_effect=forty_seconds),
+                patch.object(d, "daemon_play_audio", side_effect=play_then_mark)]
+    (queue_dir / f"{time.time():.6f}_y.json").write_text(json.dumps(
+        {"id": "long-id", "timestamp": time.time(), "session_id": "s", "project": "p", "text": "a long one"}
+    ))
+    _run_loop_until(queue_dir, patches, lambda: bool(ended))
+    claim_file = st.SPOKEN_DIR / spoken.digest("queue-id", "long-id")
+    ttl, _ = spoken._read_claim(claim_file)
+    assert ttl is not None and abs(ttl - 40.0) < 0.5
+    assert claim_file.stat().st_mtime >= ended[0] - 0.05
+    for e in st.SPOKEN_DIR.iterdir():  # the daemon's store, visible through the mount: no text
+        if e.name != ".lock":
+            assert len(e.name) == 64 and "long" not in e.read_text()
+
+
+def test_an_unusable_hook_store_is_said_once_at_info(tmp_path, fake_state_dir, monkeypatch):
+    """Review of 1e92b8e: another user's /tmp/claude-tts-spoken turns dedupe off; say it once."""
+    elsewhere = tmp_path / "not-ours"
+    elsewhere.mkdir()
+    spoken.hook_dir().symlink_to(elsewhere)
+    lines: list[str] = []
+    monkeypatch.setattr(cli, "debug", lines.append)
+    transcript = _turn(tmp_path, "c6u")
+    _append(transcript, [_user("more"), _tool_use("m5"), _tool_result()])
+    _hook(transcript, "stop", text="a reply spoken while the store is unusable", prompt="p1")
+    notices = [ln for ln in lines if ln.startswith("INFO: spoken store unusable")]
+    assert len(notices) == 1 and "reply" not in notices[0]

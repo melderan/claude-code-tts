@@ -1367,8 +1367,8 @@ def claim_message(msg: dict) -> spoken.Claim | None:
     claim = spoken.claim(daemon_state.SPOKEN_DIR, key, spoken.DAEMON_MIN_TTL_S)
     if claim is None:
         log(f"Duplicate dropped: {project}, {what}, already spoken")
-    elif not claim.stored:
-        log(f"Spoken store unusable at {daemon_state.SPOKEN_DIR}; playing {what} unclaimed", "WARN")
+    elif not claim.stored and spoken.first_unusable_notice(daemon_state.SPOKEN_DIR):
+        log(f"Spoken store unusable at {daemon_state.SPOKEN_DIR}; doubles are not dropped until it is fixed")
     return claim
 
 
@@ -1572,7 +1572,13 @@ def daemon_loop(lockpick: bool = False) -> None:
     last_reap = time.monotonic()
     hold_notices = 0  # "Still paused" lines logged for the current hold
     prefetch = Prefetch()
+    # The claim of the message this pass dequeued, until it has played (or is held for a
+    # replay). The catch-all below gives it back: an exception between the claim and the
+    # player would otherwise leave the file to meet its own claim on the next pass and be
+    # dropped as a duplicate of itself, played zero times.
+    unplayed_claim: spoken.Claim | None = None
     while not _shutdown_requested:
+        unplayed_claim = None
         try:
             write_heartbeat()
             if time.monotonic() - last_reap >= WORKER_REAP_EVERY_S:
@@ -1783,6 +1789,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             if msg_claim is None:
                 msg_file.unlink(missing_ok=True)
                 continue
+            unplayed_claim = msg_claim
 
             # The message after the one that just played may be synthesized already.
             taken = prefetch.take(msg_file)
@@ -1840,6 +1847,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                     ),
                     msg_file=msg_file,
                 )
+                unplayed_claim = None
                 msg_claim.refresh(spoken.DAEMON_MIN_TTL_S)
                 continue
 
@@ -1859,6 +1867,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 )
                 audio_file.unlink(missing_ok=True)
                 msg_file.unlink(missing_ok=True)
+                unplayed_claim = None
                 msg_claim.release()  # nothing played: a replay of it may speak
                 JOBS.update(job_id, state="failed", error=audio_last_error())
                 continue
@@ -1930,6 +1939,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             # The TTL counts from the end of playback: the loop dequeues one message at a time,
             # so a double queued while this one played is picked only now. Measured from the
             # claim, max(30 s, duration) would let it through after any synthesis delay.
+            unplayed_claim = None
             msg_claim.refresh(max(spoken.DAEMON_MIN_TTL_S, wav_duration))
 
             audio_file.unlink(missing_ok=True)
@@ -1970,6 +1980,8 @@ def daemon_loop(lockpick: bool = False) -> None:
             break
         except Exception as e:
             log(f"Error in daemon loop: {e}", "ERROR")
+            if unplayed_claim is not None:
+                unplayed_claim.release()  # the file is still queued; the next pass plays it
             time.sleep(1)
 
     prefetch.discard()  # a synthesis for a message nobody will play now; its WAV goes too
