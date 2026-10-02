@@ -551,18 +551,36 @@ def synthesize_message(
     )
 
     playback_speed = speed if speed_method == "playback" else 1.0
-    if want_marks:
-        marks = synthesize_with_marks(text, gen, audio_file, playback_speed=playback_speed)
-        if marks is not None:
-            return True, marks
-        log("Sentence-level synthesis failed, falling back to one piece", "WARN")
-    if not gen(text, audio_file):
-        return False, None
-    if want_marks:
-        return True, estimated_marks(
-            text, get_wav_duration(audio_file), playback_speed=playback_speed
-        )
-    return True, None
+    started = time.monotonic()
+    try:
+        if want_marks:
+            marks = synthesize_with_marks(text, gen, audio_file, playback_speed=playback_speed)
+            if marks is not None:
+                return True, marks
+            log("Sentence-level synthesis failed, falling back to one piece", "WARN")
+        if not gen(text, audio_file):
+            return False, None
+        if want_marks:
+            return True, estimated_marks(
+                text, get_wav_duration(audio_file), playback_speed=playback_speed
+            )
+        return True, None
+    finally:
+        log_synthesis_time(persona, audio_file, time.monotonic() - started)
+
+
+def log_synthesis_time(persona: str, audio_file: Path, wall_s: float) -> None:
+    """One line per synthesized message: speech made, time taken, the ratio.
+
+    The worker has always known both numbers and the log kept neither, so "how fast is
+    Kokoro under mlx on this Mac" had no answer on 2026-10-02 when the jmo room asked it
+    to size pre-rendering. Nothing is logged for a failed synthesis (no file, or an empty one).
+    """
+    audio_s = get_wav_duration(audio_file) if audio_file.exists() else 0.0
+    if audio_s <= 0:
+        return
+    rate = f"{audio_s / wall_s:.1f}x real time" if wall_s > 0 else "instant"
+    log(f"Synthesized {audio_s:.1f}s of speech in {wall_s:.1f}s for {persona} ({rate})")
 
 
 def daemon_play_audio(
