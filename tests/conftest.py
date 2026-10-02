@@ -6,6 +6,21 @@ import tempfile
 _HOME = tempfile.mkdtemp(prefix="claude-tts-test-home-")
 os.environ["HOME"] = _HOME
 
+# A git hook exports GIT_DIR and GIT_INDEX_FILE to the gate, and a test's `git init` in its own
+# tmp_path then acts on the committing repository (2026-10-02: core.bare=true in the main
+# checkout). The gate drops them before any step; this is the same list for a pytest run by hand
+# under a hook, kept in scripts/gate.py so the two cannot drift.
+import importlib.util  # noqa: E402
+
+_gate_spec = importlib.util.spec_from_file_location(
+    "gate", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "gate.py")
+)
+assert _gate_spec is not None and _gate_spec.loader is not None
+_gate = importlib.util.module_from_spec(_gate_spec)
+_gate_spec.loader.exec_module(_gate)
+for _name in _gate.GIT_HOOK_ENV:
+    os.environ.pop(_name, None)
+
 import pytest  # noqa: E402  (HOME must be set before anything else is imported)
 
 
