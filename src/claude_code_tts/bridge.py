@@ -28,6 +28,7 @@ import threading
 import time
 import wave
 from collections.abc import Callable
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -433,6 +434,7 @@ class BridgeHTTPServer(ThreadingHTTPServer):
         read_playback_state: Callable[[], dict],
         clear_current_message: Callable[[], None],
         set_paused: Callable[[bool], dict],
+        mic_hold_max_s: Callable[[], float] | None = None,
     ) -> None:
         super().__init__(address, BridgeHandler)
         self.token = token
@@ -441,6 +443,7 @@ class BridgeHTTPServer(ThreadingHTTPServer):
         self.read_playback_state = read_playback_state
         self.clear_current_message = clear_current_message
         self.set_paused = set_paused
+        self.mic_hold_max_s = mic_hold_max_s or (lambda: 0.0)
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
@@ -553,7 +556,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 job.pop("updated_at", None)
             self._send_json(200, {"source": source, "jobs": jobs})
         elif path == "/pause":
-            self._send_json(200, pause_view(self.server.read_playback_state()))
+            self._send_json(200, pause_view(self.server.read_playback_state(), self.server.mic_hold_max_s()))
         else:
             self._send_json(404, {"error": "no such route"})
 
@@ -638,20 +641,39 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.server.log_fn(f"Bridge {'paused' if want else 'resumed'} the queue")
         else:
             after = before
-        view = pause_view(after)
+        view = pause_view(after, self.server.mic_hold_max_s())
         view["changed"] = changed
         self._send_json(200, view)
 
 
-def pause_view(state: dict) -> dict:
-    """The hold as a page sees it: the flag, who set it, and whether audio is out."""
+def pause_view(state: dict, mic_hold_max_s: float = 0.0) -> dict:
+    """The hold as a page sees it: the flag, who set it and since when, whether audio is out.
+
+    `held_until` is the moment the daemon lets a mic hold go on its own (the hold's
+    start plus mic_pause_max_s) so a page can grey its Resume button while a
+    recording holds the floor and show how long that can last; a person's hold has
+    no bound, so it is null there. Both times are RFC 3339 in UTC, null when not held.
+    """
     current = state.get("current_message") or {}
+    paused = bool(state.get("paused", False))
+    since = state.get("paused_since") if paused else None
+    if not isinstance(since, (int, float)) or isinstance(since, bool):
+        since = None
+    held_until = None
+    if since is not None and state.get("paused_by") == "mic" and mic_hold_max_s > 0:
+        held_until = _rfc3339(since + mic_hold_max_s)
     return {
-        "paused": bool(state.get("paused", False)),
-        "paused_by": state.get("paused_by") if state.get("paused") else None,
+        "paused": paused,
+        "paused_by": state.get("paused_by") if paused else None,
+        "held_since": _rfc3339(since) if since is not None else None,
+        "held_until": held_until,
         "speaking": bool(state.get("audio_pid")),
         "current": {k: current[k] for k in ("id", "source", "project") if current.get(k)},
     }
+
+
+def _rfc3339(t: float) -> str:
+    return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 # --- Lifecycle ---
@@ -667,11 +689,13 @@ class Bridge:
         read_playback_state: Callable[[], dict],
         clear_current_message: Callable[[], None],
         set_paused: Callable[[bool], dict],
+        mic_hold_max_s: Callable[[], float] | None = None,
     ) -> None:
         self._log = log_fn
         self._read_state = read_playback_state
         self._clear_current = clear_current_message
         self._set_paused = set_paused
+        self._mic_hold_max_s = mic_hold_max_s or (lambda: 0.0)
         self._server: BridgeHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -693,6 +717,7 @@ class Bridge:
                 read_playback_state=self._read_state,
                 clear_current_message=self._clear_current,
                 set_paused=self._set_paused,
+                mic_hold_max_s=self._mic_hold_max_s,
             )
         except OSError as e:
             self._log(f"HTTP bridge could not listen on {bind}:{port}: {e}")

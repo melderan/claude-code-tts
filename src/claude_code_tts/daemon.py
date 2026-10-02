@@ -1492,6 +1492,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             read_playback_state=read_playback_state,
             clear_current_message=clear_current_message,
             set_paused=set_paused,
+            mic_hold_max_s=lambda: float(load_raw_config().get("mic_pause_max_s", MIC_PAUSE_MAX_S)),
         )
         if not bridge.start(http_config):
             bridge = None

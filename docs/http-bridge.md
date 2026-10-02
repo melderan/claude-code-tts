@@ -172,12 +172,18 @@ wants only its own reading to stop uses `/stop`.
 `GET /pause`:
 
 ```json
-{"paused": true, "paused_by": "user", "speaking": false,
+{"paused": true, "paused_by": "mic", "held_since": "2026-10-02T15:04:05Z",
+ "held_until": "2026-10-02T15:07:05Z", "speaking": false,
  "current": {"id": "3f9c2b7e1a04d5c6", "source": "page", "project": "page:PR 1223 cascade"}}
 ```
 
 - `paused_by` is `user` for a person (hotkey, CLI, or this route) and `mic` for the mic watcher;
   `null` when not paused.
+- `held_since` is when the hold began and `held_until` is when the daemon lets a mic hold go by
+  itself (`held_since` plus `mic_pause_max_s`), both RFC 3339 in UTC. A person's hold has no
+  bound, so `held_until` is `null` there; both are `null` when not paused. A page that must not
+  resume over a recording greys its Resume button while `paused_by` is `mic`, and can show the
+  bound. Added additively (`held_*` fields), nothing else in the reply changed.
 - `speaking` is true while a player process is running.
 - `current` is the message on deck, playing or held; empty between messages.
 

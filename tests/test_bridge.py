@@ -87,6 +87,7 @@ def server(tts_home: Path):
         read_playback_state=fake.read,
         clear_current_message=fake.clear,
         set_paused=fake.set_paused,
+        mic_hold_max_s=lambda: 180.0,
     )
     assert b.start({"bind": "127.0.0.1", "port": 0, "allowed_origins": ["https://ok.example"]})
     b.fake = fake  # type: ignore[attr-defined]
@@ -336,10 +337,12 @@ def test_jobs_listed_by_source_oldest_first(server: Bridge) -> None:
 def test_pause_get_reports_the_hold(server: Bridge) -> None:
     status, body, _ = call(server, "GET", "/pause")
     assert status == 200
-    assert body == {"paused": False, "paused_by": None, "speaking": False, "current": {}}
+    assert body == {"paused": False, "paused_by": None, "held_since": None, "held_until": None,
+                    "speaking": False, "current": {}}
     server.fake.state.update(  # type: ignore[attr-defined]
         paused=True,
         paused_by="mic",
+        paused_since=1_800_000_000.0,
         audio_pid=None,
         current_message={"id": "abc", "source": "page", "project": "page:brief", "text": "x"},
     )
@@ -347,6 +350,21 @@ def test_pause_get_reports_the_hold(server: Bridge) -> None:
     assert status == 200
     assert body["paused"] is True and body["paused_by"] == "mic"
     assert body["current"] == {"id": "abc", "source": "page", "project": "page:brief"}
+    # A mic hold carries its start and the moment the daemon's cap (180 s here) lets it go,
+    # so a page can grey Resume while a recording holds the floor (JMO, 2026-10-02).
+    assert body["held_since"] == "2027-01-15T08:00:00Z"
+    assert body["held_until"] == "2027-01-15T08:03:00Z"
+
+
+def test_pause_get_a_persons_hold_has_a_start_and_no_bound(server: Bridge) -> None:
+    server.fake.state.update(paused=True, paused_by="user", paused_since=1_800_000_000.0)  # type: ignore[attr-defined]
+    status, body, _ = call(server, "GET", "/pause")
+    assert status == 200
+    assert body["held_since"] == "2027-01-15T08:00:00Z" and body["held_until"] is None
+    # a hold recorded by a daemon from before paused_since existed: held, times unknown
+    server.fake.state.pop("paused_since")  # type: ignore[attr-defined]
+    _, body, _ = call(server, "GET", "/pause")
+    assert body["paused"] is True and body["held_since"] is None and body["held_until"] is None
 
 
 def test_pause_post_without_body_toggles(server: Bridge) -> None:
