@@ -371,6 +371,20 @@ class TestHookWritesTheSupersede:
         assert cli_mod._supersede_from_hook(hook) is None
         assert not self.queue_dir.exists()
 
+    def test_a_plugin_sent_prompt_is_not_the_person_moving_on(self):
+        # 2026-10-02: a mail plugin's pokes dropped 32 unheard replies in one resume.
+        poke = (
+            "The mail-watch plugin sent a message:\nmail: 2 new; post ls\n\nThis is how Claude Code"
+            " surfaces a prompt a plugin submits between turns."
+        )
+        assert cli_mod._supersede_from_hook({**self.hook, "prompt": poke}) is None
+        task = "<task-notification>\n<task-id>bnsygkufx</task-id>\n<status>completed</status>"
+        assert cli_mod._supersede_from_hook({**self.hook, "prompt": task}) is None
+        assert not self.queue_dir.exists()
+        # the person quoting that wording mid-sentence is still the person
+        typed = "why did the plugin sent a message: line show up"
+        assert cli_mod._supersede_from_hook({**self.hook, "prompt": typed}) is not None
+
     def test_no_prompt_in_the_input_writes_nothing(self):
         for hook in ({"transcript_path": self.hook["transcript_path"]}, {**self.hook, "prompt": "  "}):
             assert cli_mod._supersede_from_hook(hook) is None

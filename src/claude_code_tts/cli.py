@@ -2122,12 +2122,22 @@ def _inherit_session_settings(session_id: str, transcript_path: str) -> bool:
     return True
 
 
+# Prompts Claude Code starts in the person's place, which UserPromptSubmit fires for all the
+# same: a plugin (a mail watcher, say) with "The <name> plugin sent a message:\n...", and a
+# background task's "<task-notification>...". The hook input carries no origin field (the
+# transcript line does: origin.kind == "plugin" | "task-notification"), so the text is the only
+# tell. 2026-10-02: a mail plugin poked two rooms every twenty minutes through a morning of
+# meetings and each poke dropped that room's unheard replies as "stale"; 32 went in one resume.
+PLUGIN_PROMPT = re.compile(r"^\s*(The \S+ plugin sent a message:|<task-notification>)")
+
+
 def _supersede_from_hook(hook_data: dict) -> Path | None:
     """UserPromptSubmit: tell the daemon this session's queued speech is stale; the file written.
 
     A reply or narration still waiting in a deep queue when the next prompt is typed is
     heard after the person moved on, which costs more than silence. The daemon drops the
     room's messages written before this one (msgqueue.supersede); the one playing finishes.
+    Only the person's prompt counts: one a plugin sent (PLUGIN_PROMPT) means nobody moved on.
     Same session as the Stop hook derives, from CLAUDE_TTS_SESSION or the transcript path.
     Only in queue mode with a live daemon, where the hook would queue its speech too.
     Never prints: this hook's stdout reaches Claude's context.
@@ -2140,6 +2150,9 @@ def _supersede_from_hook(hook_data: dict) -> Path | None:
     prompt = hook_data.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         debug("user_prompt_submit: no prompt in the input, no supersede")
+        return None
+    if PLUGIN_PROMPT.match(prompt):
+        debug("user_prompt_submit: a plugin sent the prompt, not the person; no supersede")
         return None
     session_id = os.environ.get("CLAUDE_TTS_SESSION", "")
     if not session_id:
