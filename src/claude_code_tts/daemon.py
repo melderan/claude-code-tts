@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from claude_code_tts import ledger as voice_ledger
 from claude_code_tts import msgqueue, spoken
 from claude_code_tts import state as daemon_state
 from claude_code_tts.audio import _set_last_error as audio_set_last_error
@@ -968,6 +969,7 @@ def stream_message(
             if last and result.cut_played and result.remaining_s <= NEAR_END_THRESHOLD:
                 log(f"Interrupted near end ({result.remaining_s:.1f}s remaining), skipping replay")
                 save_history()
+                _outcome(msg_info, "played", played_s=round(result.played_s, 1), near_end=True)
                 clear_current_message()
                 JOBS.update(job_id, state="done", position_ms=position_ms)
                 return
@@ -983,6 +985,7 @@ def stream_message(
             return
         if result.outcome == "cancelled":
             log(f"Cancelled by bridge: {project}")
+            _outcome(msg_info, "cancelled", played_s=round(result.played_s, 1))
             clear_current_message()
             return
         if result.outcome == "failed":
@@ -992,6 +995,7 @@ def stream_message(
                 "ERROR",
             )
             save_history()
+            _outcome(msg_info, "failed", audio_last_error() or "synthesis failed", sentences=result.index, total=n)
             clear_current_message()
             if not result.parts and start_index == 0:
                 JOBS.update(job_id, state="failed", error=audio_last_error())
@@ -1000,6 +1004,7 @@ def stream_message(
                 JOBS.update(job_id, state="done", position_ms=position_ms)
             return
         save_history()
+        _outcome(msg_info, "played", played_s=round(result.played_s, 1))
         clear_current_message()
         JOBS.update(job_id, state="done", position_ms=position_ms, duration_ms=position_ms)
     finally:
@@ -1152,12 +1157,33 @@ def _cancel_removed_job(msg: dict) -> None:
         JOBS.update(msg.get("id"), state="cancelled", position_ms=0)
 
 
+def _outcome(msg: dict, outcome: str, reason: str = "", **extra: object) -> None:
+    """One line in the daemon's voice ledger for how a hook's message ended.
+
+    Bridge and control messages have jobs for this and are left alone. A failed write is one
+    WARN line; the queue goes on.
+    """
+    if msg.get("type") == "control" or msg.get("source"):
+        return
+    session_id, msg_id = str(msg.get("session_id") or ""), msg.get("id")
+    if not session_id or not msg_id:
+        return
+    if not voice_ledger.record_outcome(session_id, str(msg_id), outcome, reason, extra=dict(extra)):
+        log(f"Voice ledger write failed for {msg_id} ({outcome})", "WARN")
+
+
+def _dropped(msg: dict, reason: str) -> None:
+    """A message the queue removed unplayed: settle its job and write the outcome."""
+    _cancel_removed_job(msg)
+    _outcome(msg, "dropped", reason)
+
+
 def cleanup_old_messages(
     max_age_seconds: int, ledger: PauseLedger | None = None, messages: list[dict] | None = None
 ) -> int:
     """Remove messages older than max_age, not counting paused time. Returns count removed."""
     return msgqueue.cleanup_old_messages(
-        max_age_seconds, ledger, log=log, on_removed=_cancel_removed_job, messages=messages
+        max_age_seconds, ledger, log=log, on_removed=lambda m: _dropped(m, "expired"), messages=messages
     )
 
 
@@ -1171,7 +1197,12 @@ def drop_superseded(
     loop sees it, not in its timestamp turn behind the messages it drops, and never reaches
     handle_control_message. supersedes remembers the cutoffs for a reply written late.
     """
-    return supersedes.apply(messages, log=log, ledger=ledger)
+    kept = supersedes.apply(messages, log=log, ledger=ledger)
+    kept_ids = {id(m) for m in kept}
+    for m in messages:
+        if id(m) not in kept_ids:
+            _outcome(m, "dropped", "superseded")
+    return kept
 
 
 def enforce_max_depth(
@@ -1179,7 +1210,7 @@ def enforce_max_depth(
 ) -> int:
     """Remove oldest messages if queue exceeds max depth; held and control messages are exempt."""
     return msgqueue.enforce_max_depth(
-        max_depth, ledger, log=log, on_removed=_cancel_removed_job, messages=messages
+        max_depth, ledger, log=log, on_removed=lambda m: _dropped(m, "depth"), messages=messages
     )
 
 
@@ -1917,6 +1948,7 @@ def daemon_loop(lockpick: bool = False) -> None:
 
             if not text_of(msg).strip():
                 log(f"Empty message from {msg.get('project', 'unknown')}, skipping")
+                _outcome(msg, "dropped", "empty")
                 msg_file.unlink(missing_ok=True)
                 JOBS.update(
                     msg.get("id") if msg.get("source") else None, state="failed", error="empty text"
@@ -2104,6 +2136,7 @@ def daemon_loop(lockpick: bool = False) -> None:
 
             if JOBS.state(job_id) == "cancelled":
                 log(f"Cancelled by bridge: {project}")
+                _outcome(msg, "cancelled", played_s=round(elapsed, 1))
                 clear_current_message()
                 msg_file.unlink(missing_ok=True)
             elif was_killed:
@@ -2111,6 +2144,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 remaining = wav_duration - audio_pos
                 if elapsed >= BARELY_STARTED_S and remaining <= NEAR_END_THRESHOLD:
                     log(f"Interrupted near end ({remaining:.1f}s remaining), skipping replay")
+                    _outcome(msg, "played", played_s=round(audio_pos, 1), near_end=True)
                     clear_current_message()
                     msg_file.unlink(missing_ok=True)
                     JOBS.update(job_id, state="done")
@@ -2129,6 +2163,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 msg_file.unlink(missing_ok=True)
                 continue
             else:
+                _outcome(msg, "played", played_s=round(elapsed, 1))
                 clear_current_message()
                 msg_file.unlink(missing_ok=True)
                 JOBS.update(job_id, state="done")

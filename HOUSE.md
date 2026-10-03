@@ -90,6 +90,7 @@ just release --check        # preflight and gate only; prints the plan
 - Use `/tts-mute` and `/tts-unmute` for one session
 - Each session can have its own persona, speed, and mute state
 - A new prompt in a session drops that session's queued speech that has not started playing (hooks/prompt-submitted.sh on UserPromptSubmit runs `claude-tts supersede --from-hook`, which writes a supersede control; the playing message finishes, other sessions and the bridge are untouched; counted as `stale dropped` in `claude-tts daemon stats`)
+- Every reply a hook accepts is appended, in full and before the filter, to `~/.claude/voice-ledger/<session>.jsonl` with an id the queue message carries; the daemon appends played, cancelled, failed or dropped (with the reason) under that id in `~/.claude-tts/ledger/<session>.outcomes.jsonl`. Two files, two writers, nothing deletes from either (9.43.0). `claude-tts ledger` reads them joined; the 50-row speech ring in handy.py is for the player, this is for the record
 - When `CLAUDE_TTS_SESSION` names a session the hook has not seen, it inherits the directory-keyed session's persona, speed and mute once (9.26.0), so a rebuilt room keeps its voice
 
 ## Commands
@@ -146,6 +147,7 @@ src/claude_code_tts/
   daemon.py                # Queue daemon (pause/resume, heartbeat)
   state.py                 # The daemon's files on disk: playback.json, heartbeat, pid, lock, restart markers; the only reader and writer
   msgqueue.py              # The queue directory: scan, order, age, trim, PauseLedger, control messages; the only module that names it
+  ledger.py                # The voice ledger: every reply a hook accepted, in full and before the filter, plus the daemon's outcome per id; append only
   bridge.py                # Opt-in loopback HTTP bridge (browser pages -> queue, timing marks)
   install.py               # Installer (hooks, voices, service)
   signature.py             # Voice signatures: tolerant shape of a WAV, compared with tolerances, not by ear
@@ -198,6 +200,7 @@ When adding a new `/tts-*` command:
 tail -f ~/.claude-tts/debug.log       # Hook debug log (shared with the daemon dir)
 claude-tts daemon logs --follow      # Daemon log
 claude-tts daemon stats              # Digest: messages, queue-to-first-audio latency, pauses, log noise
+claude-tts ledger --last 20          # What this session's hooks were asked to speak, in full, and what the daemon did with each
 claude-tts status                    # Quick status: mute, pause, daemon, heartbeat age, queue depth
 ```
 

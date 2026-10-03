@@ -1656,6 +1656,32 @@ def cmd_kraken(args: argparse.Namespace) -> None:
     print("The kraken is released; everyone speaks" if not state.get("paused") else "Could not release")
 
 
+def cmd_ledger(args: argparse.Namespace) -> None:
+    """What a session's hooks were asked to speak, in full, and what the daemon did with each."""
+    from claude_code_tts import ledger
+
+    if args.sessions:
+        for sid in ledger.sessions():
+            print(f"{len(ledger.read(sid)):6d}  {sid}")
+        return
+    sid = args.session or get_session_id()
+    rows = ledger.read(sid, limit=args.last)
+    if args.json:
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
+    if not rows:
+        print(f"No ledger for {sid} at {ledger.ledger_dir()}")
+        return
+    for r in rows:
+        when = time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(float(r.get("ts") or 0)))
+        outcome = str(r.get("outcome") or ("skipped" if r.get("skipped") else "queued"))
+        if r.get("outcome_reason"):
+            outcome += f" ({r['outcome_reason']})"
+        text = " ".join(str(r.get("text", "")).split())
+        shown = text if args.full else text[:80]
+        print(f"{when}  {str(r.get('event', '?')):<13} {outcome:<22} {len(text):6d} chars  {shown}")
+
+
 def _notify(text: str) -> None:
     """A desktop notification where one is available; silent elsewhere."""
     if sys.platform == "darwin" and shutil.which("osascript"):
@@ -2224,6 +2250,33 @@ def cmd_supersede(args: argparse.Namespace) -> None:
         debug(f"user_prompt_submit: supersede failed: {e}")
 
 
+def _ledger_record(
+    session_id: str, cfg: Any, hook_type: str, transcript_path: str, line: int, text: str, **extra: object
+) -> str:
+    """One line in the room's voice ledger for the text this hook accepted, before the filter.
+
+    Mints the id the queue message will carry (cfg.message_id), so the daemon's outcome line
+    joins back to these words. A failed write is one debug line; speech goes on without it.
+    """
+    from claude_code_tts import ledger
+
+    msg_id = ledger.new_id()
+    cfg.message_id = msg_id
+    entry: dict = {
+        "id": msg_id,
+        "event": hook_type,
+        "claude_session": cfg.claude_session_id,
+        "project": cfg.project_name,
+        "transcript": Path(transcript_path).name,
+        "line": line,
+        "text": text,
+        **extra,
+    }
+    if not ledger.record(session_id, entry):
+        debug(f"{hook_type}: voice ledger write failed for {msg_id} (speech goes on)")
+    return msg_id
+
+
 def _speak_from_hook(args: argparse.Namespace) -> None:
     """Handle --from-hook mode: read hook JSON from stdin, process transcript."""
     hook_started = time.time()  # before any wait: the stale-reply cutoff compares this
@@ -2517,7 +2570,8 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
                     # (Geordi, round five: the reply was lost that way).
                     debug(f"{hook_type}: but the {len(mine)} line(s) this hook's take moved past are its alone; speaking them")
                     _speak_claimed(hook_type, mine, None, current_lines, watermark, state_file, lock_dir, landed_line,
-                                   cfg, owned_through=owned_through, owned_from=owned_from, advance=False)
+                                   cfg, session_id, transcript_path,
+                                   owned_through=owned_through, owned_from=owned_from, advance=False)
             return
         if not claim.stored:
             if spoken.first_unusable_notice(spoken.hook_dir()):
@@ -2536,7 +2590,7 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
     try:
         queued = _speak_claimed(
             hook_type, speakable, claimed, current_lines, watermark, state_file, lock_dir, landed_line, cfg,
-            owned_through=owned_through, owned_from=owned_from,
+            session_id, transcript_path, owned_through=owned_through, owned_from=owned_from,
         )
     finally:
         if claim is not None and not queued:
@@ -2634,11 +2688,16 @@ def _speak_claimed(
     lock_dir: Path,
     landed_line: int | None,
     cfg: TTSConfig,
+    session_id: str,
+    transcript_path: str,
     owned_through: int | None = None,
     owned_from: int = 0,
     advance: bool = True,
 ) -> bool:
     """The hook's speech once its utterance is claimed; True when something was queued or played.
+
+    session_id and transcript_path only feed the voice ledger: every exit here that has text
+    records the text it accepted, before the filter, and mints the id the queue message carries.
 
     owned_from..owned_through: the span this hook's take of the landed line moved the
     watermark across; the lines in it are this hook's already, claimed by that take, not
@@ -2698,6 +2757,7 @@ def _speak_claimed(
                 combined = pai_summary
             if advance:
                 _write_watermark(state_file, lock_dir, current_lines)
+            _ledger_record(session_id, cfg, hook_type, transcript_path, text_line, text, spoken_chars=len(combined))
             ok = speak(combined, cfg) is not False
             debug(f"stop: PAI summary detected, speaking: {pai_summary[:80]}")
             return ok and claimed is not None
@@ -2708,6 +2768,10 @@ def _speak_claimed(
         if hook_type == "stop":
             if advance:
                 _write_watermark(state_file, lock_dir, current_lines)
+        _ledger_record(
+            session_id, cfg, hook_type, transcript_path, text_line, text,
+            skipped="too_short", spoken_chars=len(cliff_notes),
+        )
         debug(f"{hook_type}: text too short after filtering")
         return False
 
@@ -2744,11 +2808,21 @@ def _speak_claimed(
             # they are this hook's alone by its take, which already moved the watermark
             # past them, so they are spoken here and nothing is written (Geordi, round six).
             debug(f"PostToolUse: speaking the {len(unspoken)} owned line(s) before it all the same")
+            # The ledger line is for the owned lines alone: the newer text is the other
+            # hook's, and its record is that hook's to write.
+            owned_last = max(ln for ln, _, _ in speakable[:-1]
+                             if owned_through is not None and owned_from <= ln <= owned_through)
+            _ledger_record(session_id, cfg, hook_type, transcript_path, owned_last, " ".join(unspoken),
+                           spoken_chars=len(owned_notes), owned_only=True)
             speak(owned_notes, cfg)
         return False
     else:
         debug(f"PostToolUse: watermark updated to {current_lines}")
 
+    _ledger_record(
+        session_id, cfg, hook_type, transcript_path, text_line, text,
+        spoken_chars=len(cliff_notes), **({"unspoken": unspoken} if unspoken else {}),
+    )
     if speak(cliff_notes, cfg) is False:
         debug(f"{hook_type}: nothing queued (daemon not healthy); the claim is given back")
         return False
@@ -4222,6 +4296,15 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=cmd_hold)
     p = subparsers.add_parser("kraken", help="Release the kraken: everyone speaks again")
     p.set_defaults(func=cmd_kraken)
+
+    # --- ledger ---
+    p = subparsers.add_parser("ledger", help="What this session's hooks were asked to speak, in full, and what became of it")
+    p.add_argument("--session", help="A session id (default: this session)")
+    p.add_argument("--last", type=int, default=20, help="The newest N rows (0 = all)")
+    p.add_argument("--sessions", action="store_true", help="List the sessions that have a ledger, with row counts")
+    p.add_argument("--full", action="store_true", help="Print each row's whole text")
+    p.add_argument("--json", action="store_true", help="JSON rows")
+    p.set_defaults(func=cmd_ledger)
 
     # --- install ---
     p = subparsers.add_parser("install", help="Install/upgrade Claude Code TTS")

@@ -116,6 +116,9 @@ class TTSConfig:
     # hook started, before any wait, and Claude Code's own session id from the hook input.
     hook_started: float = 0.0
     claude_session_id: str = ""
+    # Set by the hook path only: the id of this utterance's line in the voice ledger, carried
+    # into the queue message so the daemon's outcome joins back to the words (ledger.py).
+    message_id: str = ""
     default_muted: bool = False
     global_muted: bool = False
     # Raw dicts for commands that need more detail

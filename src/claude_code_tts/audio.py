@@ -720,6 +720,8 @@ def write_queue_message(text: str, config: TTSConfig, *, engine: str = "") -> Pa
         message["hook_started"] = config.hook_started
     if config.claude_session_id:
         message["claude_session_id"] = config.claude_session_id
+    if config.message_id:
+        message["id"] = config.message_id
 
     queue_file, _ = msgqueue.write_message(message)
 
