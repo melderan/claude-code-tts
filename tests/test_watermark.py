@@ -661,18 +661,23 @@ class TestStopSpeaksFromItsInput:
         assert "quarterly" not in pending.read_text()
         assert stat.S_IMODE(pending.stat().st_mode) == 0o600
 
-    def test_a_stale_record_is_dropped_unread(self, tmp_path, fake_state_dir):
+    def test_a_record_from_hours_ago_still_skips_its_landed_line(self, tmp_path, fake_state_dir):
+        """2026-10-02 18:05 PDT: JMO came back after two hours and the first PostToolUse of the new
+        turn re-spoke the whole previous reply (2 min 20 s), because the record that marks it as
+        spoken had been aged out at one hour. The landed line comes when the next turn does."""
         import os
 
         transcript = self._turn_in_progress(tmp_path, "uuid-N7")
-        _run_hook(transcript, "stop", last_assistant_message="a response from an hour ago")
+        _run_hook(transcript, "stop", last_assistant_message="a response from two hours ago")
         pending = next(fake_state_dir.glob("claude_tts_spoken_uuid-N7.pending"))
-        old = pending.stat().st_mtime - 4000
+        old = pending.stat().st_mtime - 8000
         os.utime(pending, (old, old))
-        _append(transcript, [_assistant_msg("m2", "a response from an hour ago"), _user("next"), _tool_use("m3"),
+        _append(transcript, [_assistant_msg("m2", "a response from two hours ago"), _user("next"), _tool_use("m3"),
                              _tool_result()])
-        assert _run_hook(transcript, "post_tool_use") == "a response from an hour ago"
-        assert not pending.exists()
+        assert _run_hook(transcript, "post_tool_use") is None, "the landed reply was spoken two hours ago"
+        assert not pending.exists(), "the take of the landed line retires the record"
+        _append(transcript, [_assistant_msg("m4", "the new turn's first words"), _tool_use("m4"), _tool_result()])
+        assert _run_hook(transcript, "post_tool_use") == "the new turn's first words"
 
     def test_stop_does_not_speak_an_intermediate_a_lagging_post_tool_use_took(
         self, tmp_path, fake_state_dir, monkeypatch

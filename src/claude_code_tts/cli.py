@@ -2343,9 +2343,11 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
             else:
                 debug(f"{hook_type}: line {line_no} is the response the Stop hook spoke from its input, skipping")
                 del speakable[0]
-    # A record nothing matched stays: the next claim overwrites it, and a
-    # record older than PENDING_MAX_AGE_S is dropped unread. Wiping it on every
-    # Stop let a second Stop for the same event claim and speak again.
+    # A record nothing matched stays until the next claim overwrites it. Wiping it on
+    # every Stop let a second Stop for the same event claim and speak again, and ageing
+    # it out by the clock (an hour, through 9.41.4) re-spoke a whole reply: the person
+    # came back after two hours, the first hook of the new turn met the landed line, the
+    # record that would have skipped it had been dropped unread (2026-10-02 18:05 PDT).
 
     # "Something is coming": the Stop hook has the response but the file does not.
     from_input = False
@@ -2529,17 +2531,15 @@ def _landed_match(landed: str, pending: str) -> str | None:
     return None
 
 
-# A pending record older than this is a response that never landed on this
-# transcript (a /clear, a resume into another file); it is dropped unread.
-PENDING_MAX_AGE_S = 3600.0
-
-
 def _read_pending(pending_file: Path) -> str:
-    """The record of the response the last Stop hook spoke, if its line has not landed yet."""
+    """The record of the response the last Stop hook spoke, if its line has not landed yet.
+
+    It has no age. The record is keyed by transcript, so a /clear or a resume into another
+    file never reads it, and the landed line comes whenever the person's next turn does,
+    two minutes or two hours later; the only thing that retires it is the take of that
+    line or the next Stop's claim.
+    """
     try:
-        if time.time() - pending_file.stat().st_mtime > PENDING_MAX_AGE_S:
-            pending_file.unlink(missing_ok=True)
-            return ""
         return pending_file.read_text().strip()
     except OSError:
         return ""
