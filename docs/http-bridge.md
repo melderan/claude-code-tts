@@ -205,6 +205,26 @@ false when the hold already matched. Only the flag is written: the play loop pol
 it does for the hotkey. A resume clears a mic hold as well, since a person pressing resume
 knows better than the watcher.
 
+### `GET /queue?by=room`
+
+How far behind each friend is. One row per room with speech waiting, oldest first; a page's own
+messages are grouped under their `source`; control messages are not counted.
+
+```json
+{"by": "room", "paused": true, "total": 7,
+ "rooms": [{"room": "notes", "queued": 4, "oldest_queued_at": "2026-10-03T01:02:03Z",
+            "oldest_age_s": 611, "held": true},
+           {"room": "tts", "queued": 3, "oldest_queued_at": "2026-10-03T01:09:40Z",
+            "oldest_age_s": 154, "held": false}]}
+```
+
+- `room` is the same key `let` takes, so a picker needs no mapping table.
+- `oldest_age_s` is wall-clock age, hold time included: the answer to "how far behind am I".
+- `held` is the hold as it applies to that room right now (a mic hold holds every room; a
+  person's hold holds every room not in `let_through`).
+- `by` other than `room`: `400`. The queue is read from disk on each call; poll it at a human
+  pace (once a second is plenty).
+
 ## Mute does not apply here
 
 `muted`, `default_muted` and a session's own mute are decided by the hook before it writes a

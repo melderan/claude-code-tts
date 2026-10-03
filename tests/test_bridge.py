@@ -601,3 +601,42 @@ def test_pause_view_shows_a_recording_under_the_hold(held_server: Bridge) -> Non
     held_server.fake.state.update(paused=True, paused_by="user", let_through=["tts"], mic_held=True)  # type: ignore[attr-defined]
     status, body, _ = call(held_server, "GET", "/pause")
     assert body["mic_held"] is True and body["let_through"] == ["tts"]
+
+
+# --- GET /queue?by=room: how far behind each friend is ---
+
+
+def test_queue_by_room_counts_ages_and_marks_held() -> None:
+    from claude_code_tts.bridge import queue_by_room
+
+    now = 1_800_000_000.0
+    msgs = [
+        {"session_id": "alice--claude--notes", "timestamp": now - 611, "text": "a"},
+        {"session_id": "alice--claude--notes", "timestamp": now - 10, "text": "b"},
+        {"session_id": "alice--claude--claude-code-tts", "timestamp": now - 154, "text": "c"},
+        {"session_id": "browser", "source": "hear", "timestamp": now - 5, "text": "d"},
+        {"type": "control", "session_id": "system", "pre_action": "supersede", "timestamp": now - 1000},
+    ]
+    state = {"paused": True, "paused_by": "user", "let_through": ["tts"]}
+    view = queue_by_room(msgs, state, now=now)
+    assert view["by"] == "room" and view["paused"] is True and view["total"] == 4
+    assert [r["room"] for r in view["rooms"]] == ["notes", "tts", "hear"], "oldest first, control not counted"
+    notes, tts, hear = view["rooms"]
+    from claude_code_tts.bridge import _rfc3339
+
+    assert notes == {"room": "notes", "queued": 2, "oldest_queued_at": _rfc3339(now - 611),
+                     "oldest_age_s": 611, "held": True}
+    assert tts["queued"] == 1 and tts["oldest_age_s"] == 154 and tts["held"] is False
+    assert hear["held"] is True and hear["queued"] == 1
+    assert queue_by_room([], {"paused": False}, now=now) == {"by": "room", "paused": False, "total": 0, "rooms": []}
+
+
+def test_queue_route_reads_the_queue_dir(server: Bridge) -> None:
+    status, body, _ = call(server, "GET", "/queue")
+    assert status == 200 and body["rooms"] == [] and body["total"] == 0
+    call(server, "POST", "/speak", {"text": "one for the page", "source": "hear"})
+    status, body, _ = call(server, "GET", "/queue?by=room")
+    assert status == 200 and body["total"] == 1
+    assert body["rooms"][0]["room"] == "hear" and body["rooms"][0]["held"] is False
+    assert call(server, "GET", "/queue?by=persona")[0] == 400
+    assert call(server, "GET", "/queue", token=None)[0] == 401

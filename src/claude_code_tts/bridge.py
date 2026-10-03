@@ -36,6 +36,7 @@ from urllib.parse import parse_qs
 
 from claude_code_tts import __version__, msgqueue
 from claude_code_tts.config import TTS_CONFIG_DIR, load_raw_config
+from claude_code_tts.state import may_play, room_tag
 
 TOKEN_FILE = TTS_CONFIG_DIR / "http-token"
 DEFAULT_PORT = 7457
@@ -559,6 +560,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"source": source, "jobs": jobs})
         elif path == "/pause":
             self._send_json(200, pause_view(self.server.read_playback_state(), self.server.mic_hold_max_s()))
+        elif path == "/queue":
+            query = parse_qs(self.path.partition("?")[2])
+            by = (query.get("by") or ["room"])[0]
+            if by != "room":
+                self._send_json(400, {"error": "by must be room: /queue?by=room"})
+                return
+            self._send_json(200, queue_by_room(msgqueue.scan(), self.server.read_playback_state()))
         else:
             self._send_json(404, {"error": "no such route"})
 
@@ -699,6 +707,48 @@ def pause_view(state: dict, mic_hold_max_s: float = 0.0) -> dict:
         "mic_held": bool(state.get("mic_held")) if paused else False,
         "speaking": bool(state.get("audio_pid")),
         "current": {k: current[k] for k in ("id", "source", "project") if current.get(k)},
+    }
+
+
+def queue_by_room(messages: list[dict], state: dict, now: float | None = None) -> dict:
+    """How far behind each friend is: queued messages per room, the oldest's age, and whether
+    the room is held right now.
+
+    A room is the tag of the message's session id (see state.room_tag); a page's messages
+    are grouped under their `source`. Control messages are not speech and are not counted.
+    Rooms come oldest-first, so the one JMO is furthest behind on is first. `held` is the
+    hold as it applies to that room this instant (state.may_play), so a page can show which
+    toggles are open; `oldest_queued_at` is RFC 3339 UTC and `oldest_age_s` wall-clock
+    seconds, hold time included, which is what "how far behind am I" means.
+    """
+    t = time.time() if now is None else now
+    rooms: dict[str, dict] = {}
+    for m in messages:
+        if m.get("type") == "control":
+            continue
+        session = str(m.get("session_id") or "")
+        key = str(m.get("source") or room_tag(session) or "unknown")
+        ts = m.get("timestamp")
+        ts_f = float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else t
+        row = rooms.setdefault(key, {"room": key, "queued": 0, "oldest": ts_f, "session": session})
+        row["queued"] += 1
+        row["oldest"] = min(row["oldest"], ts_f)
+    out: list[dict[str, Any]] = []
+    for row in sorted(rooms.values(), key=lambda r: r["oldest"]):
+        out.append(
+            {
+                "room": row["room"],
+                "queued": row["queued"],
+                "oldest_queued_at": _rfc3339(row["oldest"]),
+                "oldest_age_s": max(0, int(t - row["oldest"])),
+                "held": not may_play(state, row["session"]),
+            }
+        )
+    return {
+        "by": "room",
+        "paused": bool(state.get("paused", False)),
+        "total": sum(int(r["queued"]) for r in out),
+        "rooms": out,
     }
 
 
