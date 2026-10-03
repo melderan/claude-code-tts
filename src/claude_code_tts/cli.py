@@ -88,8 +88,11 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(f"Muted:    {str(cfg.muted).lower()} ({mute_source})")
     pause_detail = pause_state
     if pause_state == "true" and paused_by:
-        pause_detail = f"true (by {paused_by})"
+        recording = ", recording" if pb.get("mic_held") else ""
+        pause_detail = f"true (by {paused_by}{recording})"
     print(f"Paused:   {pause_detail}")
+    if pause_state == "true" and pb.get("let_through"):
+        print(f"Letting through: {', '.join(str(r) for r in pb['let_through'])}")
     if audio_pid and audio_pid != "None":
         try:
             os.kill(int(audio_pid), 0)
@@ -1620,6 +1623,37 @@ def cmd_pause(args: argparse.Namespace) -> None:
         set_paused(True, "user")
         _notify("Playback paused")
         print("Paused")
+
+
+def cmd_hold(args: argparse.Namespace) -> None:
+    """Hold everyone; let the named rooms (and this session, with --me) speak on.
+
+    Bare `hold` holds everyone and clears the list. `--let` and `--me` add to the list of a
+    hold already in place, so a person can let one friend through, then a second. The rooms
+    not on the list queue behind the scenes until `claude-tts kraken` lets everyone speak.
+    """
+    from claude_code_tts.state import hold, let_rooms, room_tag
+
+    rooms = list(args.let or [])
+    if args.me:
+        rooms.append(get_session_id())
+    state = hold([]) if not rooms else let_rooms(rooms)
+    letting = state.get("let_through") or []
+    if letting:
+        names = ", ".join(room_tag(r) if r == get_session_id() else r for r in letting)
+        print(f"Held. Letting through: {names}")
+    else:
+        print("Held. Nobody is let through; claude-tts hold --let <room> or claude-tts kraken")
+    if state.get("mic_held"):
+        print("A recording is in progress; the rooms let through wait for it to end")
+
+
+def cmd_kraken(args: argparse.Namespace) -> None:
+    """Release the kraken: everyone speaks again, in the order they queued."""
+    from claude_code_tts.state import release
+
+    state = release()
+    print("The kraken is released; everyone speaks" if not state.get("paused") else "Could not release")
 
 
 def _notify(text: str) -> None:
@@ -4180,6 +4214,14 @@ def main(argv: list[str] | None = None) -> None:
     # --- pause ---
     p = subparsers.add_parser("pause", help="Toggle pause/resume")
     p.set_defaults(func=cmd_pause)
+
+    # --- hold / kraken ---
+    p = subparsers.add_parser("hold", help="Hold everyone; --let ROOM... and --me let named rooms speak on")
+    p.add_argument("--let", nargs="+", metavar="ROOM", help="Room tags (tts, notes) or session ids to let through")
+    p.add_argument("--me", action="store_true", help="Let this session through")
+    p.set_defaults(func=cmd_hold)
+    p = subparsers.add_parser("kraken", help="Release the kraken: everyone speaks again")
+    p.set_defaults(func=cmd_kraken)
 
     # --- install ---
     p = subparsers.add_parser("install", help="Install/upgrade Claude Code TTS")

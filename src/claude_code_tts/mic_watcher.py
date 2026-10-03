@@ -381,8 +381,13 @@ class MicWatcher:
         """Pause TTS for mic recording."""
         state = self._read_state()
         if state.get("paused"):
-            # Already paused (manual or mic) — don't overwrite paused_by
-            self._log("Mic watcher: already paused, noting mic active")
+            # Already paused (manual or mic): paused_by stays. Under a person's hold the
+            # rooms let through must wait for the recording too, so the flag says so.
+            if state.get("paused_by") == "user" and not state.get("mic_held"):
+                self._write_state(mic_held=True)
+                self._log("Mic watcher: recording under a hand hold; the rooms let through wait for it")
+            else:
+                self._log("Mic watcher: already paused, noting mic active")
             return
         self._write_state(paused=True, paused_by="mic")
         self._log("Mic watcher: paused for recording")
@@ -395,7 +400,9 @@ class MicWatcher:
 
         paused_by = state.get("paused_by", "user")
         if paused_by != "mic":
-            # Manual pause — don't override
+            # Manual pause — don't override; the rooms let through may speak again.
+            if state.get("mic_held"):
+                self._write_state(mic_held=False)
             self._log("Mic watcher: recording done, but manual pause active — staying paused")
             return
 

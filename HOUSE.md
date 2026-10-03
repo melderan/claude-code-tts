@@ -100,6 +100,8 @@ just release --check        # preflight and gate only; prints the plan
 | `/tts-config` | Every stored config key next to the shipped default; `--changed` shows only the ones that differ |
 | `/tts-mute` | Mute this session |
 | `/tts-unmute` | Unmute this session |
+| `/tts-focus` | Hold every other friend's voice, this session keeps speaking; `claude-tts hold --let <room>` lets another through |
+| `/tts-kraken` | Release the kraken: everyone speaks again (`claude-tts kraken`) |
 | `/tts-speed [value]` | Show/set speech speed (0.5-4.0) |
 | `/tts-persona [name]` | Show/set voice persona; `add <name> --voice <model>` and `remove <name>` edit config.json |
 | `/tts-mode [direct\|queue]` | Show/set playback mode |

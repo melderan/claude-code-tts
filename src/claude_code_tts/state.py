@@ -245,14 +245,19 @@ def write_playback_state(
     paused: bool | None = None,
     paused_by: str | None | object = UNSET,
     current_message: dict | None | object = UNSET,
+    let_through: list[str] | None | object = UNSET,
+    mic_held: bool | None = None,
 ) -> None:
     """Update playback state atomically.
 
     paused_by tracks who paused: "user" (manual toggle) or "mic" (mic watcher).
-    This prevents mic-unpause from overriding a manual pause.
+    This prevents mic-unpause from overriding a manual pause. let_through is the
+    list of rooms a person's hold lets play (see may_play); mic_held marks a
+    recording that began under a person's hold, so those rooms wait for it too.
+    A release (paused=False) clears both.
     """
     with _PLAYBACK_STATE_LOCK:
-        _write_playback_state_locked(audio_pid, paused, paused_by, current_message)
+        _write_playback_state_locked(audio_pid, paused, paused_by, current_message, let_through, mic_held)
 
 
 def _write_playback_state_locked(
@@ -260,6 +265,8 @@ def _write_playback_state_locked(
     paused: bool | None,
     paused_by: str | None | object,
     current_message: dict | None | object,
+    let_through: list[str] | None | object = UNSET,
+    mic_held: bool | None = None,
 ) -> None:
     state = read_playback_state()
     if audio_pid is not UNSET:
@@ -271,9 +278,22 @@ def _write_playback_state_locked(
             state["paused_since"] = time.time()
         elif not paused:
             state.pop("paused_since", None)
+            state.pop("let_through", None)
+            state.pop("mic_held", None)
         state["paused"] = paused
     if paused_by is not UNSET:
         state["paused_by"] = paused_by
+    if let_through is not UNSET:
+        rooms = [str(r) for r in let_through] if isinstance(let_through, list) else []
+        if rooms:
+            state["let_through"] = rooms
+        else:
+            state.pop("let_through", None)
+    if mic_held is not None:
+        if mic_held:
+            state["mic_held"] = True
+        else:
+            state.pop("mic_held", None)
     if current_message is not UNSET:
         state["current_message"] = current_message
     state["updated_at"] = time.time()
@@ -294,6 +314,70 @@ def set_paused(paused: bool, by: str = "user") -> dict:
     else:
         write_playback_state(paused=False, paused_by=None)
     return read_playback_state()
+
+
+# --- The selective hold (JMO 2026-10-02): hold everyone, let named rooms through ---
+
+
+def room_tag(session_id: str) -> str:
+    """The room a session id names: the part after the last "--", minus a leading "claude-code-".
+
+    alice--claude--claude-code-tts is the tts room, alice--claude--notes is notes,
+    bob--claude--k8s is k8s; a plain id is its own tag. This is the key a
+    person uses for a friend, in the CLI and on a page.
+    """
+    tag = session_id.rsplit("--", 1)[-1]
+    return tag.removeprefix("claude-code-") or tag
+
+
+def lets_through(session_id: str, let_through: list[str] | None) -> bool:
+    """True when the let-through list names this session: by full id, room tag or last segment."""
+    if not let_through:
+        return False
+    last = session_id.rsplit("--", 1)[-1]
+    tag = room_tag(session_id)
+    return any(entry in (session_id, tag, last) for entry in let_through)
+
+
+def may_play(state: dict, session_id: str) -> bool:
+    """Whether a message from session_id may play under this state.
+
+    Not paused: yes. A mic hold (paused_by "mic"), or a recording under a person's hold
+    (mic_held): nobody, the person is speaking. A person's hold: only the rooms let through.
+    """
+    if not state.get("paused"):
+        return True
+    if state.get("paused_by") != "user" or state.get("mic_held"):
+        return False
+    return lets_through(session_id, state.get("let_through"))
+
+
+def hold(let: list[str] | None = None) -> dict:
+    """A person's hold on everyone, letting the rooms in `let` play on; the state as written.
+
+    Replaces the let-through list. A recording in progress (a mic hold, or mic_held already)
+    stays a recording: the rooms let through wait for Handy's stop like everyone else.
+    """
+    before = read_playback_state()
+    recording = bool(before.get("paused") and before.get("paused_by") == "mic") or bool(before.get("mic_held"))
+    write_playback_state(paused=True, paused_by="user", let_through=list(let or []), mic_held=recording)
+    return read_playback_state()
+
+
+def let_rooms(rooms: list[str]) -> dict:
+    """Add rooms to the let-through list of the current hold; holds everyone first if not held."""
+    before = read_playback_state()
+    if not (before.get("paused") and before.get("paused_by") == "user"):
+        return hold(rooms)
+    current = list(before.get("let_through") or [])
+    merged = current + [r for r in rooms if r not in current]
+    write_playback_state(let_through=merged)
+    return read_playback_state()
+
+
+def release() -> dict:
+    """Release the kraken: everyone speaks again. Clears the hold, the list and the mic flag."""
+    return set_paused(False)
 
 
 def clear_current_message() -> None:

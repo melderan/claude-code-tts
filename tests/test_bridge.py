@@ -338,7 +338,7 @@ def test_pause_get_reports_the_hold(server: Bridge) -> None:
     status, body, _ = call(server, "GET", "/pause")
     assert status == 200
     assert body == {"paused": False, "paused_by": None, "held_since": None, "held_until": None,
-                    "speaking": False, "current": {}}
+                    "let_through": [], "mic_held": False, "speaking": False, "current": {}}
     server.fake.state.update(  # type: ignore[attr-defined]
         paused=True,
         paused_by="mic",
@@ -527,3 +527,77 @@ def test_marks_offsets_follow_the_submitted_text() -> None:
     for s in marks["sentences"]:
         assert text[s["c"] : s["c"] + len(s["text"])] == s["text"]
     assert marks["sentences"][1]["c"] == text.index("Then")
+
+
+# --- The selective hold: POST /pause {"let": [...]} (JMO 2026-10-02) ---
+
+
+class FakeHoldState(FakeState):
+    def set_paused(self, paused: bool) -> dict:
+        super().set_paused(paused)
+        if not paused:
+            self.state.pop("let_through", None)
+            self.state.pop("mic_held", None)
+        return dict(self.state)
+
+    def set_let_through(self, rooms: list[str]) -> dict:
+        # Mirrors state.hold: a hand hold on everyone, these rooms play on.
+        self.state.update(paused=True, paused_by="user", let_through=list(rooms))
+        return dict(self.state)
+
+
+@pytest.fixture
+def held_server(tts_home: Path):
+    fake = FakeHoldState()
+    logs: list[str] = []
+    b = Bridge(
+        log_fn=logs.append,
+        read_playback_state=fake.read,
+        clear_current_message=fake.clear,
+        set_paused=fake.set_paused,
+        set_let_through=fake.set_let_through,
+    )
+    assert b.start({"bind": "127.0.0.1", "port": 0, "allowed_origins": ["https://ok.example"]})
+    b.fake = fake  # type: ignore[attr-defined]
+    b.logs = logs  # type: ignore[attr-defined]
+    yield b
+    b.stop()
+
+
+def test_pause_let_holds_everyone_and_names_the_rooms(held_server: Bridge) -> None:
+    status, body, _ = call(held_server, "POST", "/pause", {"let": ["tts", "jmo", "tts"]})
+    assert status == 200
+    assert body["paused"] is True and body["paused_by"] == "user"
+    assert body["let_through"] == ["tts", "jmo"] and body["mic_held"] is False and body["changed"] is True
+    status, body, _ = call(held_server, "POST", "/pause", {"let": ["tts", "jmo"]})
+    assert body["changed"] is False
+    status, body, _ = call(held_server, "GET", "/pause")
+    assert body["let_through"] == ["tts", "jmo"]
+    assert any("letting tts, jmo through" in line for line in held_server.logs)  # type: ignore[attr-defined]
+
+
+def test_pause_let_replaces_the_list_and_release_clears_it(held_server: Bridge) -> None:
+    call(held_server, "POST", "/pause", {"let": ["tts"]})
+    status, body, _ = call(held_server, "POST", "/pause", {"let": ["jmo"]})
+    assert body["let_through"] == ["jmo"] and body["changed"] is True
+    status, body, _ = call(held_server, "POST", "/pause", {"paused": False})
+    assert body["paused"] is False and body["let_through"] == []
+    assert "let_through" not in held_server.fake.state  # type: ignore[attr-defined]
+
+
+def test_pause_let_rejects_bad_shapes(held_server: Bridge) -> None:
+    assert call(held_server, "POST", "/pause", {"let": "tts"})[0] == 400
+    assert call(held_server, "POST", "/pause", {"let": ["bad room!"]})[0] == 400
+    assert call(held_server, "POST", "/pause", {"let": ["x"] * 33})[0] == 400
+    assert call(held_server, "POST", "/pause", {"paused": False, "let": ["tts"]})[0] == 400
+    assert held_server.fake.state["paused"] is False  # type: ignore[attr-defined]
+
+
+def test_pause_let_without_the_hook_is_501(server: Bridge) -> None:
+    assert call(server, "POST", "/pause", {"let": ["tts"]})[0] == 501
+
+
+def test_pause_view_shows_a_recording_under_the_hold(held_server: Bridge) -> None:
+    held_server.fake.state.update(paused=True, paused_by="user", let_through=["tts"], mic_held=True)  # type: ignore[attr-defined]
+    status, body, _ = call(held_server, "GET", "/pause")
+    assert body["mic_held"] is True and body["let_through"] == ["tts"]

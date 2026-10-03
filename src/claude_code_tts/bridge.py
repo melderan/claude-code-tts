@@ -435,6 +435,7 @@ class BridgeHTTPServer(ThreadingHTTPServer):
         clear_current_message: Callable[[], None],
         set_paused: Callable[[bool], dict],
         mic_hold_max_s: Callable[[], float] | None = None,
+        set_let_through: Callable[[list[str]], dict] | None = None,
     ) -> None:
         super().__init__(address, BridgeHandler)
         self.token = token
@@ -444,6 +445,7 @@ class BridgeHTTPServer(ThreadingHTTPServer):
         self.clear_current_message = clear_current_message
         self.set_paused = set_paused
         self.mic_hold_max_s = mic_hold_max_s or (lambda: 0.0)
+        self.set_let_through = set_let_through
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
@@ -627,20 +629,46 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"flushed": flushed, "stopped_current": stopped_current})
 
     def _pause(self, body: dict) -> None:
-        """Hold or release the whole queue. No "paused" in the body toggles."""
+        """Hold or release the whole queue. No "paused" in the body toggles.
+
+        `let` (a list of room tags or session ids) holds everyone and lets those rooms play;
+        it replaces the list. `{"paused": false}` releases everyone, list included.
+        """
         before = self.server.read_playback_state()
         want = body.get("paused")
-        if want is None:
+        let = body.get("let")
+        if want is None and let is None:
             want = not before.get("paused", False)
-        elif not isinstance(want, bool):
+        elif want is not None and not isinstance(want, bool):
             self._send_json(400, {"error": "paused must be true or false"})
             return
-        changed = bool(before.get("paused", False)) != want
-        if changed:
-            after = self.server.set_paused(want)
-            self.server.log_fn(f"Bridge {'paused' if want else 'resumed'} the queue")
+        if let is not None:
+            if want is False:
+                self._send_json(400, {"error": "let needs the hold; release with paused false alone"})
+                return
+            if self.server.set_let_through is None:
+                self._send_json(501, {"error": "this daemon has no selective hold"})
+                return
+            if not isinstance(let, list) or len(let) > 32 or not all(
+                isinstance(r, str) and _ROOM_KEY.match(r) for r in let
+            ):
+                self._send_json(400, {"error": "let must be a list of up to 32 room tags or session ids"})
+                return
+            rooms = list(dict.fromkeys(let))
+            after = self.server.set_let_through(rooms)
+            changed = (bool(before.get("paused")), list(before.get("let_through") or [])) != (
+                True,
+                list(after.get("let_through") or []),
+            )
+            if changed:
+                self.server.log_fn(f"Bridge held the queue, letting {', '.join(rooms) or 'nobody'} through")
         else:
-            after = before
+            changed = bool(before.get("paused", False)) != want
+            if changed:
+                after = self.server.set_paused(bool(want))
+                self.server.log_fn(f"Bridge {'paused' if want else 'resumed'} the queue")
+            else:
+                after = before
         view = pause_view(after, self.server.mic_hold_max_s())
         view["changed"] = changed
         self._send_json(200, view)
@@ -667,9 +695,15 @@ def pause_view(state: dict, mic_hold_max_s: float = 0.0) -> dict:
         "paused_by": state.get("paused_by") if paused else None,
         "held_since": _rfc3339(since) if since is not None else None,
         "held_until": held_until,
+        "let_through": [str(r) for r in (state.get("let_through") or [])] if paused else [],
+        "mic_held": bool(state.get("mic_held")) if paused else False,
         "speaking": bool(state.get("audio_pid")),
         "current": {k: current[k] for k in ("id", "source", "project") if current.get(k)},
     }
+
+
+# A room tag (tts, notes) or a session id (alice--claude--claude-code-tts).
+_ROOM_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 
 
 def _rfc3339(t: float) -> str:
@@ -690,12 +724,14 @@ class Bridge:
         clear_current_message: Callable[[], None],
         set_paused: Callable[[bool], dict],
         mic_hold_max_s: Callable[[], float] | None = None,
+        set_let_through: Callable[[list[str]], dict] | None = None,
     ) -> None:
         self._log = log_fn
         self._read_state = read_playback_state
         self._clear_current = clear_current_message
         self._set_paused = set_paused
         self._mic_hold_max_s = mic_hold_max_s or (lambda: 0.0)
+        self._set_let_through = set_let_through
         self._server: BridgeHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -718,6 +754,7 @@ class Bridge:
                 clear_current_message=self._clear_current,
                 set_paused=self._set_paused,
                 mic_hold_max_s=self._mic_hold_max_s,
+                set_let_through=self._set_let_through,
             )
         except OSError as e:
             self._log(f"HTTP bridge could not listen on {bind}:{port}: {e}")

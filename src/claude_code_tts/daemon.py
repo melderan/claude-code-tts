@@ -61,7 +61,9 @@ from claude_code_tts.state import (
     clear_heartbeat,
     clear_pid,
     get_interrupted_message,
+    hold,
     is_daemon_running,
+    may_play,
     pid_alive,
     read_playback_state,
     release_lock,
@@ -169,6 +171,16 @@ def describe_voice(
 # Global state
 _shutdown_requested = False
 _daemon_mode = False
+
+# The session whose message is playing or about to play; the hold is judged against it
+# (state.may_play), so a room a person let through keeps speaking while the rest wait.
+_SPEAKING: dict[str, str] = {"session": ""}
+
+
+def held_now(state: dict | None = None) -> bool:
+    """Whether the hold applies to what is playing or about to play."""
+    s = read_playback_state() if state is None else state
+    return not may_play(s, _SPEAKING["session"])
 # log() is called from the synth, bridge and mic-watcher threads too.
 _log_lock = threading.Lock()
 
@@ -342,6 +354,34 @@ MIC_PAUSE_MAX_S = 1800.0
 # While the queue is held, say so this often: who holds it, for how long, how much waits.
 # A hold nobody can see is how 2026-09-30 14:54 to 16:58 went by with 60 messages waiting.
 HOLD_NOTICE_EVERY_S = 60.0
+
+
+def let_through_note(state: dict) -> str:
+    """", letting X and Y through" for a hand hold with a list; " (recording)" while the mic adds to it."""
+    if state.get("paused_by") != "user":
+        return ""
+    rooms = [str(r) for r in (state.get("let_through") or [])]
+    note = f", letting {', '.join(rooms)} through" if rooms else ""
+    if rooms and state.get("mic_held"):
+        note += " (waiting on a recording)"
+    return note
+
+
+# What a message carries only while it is the one on deck; the queue file never has these.
+_ON_DECK_ONLY = ("audio_position", "sentence_index", "audio_file", "played_s", "parts", "started_at")
+
+
+def requeue_interrupted(interrupted: dict) -> None:
+    """Put a half-played message back in the queue under its own id and timestamp.
+
+    Used when a person's hold lets another room through while this message, from a held
+    room, was the one paused mid-play: the next pick would overwrite it as the message on
+    deck and it would be lost. In the queue it keeps its place and replays whole on release.
+    """
+    fields = {k: v for k, v in interrupted.items() if k not in _ON_DECK_ONLY}
+    msgqueue.write_message(fields)
+    clear_current_message()
+    log(f"Held room's interrupted message {fields.get('id', '?')} put back in the queue; it replays on release")
 
 
 def hold_notices_due(held_s: float, every_s: float = HOLD_NOTICE_EVERY_S) -> int:
@@ -602,7 +642,7 @@ def daemon_play_audio(
     if JOBS.state(job_id) == "cancelled":
         # A /stop landed between the caller's last look and here: start nothing.
         return (False, False, 0.0)
-    if read_playback_state().get("paused"):
+    if held_now():
         # So did a pause: report it as a kill at 0 s without making a sound.
         return (False, True, 0.0)
 
@@ -647,7 +687,7 @@ def daemon_play_audio(
                 write_playback_state(audio_pid=None)
                 JOBS.update(job_id, state="cancelled", position_ms=round(elapsed * 1000))
                 return (False, False, elapsed)
-            if state.get("paused"):
+            if held_now(state):
                 elapsed = time.monotonic() - start_time
                 log(f"Audio killed for pause (PID {proc.pid}) after {elapsed:.1f}s real time")
                 try:
@@ -803,7 +843,7 @@ def play_sentences(
         # request (there is no player to kill); JOBS.cancelled checks both.
         if JOBS.cancelled(job_id):
             return cancelled(i)
-        if read_playback_state().get("paused") or _shutdown_requested:
+        if held_now() or _shutdown_requested:
             return StreamResult("paused", i, parts, played_s=played_s)
         return None
 
@@ -1493,6 +1533,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             clear_current_message=clear_current_message,
             set_paused=set_paused,
             mic_hold_max_s=lambda: float(load_raw_config().get("mic_pause_max_s", MIC_PAUSE_MAX_S)),
+            set_let_through=hold,
         )
         if not bridge.start(http_config):
             bridge = None
@@ -1574,6 +1615,12 @@ def daemon_loop(lockpick: bool = False) -> None:
         log(f"Cleared stale state from previous run: {', '.join(stale_fields)}")
 
     write_heartbeat()
+
+    # A recording flag over a hand hold is the previous daemon's; its watcher is gone and
+    # this one's start sets the flag again if Handy is still recording.
+    if startup_state.get("mic_held"):
+        write_playback_state(mic_held=False)
+        log("Cleared the previous daemon's recording flag over the hand hold; the watcher sets it again if needed")
 
     # Start mic-aware pause watcher BEFORE the startup announcement.
     # If Handy is actively recording, the watcher will pause us before
@@ -1665,17 +1712,21 @@ def daemon_loop(lockpick: bool = False) -> None:
             state = read_playback_state()
             was_paused = ledger.paused
             ledger.mark(bool(state.get("paused")))
+            letting_through = False
             if state.get("paused"):
-                # Paused holds the queue: nothing expires, nothing is trimmed.
+                # Paused holds the queue: nothing expires, nothing is trimmed. A person's
+                # hold may let named rooms through (JMO 2026-10-02); their messages are the
+                # only ones picked, everyone else's wait where they are.
                 if not was_paused:
                     hold_notices = 0
-                    log(f"Paused by {state.get('paused_by') or 'user'}; holding the queue")
+                    log(f"Paused by {state.get('paused_by') or 'user'}; holding the queue{let_through_note(state)}")
                 due = hold_notices_due(ledger.open_for(), HOLD_NOTICE_EVERY_S)
                 if due > hold_notices:
                     hold_notices = due
                     log(
                         f"Still paused by {state.get('paused_by') or 'user'} for "
                         f"{ledger.open_for():.0f}s, {len(get_queue_messages())} message(s) waiting"
+                        f"{let_through_note(state)}"
                     )
                 if mic_hold_expired(state, ledger.open_for(), mic_pause_max_s):
                     log(
@@ -1685,24 +1736,36 @@ def daemon_loop(lockpick: bool = False) -> None:
                     )
                     set_paused(False)
                     continue
-                time.sleep(poll_interval)
-                continue
-            if was_paused:
-                log(f"Resumed with {len(get_queue_messages())} message(s) waiting")
-            # One scan per pass, in this order: supersedes (the controls on it and the
-            # remembered cutoffs), then ageing, then trimming, then the pick. Stale
-            # messages go first, so an overflow trims a stale reply, not another
-            # room's older one.
-            queued = drop_superseded(get_queue_messages(), supersedes, ledger)
-            cleanup_old_messages(config["max_age_seconds"], ledger, queued)
-            enforce_max_depth(config["max_depth"], ledger, queued)
+                allowed = [m for m in get_queue_messages() if may_play(state, str(m.get("session_id", "")))]
+                if not allowed:
+                    time.sleep(poll_interval)
+                    continue
+                letting_through = True
+                queued = drop_superseded(allowed, supersedes, ledger)
+            else:
+                if was_paused:
+                    log(f"Resumed with {len(get_queue_messages())} message(s) waiting")
+                # One scan per pass, in this order: supersedes (the controls on it and the
+                # remembered cutoffs), then ageing, then trimming, then the pick. Stale
+                # messages go first, so an overflow trims a stale reply, not another
+                # room's older one.
+                queued = drop_superseded(get_queue_messages(), supersedes, ledger)
+                cleanup_old_messages(config["max_age_seconds"], ledger, queued)
+                enforce_max_depth(config["max_depth"], ledger, queued)
             JOBS.evict_finished()
 
             # Check for interrupted message to replay first
             interrupted = get_interrupted_message()
+            if interrupted and letting_through and not may_play(state, str(interrupted.get("session_id", ""))):
+                # A held room's half-played message goes back to the queue, in its place, so a
+                # room let through can speak now; it replays from its start on release.
+                if queued:
+                    requeue_interrupted(interrupted)
+                interrupted = None
             if interrupted:
                 prefetch.wait()  # never synthesize on this thread while a prefetch runs
                 session_id = interrupted.get("session_id", "unknown")
+                _SPEAKING["session"] = str(session_id)
                 persona = interrupted.get("persona", "claude-prime")
                 persona_config = get_persona_config(persona)
                 i_speed = interrupted.get("speed", persona_config.get("speed", 2.0))
@@ -1841,6 +1904,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 continue
 
             msg = messages[0]
+            _SPEAKING["session"] = str(msg.get("session_id", ""))
             msg_file = msg["_file"]
             if not msg_file.exists():
                 continue  # flushed (a bridge /stop) since this pass's scan; the next pass rescans
@@ -1863,7 +1927,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             # existed. The watcher's hold and a hook's message land in the same
             # instant (2026-10-01: a message spoke 0.2 s into a fresh mic pause),
             # so look again now that the message is picked; the next pass holds it.
-            if read_playback_state().get("paused"):
+            if held_now():
                 continue
 
             msg_claim = claim_message(msg)
@@ -1968,7 +2032,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 audio_file.unlink(missing_ok=True)
                 msg_file.unlink(missing_ok=True)
                 continue
-            if read_playback_state().get("paused"):
+            if held_now():
                 audio_file.unlink(missing_ok=True)
                 current_msg_info["audio_position"] = 0.0
                 write_playback_state(current_message=current_msg_info)
@@ -1995,7 +2059,11 @@ def daemon_loop(lockpick: bool = False) -> None:
             # speaker transition: an announce is synthesized on this thread and must
             # not race the prefetch for a model worker.
             if config.get("prefetch_next", True):
-                nxt = next_speakable(play_order(get_queue_messages()), msg_file)
+                now_state = read_playback_state()
+                nxt = next_speakable(
+                    play_order([m for m in get_queue_messages() if may_play(now_state, str(m.get("session_id", "")))]),
+                    msg_file,
+                )
                 if nxt is not None and (speech_unit() != "sentence" or nxt.get("want_marks")):
                     prefetch.start(prepare_message(nxt, raw_config))
 

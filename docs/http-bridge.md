@@ -167,7 +167,8 @@ untouched, queued or playing.
 The daemon has one hold for everything it plays: the flag behind the pause hotkey and
 `claude-tts pause`. These routes read and set that same flag, so a pause button on a page holds
 the rooms too, and a hotkey press shows up on the page. There is no per-source pause; a page that
-wants only its own reading to stop uses `/stop`.
+wants only its own reading to stop uses `/stop`. A person's hold can let named rooms through
+(`let`, below): everyone else queues behind the scenes until the hold is released.
 
 `GET /pause`:
 
@@ -184,11 +185,21 @@ wants only its own reading to stop uses `/stop`.
   bound, so `held_until` is `null` there; both are `null` when not paused. A page that must not
   resume over a recording greys its Resume button while `paused_by` is `mic`, and can show the
   bound. Added additively (`held_*` fields), nothing else in the reply changed.
+- `let_through` is the list of rooms a person's hold lets play (room tags such as `tts` or
+  `notes`, or full session ids); empty for a mic hold and when not paused. The key for a
+  friend is the room tag: the part of the session id after the last `--`, minus a leading
+  `claude-code-` (`alice--claude--claude-code-tts` is `tts`). `house-presence who` lists the
+  rooms awake.
+- `mic_held` is true while a recording runs under a person's hold: the rooms let through wait
+  for it too, and speak again when Handy stops.
 - `speaking` is true while a player process is running.
 - `current` is the message on deck, playing or held; empty between messages.
 
 `POST /pause` with `{"paused": true}` or `{"paused": false}` sets the hold; an empty body `{}`
-toggles it. Anything else in `paused`: `400`. The response is the `GET` shape plus `changed`,
+toggles it. `{"let": ["tts", "jmo"]}` holds everyone and lets those rooms play; it replaces the
+list, so send the whole list each time (up to 32 entries of `[A-Za-z0-9_.-]`). `{"paused": false}`
+releases everyone, list included (the kraken); `let` with `paused: false` is `400`. Anything else
+in `paused`: `400`. The response is the `GET` shape plus `changed`,
 false when the hold already matched. Only the flag is written: the play loop polls it every
 50 ms and stops the player itself, rewinding a little so nothing is lost on resume, exactly as
 it does for the hotkey. A resume clears a mic hold as well, since a person pressing resume
