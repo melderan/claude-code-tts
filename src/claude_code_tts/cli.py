@@ -2278,7 +2278,18 @@ def _ledger_record(
 
 
 def _speak_from_hook(args: argparse.Namespace) -> None:
-    """Handle --from-hook mode: read hook JSON from stdin, process transcript."""
+    """Handle --from-hook mode; a hook that cannot get the watermark lock in time stays silent."""
+    try:
+        _speak_from_hook_unguarded(args)
+    except WatermarkBusy as e:
+        # The other hook is alive and inside the critical section. Speaking
+        # without the lock, or breaking it, is how a reply got spoken twice
+        # (issue #14); one silent event is the cheaper failure.
+        debug(f"{args.hook_type or 'stop'}: {e}; staying silent for this event")
+
+
+def _speak_from_hook_unguarded(args: argparse.Namespace) -> None:
+    """Read hook JSON from stdin, process transcript. WatermarkBusy propagates."""
     hook_started = time.time()  # before any wait: the stale-reply cutoff compares this
     hook_type = args.hook_type or "stop"
     debug(f"=== {hook_type} hook triggered (Python) ===")
@@ -2938,18 +2949,12 @@ def _take_landed(state_file: Path, lock_dir: Path, pending_file: Path, line_no: 
     try:
         if record is None or _read_pending_record(pending_file) == record:
             _clear_pending(pending_file)
-        wm = 0
-        if state_file.exists():
-            try:
-                wm = int(state_file.read_text().strip())
-            except (ValueError, OSError):
-                wm = 0
+        wm = _load_watermark(state_file)
+        if wm is None:
+            debug(f"Watermark unreadable at {state_file.name}: not taking line {line_no}")
+            return None
         target = line_no + 1 if advance_past else line_no
-        if target > wm:
-            try:
-                state_file.write_text(str(target))
-            except OSError:
-                return None
+        if target > wm and _store_watermark(state_file, target):
             return wm
         return None
     finally:
@@ -3011,38 +3016,75 @@ def _count_lines(path: Path) -> int:
         return 0
 
 
+def _load_watermark(state_file: Path) -> int | None:
+    """The watermark as stored: 0 when no file, None when the file cannot be read as a number.
+
+    None is "unknown", never 0: a hook that read an unreadable mark as 0 was free
+    to speak the whole transcript again (issue #14). Every caller treats unknown
+    as "speak nothing new".
+    """
+    if not state_file.exists():
+        return 0
+    try:
+        return int(state_file.read_text().strip())
+    except (ValueError, OSError):
+        return None
+
+
+def _store_watermark(state_file: Path, value: int) -> bool:
+    """Write the watermark in one step: a sibling temp file, then os.replace onto the state file.
+
+    A reader under the lock never sees an empty or half-written file (Path.write_text
+    truncates first, then writes). Only this user can read the temp file.
+    """
+    tmp = state_file.with_name(f"{state_file.name}.{os.getpid()}.tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(str(value))
+        os.replace(tmp, state_file)
+        return True
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+
+
 def _read_watermark(state_file: Path, lock_dir: Path, transcript: Path) -> int:
-    """Read watermark with mkdir-based locking."""
+    """Read the watermark under the lock; unknown reads as the end of the transcript."""
     _watermark_lock(lock_dir)
     try:
-        wm = 0
-        if state_file.exists():
-            try:
-                wm = int(state_file.read_text().strip())
-            except (ValueError, OSError):
-                wm = 0
-
-        # Auto-reset stale watermark
         current = _count_lines(transcript)
+        wm = _load_watermark(state_file)
+        if wm is None:
+            debug(f"Watermark unreadable at {state_file.name}: treating it as {current}, nothing new")
+            return current
+
+        # Auto-reset stale watermark: the one write that moves the mark back, because
+        # the transcript it counted is gone (a shorter file under the same name).
         if wm > current:
             debug(f"Watermark reset: was {wm} but transcript only has {current} lines")
             wm = 0
-            try:
-                state_file.write_text("0")
-            except OSError:
-                pass
+            _store_watermark(state_file, 0)
         return wm
     finally:
         _watermark_unlock(lock_dir)
 
 
 def _write_watermark(state_file: Path, lock_dir: Path, line_count: int) -> None:
-    """Write watermark with mkdir-based locking."""
+    """Advance the watermark to `line_count` under the lock; it never moves back.
+
+    A lagged hook that found nothing new writes its own, older line count; before
+    this check that count could sit below the previous prompt and the landed reply
+    was spoken a second time (issue #14). An unreadable mark is replaced.
+    """
     _watermark_lock(lock_dir)
     try:
-        state_file.write_text(str(line_count))
-    except OSError:
-        pass
+        wm = _load_watermark(state_file)
+        if wm is None or line_count > wm:
+            _store_watermark(state_file, line_count)
     finally:
         _watermark_unlock(lock_dir)
 
@@ -3061,19 +3103,16 @@ def _claim_lines(
     """
     _watermark_lock(lock_dir)
     try:
-        wm = 0
-        if state_file.exists():
-            try:
-                wm = int(state_file.read_text().strip())
-            except (ValueError, OSError):
-                wm = 0
-        kept = [e for e in speakable
-                if e[1] == "input" or e[0] >= wm or (owned_through is not None and owned_from <= e[0] <= owned_through)]
-        if write:
-            try:
-                state_file.write_text(str(line_count))
-            except OSError:
-                pass
+        wm = _load_watermark(state_file)
+        if wm is None:
+            # Unknown mark: only what the input carries is surely unspoken.
+            debug(f"Watermark unreadable at {state_file.name}: keeping the input entries only")
+            kept = [e for e in speakable if e[1] == "input"]
+        else:
+            kept = [e for e in speakable
+                    if e[1] == "input" or e[0] >= wm or (owned_through is not None and owned_from <= e[0] <= owned_through)]
+        if write and (wm is None or line_count > wm):
+            _store_watermark(state_file, line_count)
         return kept
     finally:
         _watermark_unlock(lock_dir)
@@ -3087,39 +3126,57 @@ def _claim_watermark(state_file: Path, lock_dir: Path, text_line: int, line_coun
     """
     _watermark_lock(lock_dir)
     try:
-        wm = 0
-        if state_file.exists():
-            try:
-                wm = int(state_file.read_text().strip())
-            except (ValueError, OSError):
-                wm = 0
+        wm = _load_watermark(state_file)
+        if wm is None:
+            debug(f"Watermark unreadable at {state_file.name}: not claiming line {text_line}")
+            return False
         if text_line < wm:
             return False
-        try:
-            state_file.write_text(str(line_count))
-        except OSError:
-            pass
+        if line_count > wm:
+            _store_watermark(state_file, line_count)
         return True
     finally:
         _watermark_unlock(lock_dir)
 
 
+# How long a hook waits for another hook that holds the watermark lock, and how old
+# the lock directory must be before it counts as left behind by a dead process. The
+# lock used to be broken after the contender's own 20 misses (about a second), whoever
+# still held it: a holder on a slow disk lost the lock mid-write (issue #14).
+WATERMARK_LOCK_WAIT = 2.0
+WATERMARK_LOCK_STALE = 5.0
+
+
+class WatermarkBusy(Exception):
+    """Another hook has held the watermark lock for the whole wait; this hook stays silent."""
+
+
 def _watermark_lock(lock_dir: Path) -> None:
-    """Acquire mkdir-based lock (works on macOS and Linux)."""
-    for attempt in range(20):
+    """Acquire the mkdir lock (works on macOS and Linux).
+
+    A lock whose directory is older than WATERMARK_LOCK_STALE has no live holder
+    and is removed. A younger one is waited for up to WATERMARK_LOCK_WAIT, then
+    WatermarkBusy is raised: silence for one event costs less than two hooks
+    inside the critical section at once.
+    """
+    deadline = time.monotonic() + WATERMARK_LOCK_WAIT
+    while True:
         try:
             lock_dir.mkdir()
             return
         except FileExistsError:
-            if attempt >= 19:
-                # Break stale lock
-                shutil.rmtree(lock_dir, ignore_errors=True)
-                try:
-                    lock_dir.mkdir()
-                except FileExistsError:
-                    pass
-                return
-            time.sleep(0.05)
+            pass
+        try:
+            age = time.time() - lock_dir.stat().st_mtime
+        except OSError:
+            continue  # released between the mkdir and the stat; try again now
+        if age > WATERMARK_LOCK_STALE:
+            debug(f"Watermark lock {lock_dir.name} is {age:.0f}s old with no live holder: removing it")
+            shutil.rmtree(lock_dir, ignore_errors=True)
+            continue
+        if time.monotonic() >= deadline:
+            raise WatermarkBusy(f"{lock_dir.name} held by another hook for {WATERMARK_LOCK_WAIT:.0f}s")
+        time.sleep(0.05)
 
 
 def _watermark_unlock(lock_dir: Path) -> None:

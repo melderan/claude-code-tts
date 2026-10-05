@@ -13,11 +13,16 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
+import shutil
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from claude_code_tts import cli
 from claude_code_tts.cli import _speak_from_hook
 from claude_code_tts.config import TTSConfig
 
@@ -852,4 +857,103 @@ class TestStopSpeaksFromItsInput:
 
         monkeypatch.setattr("claude_code_tts.cli.time.sleep", late_write)
         assert _run_hook(transcript, "stop") == "the answer that landed after the hook fired"
+
+
+class TestWatermarkLockAndStore:
+    """Issue #14: a live holder keeps the lock, an unreadable mark is never 0, the mark never moves back.
+
+    The module's autouse fixture makes time.sleep a no-op, so a contender here
+    spins as fast as it can: the old lock broke after its own 20 misses, in
+    microseconds, whoever held it.
+    """
+
+    def test_a_live_holder_keeps_the_lock_while_a_contender_spins(self, tmp_path):
+        lock = tmp_path / "wm.lock"
+        lock.mkdir()
+        released = threading.Event()
+
+        def holder():
+            threading.Event().wait(0.06)  # time.sleep is patched out in this module
+            shutil.rmtree(lock)
+            released.set()
+
+        threading.Thread(target=holder).start()
+        started = time.monotonic()
+        cli._watermark_lock(lock)
+        assert released.is_set(), "the contender took the lock from a live holder"
+        assert time.monotonic() - started >= 0.05
+        assert lock.is_dir()
+
+    def test_a_lock_left_by_a_dead_process_is_removed(self, tmp_path):
+        lock = tmp_path / "wm.lock"
+        lock.mkdir()
+        long_ago = time.time() - 60
+        os.utime(lock, (long_ago, long_ago))
+        started = time.monotonic()
+        cli._watermark_lock(lock)
+        assert time.monotonic() - started < 0.5
+        assert lock.is_dir()
+
+    def test_a_lock_held_past_the_wait_raises_busy_and_is_left_alone(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli, "WATERMARK_LOCK_WAIT", 0.1)
+        lock = tmp_path / "wm.lock"
+        lock.mkdir()
+        with pytest.raises(cli.WatermarkBusy):
+            cli._watermark_lock(lock)
+        assert lock.is_dir(), "the holder's lock was broken"
+
+    def _seven_lines(self, tmp_path):
+        transcript = tmp_path / "t.jsonl"
+        _write_transcript(transcript, [_assistant(f"line {i}") for i in range(7)])
+        return transcript, tmp_path / "wm.state", tmp_path / "wm.lock", tmp_path / "wm.pending"
+
+    def test_an_empty_watermark_is_not_read_as_zero(self, tmp_path):
+        transcript, state, lock, pending = self._seven_lines(tmp_path)
+        state.write_text("")
+        assert cli._read_watermark(state, lock, transcript) == 7, "unknown reads as the end of the file"
+        assert cli._claim_watermark(state, lock, 3, 7) is False
+        assert cli._take_landed(state, lock, pending, 5, advance_past=True) is None
+        assert state.read_text() == "", "a read or a refused claim does not invent a value"
+
+    def test_garbage_in_the_watermark_keeps_only_the_input_and_is_replaced(self, tmp_path):
+        transcript, state, lock, pending = self._seven_lines(tmp_path)
+        state.write_text("not a number")
+        kept = cli._claim_lines(state, lock, [(3, "text", "from the file"), (0, "input", "from the hook input")], 7)
+        assert kept == [(0, "input", "from the hook input")]
+        assert state.read_text() == "7", "the Stop's own count replaces the garbage"
+
+    def test_the_watermark_never_moves_back(self, tmp_path):
+        transcript, state, lock, pending = self._seven_lines(tmp_path)
+        cli._write_watermark(state, lock, 10)
+        cli._write_watermark(state, lock, 5)  # a lagged hook with nothing new, its old count
+        assert state.read_text() == "10"
+        cli._claim_lines(state, lock, [], 4)
+        assert state.read_text() == "10"
+        assert cli._claim_watermark(state, lock, 10, 9) is True
+        assert state.read_text() == "10", "a winner whose count is older still does not move it back"
+        assert cli._claim_watermark(state, lock, 10, 11) is True
+        assert state.read_text() == "11"
+
+    def test_a_shorter_transcript_still_resets_the_mark(self, tmp_path):
+        transcript, state, lock, pending = self._seven_lines(tmp_path)
+        cli._write_watermark(state, lock, 40)
+        assert cli._read_watermark(state, lock, transcript) == 0
+        assert state.read_text() == "0", "the one write that moves back: the file it counted is gone"
+
+    def test_the_write_is_one_step_and_leaves_nothing_behind(self, tmp_path):
+        transcript, state, lock, pending = self._seven_lines(tmp_path)
+        cli._write_watermark(state, lock, 3)
+        assert state.read_text() == "3"
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["t.jsonl", "wm.state"], "no temp file, no lock"
+        assert cli._store_watermark(tmp_path / "missing" / "wm.state", 3) is False
+
+    def test_a_hook_that_cannot_get_the_lock_is_silent(self, tmp_path, fake_state_dir, monkeypatch):
+        transcript = tmp_path / "projects" / "-Users-dev" / "uuid-busy.jsonl"
+        _write_transcript(transcript, [_user("hi"), _assistant("an earlier reply that was spoken")])
+
+        def busy(lock_dir):
+            raise cli.WatermarkBusy("held")
+
+        monkeypatch.setattr(cli, "_watermark_lock", busy)
+        assert _run_hook(transcript, "stop", last_assistant_message="A new reply the other hook is handling") is None
 

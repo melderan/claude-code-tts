@@ -430,10 +430,9 @@ def test_r7_swap_stop_owner_ptu_winner(tmp_path, fake_state_dir, monkeypatch, pt
 # 4b. F1 with a lagged third hook writing a stale watermark between P's failed CAS and its speech;
 # a follow-up hook of the next event then runs. S's last write is ordered before P's claim, so the
 # stale write is the file's last word: the adversarial case. It sits below the prompt, the Stop's
-# record reads as "never landed" and the landed reply is spoken a second time. The hole is the
-# backward write, not the record (issue #14: a hook with nothing new must never move the watermark
-# back). Strict xfail: when #14 lands this passes and says so.
-@pytest.mark.xfail(strict=True, reason="#14: a stale watermark write moves the mark back below the prompt")
+# record read as "never landed" and the landed reply was spoken a second time. The hole was the
+# backward write, not the record (issue #14): since the fix a hook with nothing new never moves the
+# watermark back, and the follow-up hook is silent. Was a strict xfail until #14 landed.
 def test_r7_f1_stale_write_between_failed_cas_and_owner_speech(tmp_path, fake_state_dir, monkeypatch):
     t = _stop_spoke_final(tmp_path, "r7b")
     old = cli._count_lines(t)
@@ -457,7 +456,7 @@ def test_r7_f1_stale_write_between_failed_cas_and_owner_speech(tmp_path, fake_st
     assert [n for n, x in said if R3_INTER in x] == ["P"], said
     _append(t, [_assistant_msg("m5", R4_REPLY)])
     follow = _hook(t, "post_tool_use", prompt="p2")
-    assert follow == [], follow  # today [R4_REPLY]: the xfail above
+    assert follow == [], follow  # before #14: [R4_REPLY], the reply spoken a second time
 
 
 # 4c. An owner with an empty owned span on the F1 path speaks nothing.
