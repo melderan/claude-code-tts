@@ -23,7 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from claude_code_tts import msgqueue
+from claude_code_tts import msgqueue, spoken
+from claude_code_tts import state as daemon_state
 from claude_code_tts.audio import _set_last_error as audio_set_last_error
 from claude_code_tts.audio import (
     detect_player,
@@ -1408,6 +1409,41 @@ class Prefetch:
         return prepared, result[0], result[1]
 
 
+def message_claim_key(msg: dict) -> tuple[str, str]:
+    """The spoken-store key of a queue message and how to name it in a log line.
+
+    The message's own id: a replay or a bridge double carries the same id, while two
+    different messages saying "Done." in one project do not. A message without an id (no
+    writer since the v:1 format leaves one out) falls back to its project and normalized
+    text, and the name says so.
+    """
+    mid = msg.get("id")
+    if isinstance(mid, str) and mid:
+        return spoken.digest("queue-id", mid), f"message {mid}"
+    project = str(msg.get("project", "unknown"))
+    return (
+        spoken.digest("project-text", project, spoken.normalize(text_of(msg))),
+        "message without an id (keyed by project and text)",
+    )
+
+
+def claim_message(msg: dict) -> spoken.Claim | None:
+    """Claim a dequeued message in the daemon's spoken store; None for a duplicate, logged.
+
+    Claimed at dequeue, so a message flushed, aged out or trimmed before its turn never
+    claims, and the replay of a paused message (which comes back through playback state, not
+    the queue) never meets its own claim. The drop is silent; `daemon stats` counts it.
+    """
+    project = str(msg.get("project", "unknown"))
+    key, what = message_claim_key(msg)
+    claim = spoken.claim(daemon_state.SPOKEN_DIR, key, spoken.DAEMON_MIN_TTL_S)
+    if claim is None:
+        log(f"Duplicate dropped: {project}, {what}, already spoken")
+    elif not claim.stored and spoken.first_unusable_notice(daemon_state.SPOKEN_DIR):
+        log(f"Spoken store unusable at {daemon_state.SPOKEN_DIR}; doubles are not dropped until it is fixed")
+    return claim
+
+
 def daemon_loop(lockpick: bool = False) -> None:
     """Main daemon processing loop."""
     global _shutdown_requested
@@ -1609,7 +1645,13 @@ def daemon_loop(lockpick: bool = False) -> None:
     hold_notices = 0  # "Still paused" lines logged for the current hold
     prefetch = Prefetch()
     supersedes = msgqueue.Supersedes(keep_s=float(config["max_age_seconds"]))
+    # The claim of the message this pass dequeued, until it has played (or is held for a
+    # replay). The catch-all below gives it back: an exception between the claim and the
+    # player would otherwise leave the file to meet its own claim on the next pass and be
+    # dropped as a duplicate of itself, played zero times.
+    unplayed_claim: spoken.Claim | None = None
     while not _shutdown_requested:
+        unplayed_claim = None
         try:
             write_heartbeat()
             if time.monotonic() - last_reap >= WORKER_REAP_EVERY_S:
@@ -1823,6 +1865,12 @@ def daemon_loop(lockpick: bool = False) -> None:
             if read_playback_state().get("paused"):
                 continue
 
+            msg_claim = claim_message(msg)
+            if msg_claim is None:
+                msg_file.unlink(missing_ok=True)
+                continue
+            unplayed_claim = msg_claim
+
             # The message after the one that just played may be synthesized already.
             taken = prefetch.take(msg_file)
             if taken is not None:
@@ -1879,6 +1927,8 @@ def daemon_loop(lockpick: bool = False) -> None:
                     ),
                     msg_file=msg_file,
                 )
+                unplayed_claim = None
+                msg_claim.refresh(spoken.DAEMON_MIN_TTL_S)
                 continue
 
             if prefetched and not ok:
@@ -1900,6 +1950,8 @@ def daemon_loop(lockpick: bool = False) -> None:
                 )
                 audio_file.unlink(missing_ok=True)
                 msg_file.unlink(missing_ok=True)
+                unplayed_claim = None
+                msg_claim.release()  # nothing played: a replay of it may speak
                 JOBS.update(job_id, state="failed", error=audio_last_error())
                 continue
             if marks is not None:
@@ -1973,6 +2025,11 @@ def daemon_loop(lockpick: bool = False) -> None:
                 _, was_killed, elapsed = daemon_play_audio(audio_file, effective_speed, job_id)
             else:
                 _, was_killed, elapsed = daemon_play_audio(audio_file, job_id=job_id)
+            # The TTL counts from the end of playback: the loop dequeues one message at a time,
+            # so a double queued while this one played is picked only now. Measured from the
+            # claim, max(30 s, duration) would let it through after any synthesis delay.
+            unplayed_claim = None
+            msg_claim.refresh(max(spoken.DAEMON_MIN_TTL_S, wav_duration))
 
             audio_file.unlink(missing_ok=True)
 
@@ -2012,6 +2069,8 @@ def daemon_loop(lockpick: bool = False) -> None:
             break
         except Exception as e:
             log(f"Error in daemon loop: {e}", "ERROR")
+            if unplayed_claim is not None:
+                unplayed_claim.release()  # the file is still queued; the next pass plays it
             time.sleep(1)
 
     prefetch.discard()  # a synthesis for a message nobody will play now; its WAV goes too
@@ -2258,7 +2317,7 @@ def log_stats(lines: Iterable[str]) -> dict:
     count = 0
     first: str | None = None
     last: str | None = None
-    messages = streams = mic_pauses = errors = stale = 0
+    messages = streams = mic_pauses = errors = stale = duplicates = 0
     pending: datetime | None = None
     gaps: list[float] = []
     kinds: dict[str, int] = {}
@@ -2290,6 +2349,8 @@ def log_stats(lines: Iterable[str]) -> dict:
             mic_pauses += 1
         elif msg.startswith("Dropped stale message "):
             stale += 1
+        elif msg.startswith("Duplicate dropped:"):
+            duplicates += 1
     gaps.sort()
 
     def pick(p: float) -> float:
@@ -2304,6 +2365,7 @@ def log_stats(lines: Iterable[str]) -> dict:
         "mic_pauses": mic_pauses,
         "errors": errors,
         "stale_dropped": stale,
+        "duplicates": duplicates,
         "latency": {
             "n": len(gaps),
             "median": pick(0.5),
@@ -2328,6 +2390,7 @@ def format_log_stats(stats: dict, name: str, size_bytes: int) -> str:
         f"messages spoken: {stats['messages']}   streamed: {stats['streams']}   "
         f"mic pauses: {stats['mic_pauses']}   errors: {stats['errors']}   "
         f"stale dropped: {stats.get('stale_dropped', 0)}",
+        f"duplicates dropped: {stats.get('duplicates', 0)}",
         f"queue to first audio: median {lat['median']:.1f}s  p90 {lat['p90']:.1f}s  "
         f"max {lat['max']:.1f}s  (n={lat['n']})",
         "line kinds:",

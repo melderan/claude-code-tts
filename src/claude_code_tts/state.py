@@ -35,6 +35,13 @@ PLAYBACK_STATE_FILE = TTS_CONFIG_DIR / "playback.json"
 # The control-protocol tag, not a release; write_release_marker records the release beside it.
 VERSION_FILE = TTS_CONFIG_DIR / "daemon.version"
 RESPAWN_MARKER = TTS_CONFIG_DIR / "daemon.respawn"
+# The daemon's spoken store (spoken.py): one claim per queue message id, so a replayed or
+# doubled message plays once. It lives in the daemon's state directory because that is where
+# the daemon's files live and this module is their one reader and writer; on the daemon's
+# machine it is local disk, which O_EXCL, rename and flock need. Hooks never claim here: in a
+# sandbox this directory is a shared mount, so they claim in their own $TMPDIR. Anyone who can
+# see the mount sees only sha256 file names and "<ttl> <token>" contents, never text.
+SPOKEN_DIR = TTS_CONFIG_DIR / "spoken"
 
 CONTROL_PROTOCOL = "control-v1"
 # A heartbeat older than this is nobody's: the daemon refreshes it every second while

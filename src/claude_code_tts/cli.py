@@ -21,13 +21,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from claude_code_tts import __version__
+from claude_code_tts import __version__, spoken
 from claude_code_tts.config import (
     DEFAULT_VOICE,
     SHERPA_MODELS_DIR,
     TTS_CONFIG_FILE,
     TTS_SESSIONS_DIR,
     VOICES_DIR,
+    TTSConfig,
     atomic_write_json,
     debug,
     load_config,
@@ -2191,9 +2192,6 @@ def cmd_supersede(args: argparse.Namespace) -> None:
 
 def _speak_from_hook(args: argparse.Namespace) -> None:
     """Handle --from-hook mode: read hook JSON from stdin, process transcript."""
-    from claude_code_tts.audio import speak
-    from claude_code_tts.filter import filter_text
-
     hook_started = time.time()  # before any wait: the stale-reply cutoff compares this
     hook_type = args.hook_type or "stop"
     debug(f"=== {hook_type} hook triggered (Python) ===")
@@ -2317,32 +2315,92 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
     # next hook finds the same text again (heard twice, 20 s apart, 2026-09-26).
     speakable, scanned_lines = _scan_transcript(transcript, watermark, hook_type)
 
-    # "It came in": the response a Stop hook spoke from its input has landed. It
-    # is the first new assistant text, since it belongs to the turn before any
-    # new one; only that one is compared, and only for equality. A final message
-    # of several text blocks reaches the input as its last block (unmeasured,
-    # Geordi 2026-10-01): then the landed line ends with the spoken text and
-    # the blocks before it are what is left to speak.
+    # "It came in": the response a Stop hook spoke from its input has landed. The
+    # transcript is appended in order, so the first prompt after the watermark (a
+    # user line with text; a tool result is a user line too and stays in its turn)
+    # splits the new lines: the old turn's tail before it, the new turn after. The
+    # response, if it landed, is in the tail, whole; a tail that holds other text
+    # but not the response means a different response landed and the record is
+    # stale. A final message of several text blocks reaches the input as its last
+    # block (unmeasured, Geordi 2026-10-01): then the tail's first line ends with
+    # the spoken text and the blocks before it are what is left to speak. With no
+    # tail at all, the first line after the prompt is compared whole, since Claude
+    # Code has written the Stop's line late once already (2.1.286, every room spoke
+    # N-1 for a day); anything else there is the new turn's reply, which may end in
+    # the same words and is spoken whole (Geordi's finding 6 on b76cbf0, 2026-10-02:
+    # only its first half was). A stale record is dropped under the lock and only
+    # while it is still that record, key and turn: a twin Stop may be writing a new
+    # one. With no prompt yet the line may still land, so a record nothing
+    # matched stays, with no age limit (see _read_pending). A landed line found
+    # after unread text in the tail is taken the same way, record and watermark in
+    # one locked step; the hook whose take moved the watermark owns the unread
+    # lines it moved past, from the watermark it moved to the landed line, and
+    # speaks them without another claim, even when it then loses the utterance
+    # claim to a twin (they are its alone by the take; heard after the twin's
+    # reply then). A twin whose take moved nothing owns none of them and drops
+    # them. Only that span is owned: a lagged PostToolUse that claimed a line
+    # between this hook's scan and its take moved the watermark past it first,
+    # and that line is not spoken again (Geordi, round four). An owner that dies
+    # between its take and its speech loses those lines for good; a twin cannot
+    # tell that from an owner about to speak, and recovering would double every
+    # time the owner lives, so it does not try. Leaving the watermark for a later
+    # claim instead reopened the twin race the one-step take closes (round three).
     landed_line: int | None = None
+    owned_through: int | None = None
+    owned_from = 0
     landed_key: str | None = None
-    pending = _read_pending(pending_file)
+    landed_prompt = ""
+    pending, pending_prompt = _read_pending_record(pending_file)
     if pending and speakable:
-        line_no, source, msg_text = speakable[0]
-        match = _landed_match(msg_text, pending)
-        if match is not None:
+        match: str | None = None
+        idx: int | None = None
+        boundary = _first_prompt_line(transcript, watermark, speakable[-1][0]) if watermark > 0 else None
+        tail = [i for i, (ln, _, _) in enumerate(speakable) if boundary is None or ln < boundary]
+        if tail:
+            idx = next((i for i in tail if _landed_match(speakable[i][2], pending) == ""), None)
+            if idx is not None:
+                match = ""
+            else:
+                match = _landed_match(speakable[tail[0]][2], pending)
+                if match:
+                    idx = tail[0]
+        elif _landed_match(speakable[0][2], pending) == "":
+            idx, match = 0, ""
+        if idx is None and boundary is not None:
+            debug(f"{hook_type}: the Stop hook's spoken response did not land before the next prompt; "
+                  "dropping its record")
+            _clear_pending_if_record(pending_file, lock_dir, pending, pending_prompt)
+        if idx is not None:
             # Taking the line clears the record and moves the watermark past it
             # in one step under the lock. Two hooks fired for one event (2026-10-01)
             # found the line together; the first cleared the record, the second
             # read no record before the first had moved the watermark, and spoke it.
+            # Both twins of one event can get here and both take the line: the take is
+            # idempotent under the watermark lock (the record is cleared, the watermark
+            # only moves forward), so it runs before the spoken-store claim below and is
+            # the one thing a hook that then loses that claim has done.
+            line_no, source, msg_text = speakable[idx]
             landed_line = line_no
             landed_key = pending
-            _take_landed(state_file, lock_dir, pending_file, line_no, advance_past=not match)
+            landed_prompt = pending_prompt
+            owned = _take_landed(state_file, lock_dir, pending_file, line_no, advance_past=not match,
+                                 record=(pending, pending_prompt))
             if match:
                 debug(f"{hook_type}: line {line_no} ends with the response the Stop hook spoke; speaking what precedes it")
-                speakable[0] = (line_no, source, match)
+                speakable[idx] = (line_no, source, match)
+            elif idx and owned is not None:
+                debug(f"{hook_type}: line {line_no} is the response the Stop hook spoke from its input, skipping; "
+                      f"the {idx} unread line(s) before it are this hook's to speak")
+                owned_through = line_no
+                owned_from = owned
+                del speakable[idx]
+            elif idx:
+                debug(f"{hook_type}: line {line_no} is the response the Stop hook spoke from its input, skipping; "
+                      f"another hook moved past the {idx} unread line(s) before it")
+                del speakable[: idx + 1]
             else:
                 debug(f"{hook_type}: line {line_no} is the response the Stop hook spoke from its input, skipping")
-                del speakable[0]
+                del speakable[idx]
     # A record nothing matched stays until the next claim overwrites it. Wiping it on
     # every Stop let a second Stop for the same event claim and speak again, and ageing
     # it out by the clock (an hour, through 9.41.4) re-spoke a whole reply: the person
@@ -2351,9 +2409,17 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
 
     # "Something is coming": the Stop hook has the response but the file does not.
     from_input = False
+    prompt_id = str(hook_data.get("prompt_id") or "")
     if input_text:
-        if landed_key is not None and _pending_key(input_text) == landed_key:
-            pass  # this very response landed, and the hook that recorded it spoke it
+        if (
+            landed_key is not None
+            and _pending_key(input_text) == landed_key
+            and (not landed_prompt or not prompt_id or landed_prompt == prompt_id)
+        ):
+            # This very response landed, and the hook that recorded it spoke it. Same
+            # turn only: the same words as the next turn's reply (no tool call between,
+            # so this Stop is the first hook to see the last turn's line) are a new reply.
+            pass
         elif speakable and _same_text(speakable[-1][2], input_text):
             pass  # landed already; spoken from the file as before
         else:
@@ -2376,38 +2442,200 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
                 break
     current_lines = max(current_lines, scanned_lines)
     if from_input:
-        # Two Stop hooks for one event (every Stop of a session whose settings
-        # were rewritten while it ran, 2026-10-01) carry the same input; the
-        # record is the claim, taken under the watermark lock, so exactly one
-        # of them speaks it.
-        if _claim_input(pending_file, lock_dir, input_text):
-            speakable.append((current_lines, "input", input_text))
-            debug(f"stop: response from the hook input ({len(input_text)} chars), not in the transcript yet")
+        speakable.append((current_lines, "input", input_text))
+
+    # One claim per utterance, in the spoken store, before this hook touches
+    # anything. Two Stop hooks for one event carry the same stdin (every Stop of
+    # a session whose settings were rewritten while it ran, 2026-10-01); a Stop
+    # whose last text is its input's response keys it by the turn (prompt_id),
+    # whether it read the text from the input or found it landed in the file, so
+    # twins that split across the two share one key. Any other text is keyed by
+    # its assistant message id, else its transcript line. "Done." in two turns
+    # is two keys. The landed-line record (.pending) stays for a line that lands
+    # later; the store never joins a file key to an input key.
+    claim: spoken.Claim | None = None
+    claimed: tuple[int, str, str] | None = None
+    if speakable:
+        claimed = speakable[-1]
+        c_line, c_source, c_text = claimed
+        hook_session = str(hook_data.get("session_id") or transcript_key)
+        if input_text and (c_source == "input" or _same_text(c_text, input_text)):
+            message_key = f"prompt:{prompt_id}" if prompt_id else "input"
+            if not prompt_id:
+                debug("stop: no prompt_id in the hook input; the claim is keyed by session and text alone")
         else:
-            debug("stop: another Stop hook already spoke this input, skipping it")
-    elif input_text and landed_key is None and speakable and _same_text(speakable[-1][2], input_text):
-        # The response landed between the twins' reads: this one found it in the
-        # file while its twin spoke it from the input (14:19:50, heard twice).
-        # The same claim decides, whichever path a twin took.
-        if not _claim_input(pending_file, lock_dir, input_text):
-            debug("stop: another Stop hook already spoke this response from its input, skipping the landed line")
-            speakable.pop()
+            message_key = _message_key(transcript, c_line)
+        claim = spoken.claim(spoken.hook_dir(), spoken.utterance_key(hook_session, message_key, c_text),
+                             spoken.HOOK_TTL_S)
+        if claim is None:
+            # The hook that loses the claim does nothing more: no .pending
+            # record, no watermark move. (Taking a landed line, above, it may
+            # have done; that step is idempotent and its twin does the same.) The winner does both for this very
+            # utterance; a loser that rewrote the record or moved the watermark
+            # could re-arm a record the winner's landed line already cleared,
+            # or cover a line the winner has not read yet.
+            debug(f"{hook_type}: another hook already claimed this utterance (line {c_line} {c_source}), not speaking it")
+            if owned_through is not None:
+                mine = [e for e in speakable if e[1] != "input" and owned_from <= e[0] <= owned_through]
+                if mine:
+                    # Its take already moved the watermark past these; speaking them must not
+                    # move it again, or the winner's own line, further on, reads as taken
+                    # (Geordi, round five: the reply was lost that way).
+                    debug(f"{hook_type}: but the {len(mine)} line(s) this hook's take moved past are its alone; speaking them")
+                    _speak_claimed(hook_type, mine, None, current_lines, watermark, state_file, lock_dir, landed_line,
+                                   cfg, owned_through=owned_through, owned_from=owned_from, advance=False)
+            return
+        if not claim.stored:
+            if spoken.first_unusable_notice(spoken.hook_dir()):
+                debug(f"INFO: spoken store unusable at {spoken.hook_dir()} (not ours, or not writable); "
+                      "doubled hooks are not suppressed until it is fixed. Said once per user.")
+            debug(f"{hook_type}: spoken store unusable at {spoken.hook_dir()}, speaking unclaimed")
+        if from_input:
+            # "Something is coming": the record the hook that finds the line later skips it by.
+            _write_pending(pending_file, input_text, prompt_id)
+            debug(f"stop: response from the hook input ({len(input_text)} chars), not in the transcript yet")
+            swept = _sweep_pending_orphans(pending_file)
+            if swept:
+                debug(f"stop: dropped {swept} pending record(s) older than {PENDING_ORPHAN_AGE_S / 86400:.0f} days")
+
+    queued = False
+    try:
+        queued = _speak_claimed(
+            hook_type, speakable, claimed, current_lines, watermark, state_file, lock_dir, landed_line, cfg,
+            owned_through=owned_through, owned_from=owned_from,
+        )
+    finally:
+        if claim is not None and not queued:
+            # Nothing reached the queue or the speaker (an exception, the daemon
+            # down, too short, taken by another hook meanwhile): give the claim
+            # back so a retry speaks, and drop a record nobody spoke.
+            claim.release()
+            if from_input:
+                _clear_pending_if(pending_file, lock_dir, input_text)
+
+
+def _message_key(transcript: Path, line_no: int) -> str:
+    """The assistant message id of the transcript line, else the line number."""
+    try:
+        with open(transcript) as f:
+            for idx, line in enumerate(f):
+                if idx == line_no:
+                    data = json.loads(line)
+                    mid = (data.get("message") or {}).get("id") if isinstance(data, dict) else None
+                    return f"message:{mid}" if mid else f"line:{line_no}"
+    except (OSError, ValueError, AttributeError):
+        pass
+    return f"line:{line_no}"
+
+
+def _clear_pending_if(pending_file: Path, lock_dir: Path, text: str) -> None:
+    """Clear the record under the lock, only if it is still the record of `text`."""
+    _watermark_lock(lock_dir)
+    try:
+        if _read_pending_record(pending_file)[0] == _pending_key(text):
+            _clear_pending(pending_file)
+    finally:
+        _watermark_unlock(lock_dir)
+
+
+def _clear_pending_if_record(pending_file: Path, lock_dir: Path, key: str, prompt_id: str) -> None:
+    """Clear the record under the lock, only if it is still this record: same key, same turn.
+
+    The key alone is not the record's identity: a twin Stop of the next turn can write
+    the same words under a new prompt_id between this hook's read and its drop, and that
+    record is a fresh one that must stay.
+    """
+    _watermark_lock(lock_dir)
+    try:
+        if _read_pending_record(pending_file) == (key, prompt_id):
+            _clear_pending(pending_file)
+    finally:
+        _watermark_unlock(lock_dir)
+
+
+def _first_prompt_line(transcript: Path, start: int, end: int) -> int | None:
+    """The index of the first prompt in transcript lines [start, end), or None.
+
+    A prompt is a user line the person wrote: not marked isMeta (something Claude
+    Code injected) and with no tool_result block (a tool result belongs to the turn
+    it is in, whatever else rides on its line). Its content is a non-empty string, or
+    a list with a block that says something (an image, a text block with text). A
+    Stop hook's response lands before anything the next turn writes, so the prompt
+    splits what the hook sees into the old turn's tail and the new turn.
+    """
+    try:
+        with open(transcript) as f:
+            for idx, line in enumerate(f):
+                if idx >= end:
+                    break
+                if idx < start:
+                    continue
+                try:
+                    data = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(data, dict) and data.get("type") == "user" and not data.get("isMeta"):
+                    content = (data.get("message") or {}).get("content")
+                    if isinstance(content, str) and content.strip():
+                        return idx
+                    if isinstance(content, list) and not any(
+                        isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+                    ) and any(
+                        isinstance(b, dict) and (b.get("type") != "text" or str(b.get("text", "")).strip())
+                        for b in content
+                    ):
+                        return idx
+    except OSError:
+        return None
+    return None
+
+
+def _speak_claimed(
+    hook_type: str,
+    speakable: list[tuple[int, str, str]],
+    claimed: tuple[int, str, str] | None,
+    current_lines: int,
+    watermark: int,
+    state_file: Path,
+    lock_dir: Path,
+    landed_line: int | None,
+    cfg: TTSConfig,
+    owned_through: int | None = None,
+    owned_from: int = 0,
+    advance: bool = True,
+) -> bool:
+    """The hook's speech once its utterance is claimed; True when something was queued or played.
+
+    owned_from..owned_through: the span this hook's take of the landed line moved the
+    watermark across; the lines in it are this hook's already, claimed by that take, not
+    by the usual read-compare-write here, and a PostToolUse reads them before its last
+    text as a Stop reads unspoken intermediates. With advance False nothing here writes
+    the watermark: the take did, and the caller lost the utterance claim for the rest.
+    """
+    from claude_code_tts.audio import speak
+    from claude_code_tts.filter import filter_text
+
     if hook_type == "stop":
         # A PostToolUse that lagged can have claimed and spoken an intermediate
         # after this hook read the watermark; read-compare-write under the lock,
         # so what it took is not spoken again (pre-existing, found in review).
-        speakable = _claim_lines(state_file, lock_dir, speakable, current_lines)
+        speakable = _claim_lines(state_file, lock_dir, speakable, current_lines, owned_through, owned_from, write=advance)
+        if claimed is not None and claimed not in speakable:
+            debug(f"stop: line {claimed[0]} was taken by another hook meanwhile")
+            claimed = None
     if not speakable and current_lines <= watermark:
-        _write_watermark(state_file, lock_dir, current_lines)
+        if advance:
+            _write_watermark(state_file, lock_dir, current_lines)
         debug(f"{hook_type}: no new lines since last speak")
-        return
+        return False
     if not speakable:
         if hook_type == "stop":
-            _write_watermark(state_file, lock_dir, current_lines)
+            if advance:
+                _write_watermark(state_file, lock_dir, current_lines)
         elif landed_line is not None:
             debug(f"PostToolUse: watermark past the landed response at line {landed_line}")
         debug(f"{hook_type}: no assistant text in lines {watermark}..{current_lines}")
-        return
+        return False
 
     for line_no, source, msg_text in speakable:
         debug(f"{hook_type}: line {line_no} {source} {len(msg_text)} chars: {msg_text[:100]!r}")
@@ -2417,7 +2645,10 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
         unspoken = [t for _, _, t in speakable[:-1]]
     else:
         text_line, _, text = speakable[-1]
-        unspoken = []
+        # A PostToolUse speaks its last text; the lines its take of a landed line moved
+        # past are its alone and would otherwise never be heard (Geordi, round five).
+        unspoken = [t for ln, _, t in speakable[:-1]
+                    if owned_through is not None and owned_from <= ln <= owned_through]
 
     # For stop hooks: if this is a PAI response, speak body then 🗣️ summary.
     if hook_type == "stop":
@@ -2431,45 +2662,65 @@ def _speak_from_hook(args: argparse.Namespace) -> None:
                 combined = body_notes.rstrip() + " " + pai_summary
             else:
                 combined = pai_summary
-            _write_watermark(state_file, lock_dir, current_lines)
-            speak(combined, cfg)
+            if advance:
+                _write_watermark(state_file, lock_dir, current_lines)
+            ok = speak(combined, cfg) is not False
             debug(f"stop: PAI summary detected, speaking: {pai_summary[:80]}")
-            return
+            return ok and claimed is not None
 
     # Filter and check length
     cliff_notes = filter_text(text)
     if not cliff_notes or len(cliff_notes) < 10:
         if hook_type == "stop":
-            _write_watermark(state_file, lock_dir, current_lines)
+            if advance:
+                _write_watermark(state_file, lock_dir, current_lines)
         debug(f"{hook_type}: text too short after filtering")
-        return
+        return False
 
     # Intermediate texts that no PostToolUse hook spoke would otherwise be
     # dropped here without a trace. With intermediate on, the Stop hook reads
     # them in order before the final response; either way it says how many.
-    if hook_type == "stop" and unspoken:
+    owned_notes = ""  # a PostToolUse's owned lines, spoken even if its newer text is taken
+    if unspoken:
         if cfg.intermediate:
             parts = [filter_text(t) for t in unspoken]
             parts = [p for p in parts if p and len(p) >= 10]
-            debug(f"stop: {len(unspoken)} unspoken intermediate texts, speaking {len(parts)} before the response")
+            debug(f"{hook_type}: {len(unspoken)} unspoken intermediate texts, speaking {len(parts)} before the response")
             if parts:
-                cliff_notes = " ".join(parts) + " " + cliff_notes
+                owned_notes = " ".join(parts)
+                cliff_notes = owned_notes + " " + cliff_notes
         else:
-            debug(f"stop: {len(unspoken)} unspoken intermediate texts skipped (intermediate off)")
+            debug(f"{hook_type}: {len(unspoken)} unspoken intermediate texts skipped (intermediate off)")
 
     # Claim the lines before speaking. Async hooks overlap, so two PostToolUse
     # hooks can both read the same text; the claim makes exactly one of them
-    # speak it. Stop always advances the watermark to the end of the file.
+    # speak it. A Stop advances the watermark to the end of the file unless the
+    # take already moved it past what this hook read (advance=False).
     if hook_type == "stop":
-        _write_watermark(state_file, lock_dir, current_lines)
+        if advance:
+            _write_watermark(state_file, lock_dir, current_lines)
+    elif owned_through is not None and owned_from <= text_line <= owned_through:
+        if advance:
+            _write_watermark(state_file, lock_dir, current_lines)
+        debug(f"PostToolUse: line {text_line} is this hook's by the take of the landed line; watermark updated to {current_lines}")
     elif not _claim_watermark(state_file, lock_dir, text_line, current_lines):
         debug(f"PostToolUse: line {text_line} already claimed by another hook, skipping")
-        return
+        if owned_notes:
+            # The newer text went to another hook, the owned lines before it did not:
+            # they are this hook's alone by its take, which already moved the watermark
+            # past them, so they are spoken here and nothing is written (Geordi, round six).
+            debug(f"PostToolUse: speaking the {len(unspoken)} owned line(s) before it all the same")
+            speak(owned_notes, cfg)
+        return False
     else:
         debug(f"PostToolUse: watermark updated to {current_lines}")
 
-    speak(cliff_notes, cfg)
+    if speak(cliff_notes, cfg) is False:
+        debug(f"{hook_type}: nothing queued (daemon not healthy); the claim is given back")
+        return False
     debug(f"{hook_type}: speech queued/played ({len(cliff_notes)} chars)")
+    # Speech went out; the claim stands only if it was the claimed utterance that went.
+    return claimed is not None
 
 
 # How long a PostToolUse hook waits for the transcript to catch up when it
@@ -2487,25 +2738,20 @@ STOP_REREAD_DELAY = 0.25
 STOP_FIRST_SETTLE = 1.0
 
 
-def _normalize_text(text: str) -> str:
-    """One space between words, so a text compares equal however it was wrapped."""
-    return " ".join(text.split())
-
-
 def _same_text(a: str, b: str) -> bool:
     """Is the transcript text `a` the response `b` that a Stop hook spoke from its input?
 
-    Equal after whitespace normalization and case folding, nothing looser: a
-    containment rule took an intermediate for the response once (review of
-    9.38.0) and lost the first block of a two-block message.
+    Equal after spoken.normalize, nothing looser: a containment rule took an
+    intermediate for the response once (review of 9.38.0) and lost the first
+    block of a two-block message.
     """
-    na, nb = _normalize_text(a).casefold(), _normalize_text(b).casefold()
-    return bool(na) and na == nb
+    na = spoken.normalize(a)
+    return bool(na) and na == spoken.normalize(b)
 
 
 def _pending_key(text: str) -> str:
     """What the pending record holds: the length and digest of the normalized text, not the text."""
-    norm = _normalize_text(text).casefold()
+    norm = spoken.normalize(text)
     return f"{len(norm)} {hashlib.sha256(norm.encode()).hexdigest()}"
 
 
@@ -2514,48 +2760,76 @@ def _landed_match(landed: str, pending: str) -> str | None:
 
     None: unrelated. "": the response itself, nothing left to speak. Otherwise
     the text before the response: the landed message ended with the spoken
-    block, and the blocks before it are returned, whitespace-normalized.
+    block, and the blocks before it are returned, words joined by one space.
+    The split is at a word boundary of the landed text and each candidate tail
+    goes through the one normalize, so a case fold that changes a word's
+    length (German sharp s) cannot cut the prefix in the wrong place.
     """
     try:
         plen_s, pdigest = pending.split(" ", 1)
         plen = int(plen_s)
     except ValueError:
         return None
-    norm = _normalize_text(landed)
-    folded = norm.casefold()
     if _pending_key(landed) == pending:
         return ""
-    if len(folded) > plen + 1 and folded[-plen - 1] == " ":
-        if hashlib.sha256(folded[-plen:].encode()).hexdigest() == pdigest:
-            return norm[: -plen - 1].strip()
+    words = landed.split()
+    tail_len = -1  # length of normalize(" ".join(words[i:])), built from the end
+    for i in range(len(words) - 1, 0, -1):
+        tail_len += len(words[i].casefold()) + 1
+        if tail_len > plen:
+            break
+        if tail_len == plen:
+            tail = spoken.normalize(" ".join(words[i:]))
+            if hashlib.sha256(tail.encode()).hexdigest() == pdigest:
+                return " ".join(words[:i])
     return None
 
 
 def _read_pending(pending_file: Path) -> str:
     """The record of the response the last Stop hook spoke, if its line has not landed yet.
 
-    It has no age. The record is keyed by transcript, so a /clear or a resume into another
-    file never reads it, and the landed line comes whenever the person's next turn does,
-    two minutes or two hours later; the only thing that retires it is the take of that
-    line or the next Stop's claim.
+    No age limit (design v2, planted case 3): the line lands within a second, but the first
+    hook to read it can be the next turn's, hours later. Until 9.39.6 a record older than an
+    hour was dropped unread, and the reply spoken from the input was spoken again from the
+    file after a long idle. The record is cleared when its line lands, overwritten by the
+    next Stop that speaks from its input, and keyed by transcript, so another file never
+    reads it.
+    """
+    return _read_pending_record(pending_file)[0]
+
+
+def _read_pending_record(pending_file: Path) -> tuple[str, str]:
+    """(length-and-digest key, prompt_id) of the record; ("", "") when there is none.
+
+    The prompt_id names the turn whose Stop spoke it (empty in a record from 9.39.7 or
+    older, or from a Claude Code that sends none), so a later turn that says the same
+    words is not taken for the response that landed.
     """
     try:
-        return pending_file.read_text().strip()
+        parts = pending_file.read_text().split()
     except OSError:
-        return ""
+        return "", ""
+    if len(parts) < 2:
+        return "", ""
+    return f"{parts[0]} {parts[1]}", parts[2] if len(parts) > 2 else ""
 
 
-def _take_landed(state_file: Path, lock_dir: Path, pending_file: Path, line_no: int, advance_past: bool) -> None:
+def _take_landed(state_file: Path, lock_dir: Path, pending_file: Path, line_no: int, advance_past: bool,
+                 record: tuple[str, str] | None = None) -> int | None:
     """Clear the record of a spoken response and move the watermark to its line, under the lock.
 
     With advance_past the watermark lands after the line (nothing left to speak
     there); without it, on the line, so that the prefix left to speak is claimed
     by exactly one hook through the usual read-compare-write. The watermark never
-    moves backwards here.
+    moves backwards here. The record is cleared only while it is still `record`
+    (a twin may have written a fresh one meanwhile). Returns the watermark this
+    call moved from when it moved it, else None: the lines from there to the landed
+    line are then this hook's to speak, and no others.
     """
     _watermark_lock(lock_dir)
     try:
-        _clear_pending(pending_file)
+        if record is None or _read_pending_record(pending_file) == record:
+            _clear_pending(pending_file)
         wm = 0
         if state_file.exists():
             try:
@@ -2567,35 +2841,50 @@ def _take_landed(state_file: Path, lock_dir: Path, pending_file: Path, line_no: 
             try:
                 state_file.write_text(str(target))
             except OSError:
-                pass
+                return None
+            return wm
+        return None
     finally:
         _watermark_unlock(lock_dir)
 
 
-def _claim_input(pending_file: Path, lock_dir: Path, text: str) -> bool:
-    """Record the response about to be spoken from the hook input; False if a hook already did.
-
-    Read-compare-write under the watermark lock: the record doubles as the
-    claim between two Stop hooks fired for the same event.
-    """
-    _watermark_lock(lock_dir)
-    try:
-        if _read_pending(pending_file) == _pending_key(text):
-            return False
-        _write_pending(pending_file, text)
-        return True
-    finally:
-        _watermark_unlock(lock_dir)
-
-
-def _write_pending(pending_file: Path, text: str) -> None:
-    """Record the spoken response as length and digest, in a file only this user can read."""
+def _write_pending(pending_file: Path, text: str, prompt_id: str = "") -> None:
+    """Record the spoken response as length, digest and turn, in a file only this user can read."""
     try:
         fd = os.open(pending_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     except OSError:
         return
     with os.fdopen(fd, "w") as f:
-        f.write(_pending_key(text))
+        f.write(_pending_key(text) + (f" {prompt_id}" if prompt_id and " " not in prompt_id else ""))
+
+
+PENDING_ORPHAN_AGE_S = 30 * 86400.0
+
+
+def _sweep_pending_orphans(pending_file: Path, now: float | None = None) -> int:
+    """Remove the other transcripts' records older than PENDING_ORPHAN_AGE_S; the number removed.
+
+    Hygiene, not semantics: a record whose transcript is never read again (the session
+    ended, the room was removed) has no hook left to drop it, so the Stop that writes a
+    record sweeps its neighbours. A session resumed after a month speaks its landed line
+    once more, at worst; the record just written is never that old.
+    """
+    t = time.time() if now is None else now
+    removed = 0
+    try:
+        candidates = list(pending_file.parent.glob("claude_tts_spoken_*.pending"))
+    except OSError:
+        return 0
+    for p in candidates:
+        if p == pending_file:
+            continue
+        try:
+            if t - p.stat().st_mtime > PENDING_ORPHAN_AGE_S:
+                p.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def _clear_pending(pending_file: Path) -> None:
@@ -2651,13 +2940,16 @@ def _write_watermark(state_file: Path, lock_dir: Path, line_count: int) -> None:
 
 
 def _claim_lines(
-    state_file: Path, lock_dir: Path, speakable: list[tuple[int, str, str]], line_count: int
+    state_file: Path, lock_dir: Path, speakable: list[tuple[int, str, str]], line_count: int,
+    owned_through: int | None = None, owned_from: int = 0, write: bool = True,
 ) -> list[tuple[int, str, str]]:
     """Advance the watermark to `line_count` and return the entries another hook has not claimed.
 
     Read-compare-write under the lock, for the Stop hook: an entry whose line
     is already below the watermark was spoken by a PostToolUse meanwhile. An
-    entry from the hook's input has no line in the file yet and always stays.
+    entry from the hook's input has no line in the file yet and always stays,
+    and so does one in `owned_from`..`owned_through`, claimed by this hook's
+    take of the landed line.
     """
     _watermark_lock(lock_dir)
     try:
@@ -2667,11 +2959,13 @@ def _claim_lines(
                 wm = int(state_file.read_text().strip())
             except (ValueError, OSError):
                 wm = 0
-        kept = [e for e in speakable if e[1] == "input" or e[0] >= wm]
-        try:
-            state_file.write_text(str(line_count))
-        except OSError:
-            pass
+        kept = [e for e in speakable
+                if e[1] == "input" or e[0] >= wm or (owned_through is not None and owned_from <= e[0] <= owned_through)]
+        if write:
+            try:
+                state_file.write_text(str(line_count))
+            except OSError:
+                pass
         return kept
     finally:
         _watermark_unlock(lock_dir)
@@ -2896,7 +3190,6 @@ def cmd_audition(args: argparse.Namespace) -> None:
         if not daemon_healthy():
             print("  Daemon not running (start with: claude-tts daemon start)")
             return
-        from claude_code_tts.config import TTSConfig
         cfg = TTSConfig(
             mode="queue",
             speed=speed,
