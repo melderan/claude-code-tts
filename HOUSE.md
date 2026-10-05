@@ -95,6 +95,7 @@ just release --check        # preflight and gate only; prints the plan
 - Each session can have its own persona, speed, and mute state
 - A new prompt in a session drops that session's queued speech that has not started playing (hooks/prompt-submitted.sh on UserPromptSubmit runs `claude-tts supersede --from-hook`, which writes a supersede control; the playing message finishes, other sessions and the bridge are untouched; counted as `stale dropped` in `claude-tts daemon stats`)
 - Every reply a hook accepts is appended, in full and before the filter, to `~/.claude/voice-ledger/<session>.jsonl` with an id the queue message carries; the daemon appends played, cancelled, failed or dropped (with the reason) under that id in `~/.claude-tts/ledger/<session>.outcomes.jsonl`. Two files, two writers, nothing deletes from either (9.43.0). `claude-tts ledger` reads them joined; the 50-row speech ring in handy.py is for the player, this is for the record
+- Every time a session's config is resolved (each hook, each `/tts-*` change) its voice card is rewritten at `~/.claude-tts/voice.d/<session>.json`: persona, backend, voice, speed, muted, written when. A status line or any reader that must not shell out reads that file and nothing else; the contract is docs/voice-card.md
 - When `CLAUDE_TTS_SESSION` names a session the hook has not seen, it inherits the directory-keyed session's persona, speed and mute once (9.26.0), so a rebuilt room keeps its voice
 
 ## Commands
@@ -178,6 +179,7 @@ docs/
   voice-notes.md           # Voice compatibility knowledge base
   hotkey-setup.md          # Pause/resume hotkey setup guide
   http-bridge.md           # HTTP bridge contract (routes, marks, threat model)
+  voice-card.md            # The per-session voice card a status line reads: path, fields, freshness, how a reader finds its session
   mlx-backend.md           # mlx-audio backend: enable, pull, persona keys, speed rule, licenses
   what-and-why.md          # What the system does and why, with no how; the fixed points for any redesign
 ```

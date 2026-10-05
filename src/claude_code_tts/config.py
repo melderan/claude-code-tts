@@ -11,8 +11,10 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
+from claude_code_tts import __version__
 from claude_code_tts.session import get_session_id
 
 # Everything under ~/.claude-tts is live daemon state, and in a sandbox that directory is the
@@ -40,6 +42,9 @@ HOME = Path.home()
 TTS_CONFIG_DIR = HOME / ".claude-tts"
 TTS_CONFIG_FILE = TTS_CONFIG_DIR / "config.json"
 TTS_SESSIONS_DIR = TTS_CONFIG_DIR / "sessions.d"
+# One small file per session saying what it sounds like, resolved; for readers that must not
+# shell out (a status line). Contract: docs/voice-card.md.
+VOICE_CARDS_DIR = TTS_CONFIG_DIR / "voice.d"
 VOICES_DIR = HOME / ".local" / "share" / "piper-voices"
 # The Piper voice every install ships with; personas fall back to it when
 # their own model is missing on the machine that runs the daemon.
@@ -193,11 +198,12 @@ def session_read(session_id: str) -> dict:
 
 
 def session_set(session_id: str, key: str, value: object) -> None:
-    """Set a key=value in a session file (creates file and dir if needed)."""
+    """Set a key=value in a session file (creates file and dir if needed); refreshes the voice card."""
     sf = session_file(session_id)
     existing = session_read(session_id)
     existing[key] = value
     atomic_write_json(sf, existing)
+    load_config(session_id)  # writes the card from the new state
 
 
 def session_del(session_id: str, key: str) -> None:
@@ -209,6 +215,55 @@ def session_del(session_id: str, key: str) -> None:
     if key in data:
         del data[key]
         atomic_write_json(sf, data)
+        load_config(session_id)  # writes the card from the new state
+
+
+# --- Voice card: what a session sounds like, resolved, for readers that must not shell out ---
+
+VOICE_CARD_SCHEMA = 1
+
+
+def voice_card_path(session_id: str) -> Path:
+    """Return the path of a session's voice card in voice.d/."""
+    return VOICE_CARDS_DIR / f"{session_id}.json"
+
+
+def voice_card(cfg: TTSConfig) -> dict:
+    """The card's fields from a resolved config. The contract is docs/voice-card.md: a field
+    is added, never renamed or removed, without a bump of VOICE_CARD_SCHEMA."""
+    if cfg.voice_kokoro or cfg.voice_kokoro_blend:
+        backend, voice = "kokoro", cfg.voice_kokoro or cfg.voice_kokoro_blend
+    elif cfg.voice_mlx:
+        backend = "mlx"
+        voice = f"{cfg.voice_mlx}:{cfg.speaker_mlx}" if cfg.speaker_mlx else cfg.voice_mlx
+    elif cfg.voice_sherpa:
+        backend = "sherpa"
+        voice = f"{cfg.voice_sherpa}:{cfg.speaker_sherpa}" if cfg.speaker_sherpa >= 0 else cfg.voice_sherpa
+    else:
+        backend, voice = "piper", cfg.voice
+    return {
+        "schema": VOICE_CARD_SCHEMA,
+        "session": cfg.session_id,
+        "persona": cfg.active_persona,
+        "backend": backend,
+        "voice": voice,
+        "speed": cfg.speed,
+        "muted": cfg.muted,
+        "intermediate": cfg.intermediate,
+        "mode": cfg.mode,
+        "written_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "claude_tts": __version__,
+    }
+
+
+def write_voice_card(cfg: TTSConfig) -> None:
+    """Write the session's card; never raises. A reader that finds no card shows nothing."""
+    if not cfg.session_id:
+        return
+    try:
+        atomic_write_json(voice_card_path(cfg.session_id), voice_card(cfg))
+    except OSError:
+        pass
 
 
 def migrate_session(session_id: str) -> bool:
@@ -308,6 +363,7 @@ def load_config(session_id: str | None = None) -> TTSConfig:
     cfg.raw_config = config
 
     if not config:
+        write_voice_card(cfg)
         return cfg
 
     cfg.mode = config.get("mode", "direct")
@@ -372,4 +428,5 @@ def load_config(session_id: str | None = None) -> TTSConfig:
     if env_max := os.environ.get("CLAUDE_TTS_MAX_CHARS"):
         cfg.max_chars = int(env_max)
 
+    write_voice_card(cfg)
     return cfg
