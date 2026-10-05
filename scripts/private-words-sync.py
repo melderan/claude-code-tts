@@ -12,7 +12,7 @@ The block carries the date it was written. private-check.py reads that date and 
 the block is stale, so the list cannot quietly fall behind the organization.
 
 Only distinctive names are learned: those with a hyphen, an underscore or a digit. Measured on
-this repository, every one of 708 such names in a large organization matched nothing, while 18 of
+this repository, every one of several hundred such names across the maintainer's organizations matched nothing, while 18 of
 172 plain single-word names (next, control, runtime, design, ...) matched ordinary code and prose
 hundreds of times. A plain-word name that matters goes into the list by hand, above the block.
 

@@ -338,13 +338,13 @@ class TestURLs:
 
     OAUTH = (
         "Two servers need a browser login:\n\n"
-        "  - Jira: port 51362, https://mcp.example.com/v1/authorize?client_id=xlLgtkvcoWtc06n4"
-        "&code_challenge=iVMFgRGy3WMStq8Dm1H6iQ7_DApFAC7YyGGiGliq2-8&code_challenge_method=S256"
+        "  - Jira: port 51362, https://mcp.example.com/v1/authorize?client_id=fakeclientid00001"
+        "&code_challenge=fakechallenge0000000000000000000000000001&code_challenge_method=S256"
         "&redirect_uri=http%3A%2F%2F127.0.0.1%3A51362%2Fcallback&resource=https%3A%2F%2Fmcp.example.com"
-        "%2Fv1%2Fmcp&response_type=code&state=XN_3GTFmD7WSN63ccC_w995OHhhfuFVOsi9Nu7BBva0\n"
-        "  - Notes: port 51372, https://mcp.example.org/authorize?client_id=0qmgpzlPnrp42FU4"
-        "&code_challenge=THOsuF1uYWNADVZcFD0zBjCVrPv2qVTzPYB4cLedsgE&scope=default"
-        "&state=XkMX89J4hc-tu7sqRmkfRjhGVdWXY-KKxfjyx2tVShE\n\n"
+        "%2Fv1%2Fmcp&response_type=code&state=fakestate000000000000000000000000000000001\n"
+        "  - Notes: port 51372, https://mcp.example.org/authorize?client_id=fakeclientid00002"
+        "&code_challenge=fakechallenge0000000000000000000000000002&scope=default"
+        "&state=fakestate000000000000000000000000000000002\n\n"
         "Open each in a browser."
     )
 
