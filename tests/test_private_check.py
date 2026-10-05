@@ -141,3 +141,63 @@ def test_stale_synced_block_fails_and_fresh_passes(
         f"{pc.SYNC_HEADER}{__import__('datetime').date.today().isoformat()} ---\n\\bsecret-9\\b\n# --- end managed block ---\n"
     )
     assert pc.main(["--repo", str(repo)]) == 0
+
+
+class TestApprovedLapses:
+    """`.private-allow`: a known, accepted hit is printed by name and reason, and does not fail the gate."""
+
+    def _hit(self, repo):
+        path, words = repo
+        (path / "kit.sh").write_text("docker run secret-host\n")
+        git(path, "add", "kit.sh")  # not -A: the fixture's word list sits untracked beside it
+        git(path, "commit", "-q", "-m", "chore: kit")
+        return path, words
+
+    def test_an_approved_hit_passes_and_is_printed_with_its_reason(self, repo, capsys):
+        path, words = self._hit(repo)
+        allow = path / "allow.tsv"
+        allow.write_text("kit.sh\tsecret-host\tJMO 2026-10-05: the kit talks to that host by name\n")
+        assert pc.main(["--repo", str(path), "--words", str(words), "--allow", str(allow)]) == 0
+        out = capsys.readouterr()
+        assert "approved kit.sh:1 /secret-host/ (JMO 2026-10-05: the kit talks to that host by name)" in out.out
+        assert "clean (3 patterns, 1 approved lapse)" in out.out
+
+    def test_an_approval_for_another_pattern_or_place_does_not_cover_the_hit(self, repo, capsys):
+        path, words = self._hit(repo)
+        allow = path / "allow.tsv"
+        allow.write_text("kit.sh\t/Users/someone\tJMO: wrong pattern\nREADME.md\tsecret-host\tJMO: wrong place\n")
+        assert pc.main(["--repo", str(path), "--words", str(words), "--allow", str(allow)]) == 1
+        err = capsys.readouterr().err
+        assert "kit.sh:1: matches /secret-host/" in err
+        assert "allow line unused" in err
+
+    def test_a_glob_covers_a_directory_and_a_commit(self, repo, capsys):
+        path, words = self._hit(repo)
+        git(path, "commit", "-q", "--allow-empty", "-m", "fix: see /Users/someone/notes")
+        allow = path / "allow.tsv"
+        allow.write_text("kit.sh\t*\tJMO: every pattern in that file\ncommit *\t/Users/someone\tJMO: history stays\n")
+        assert pc.main(["--repo", str(path), "--words", str(words), "--allow", str(allow)]) == 0
+        assert "2 approved lapses" in capsys.readouterr().out
+
+    def test_an_approval_without_a_reason_fails_the_gate(self, repo, capsys):
+        path, words = self._hit(repo)
+        allow = path / "allow.tsv"
+        allow.write_text("kit.sh\tsecret-host\n")
+        assert pc.main(["--repo", str(path), "--words", str(words), "--allow", str(allow)]) == 1
+        assert "allow line 1 needs where, pattern and a reason" in capsys.readouterr().err
+
+    def test_an_unused_approval_warns_but_passes(self, repo, capsys):
+        path, words = repo
+        allow = path / "allow.tsv"
+        allow.write_text("gone.sh\tsecret-host\tJMO: approved long ago\n")
+        assert pc.main(["--repo", str(path), "--words", str(words), "--allow", str(allow)]) == 0
+        out = capsys.readouterr()
+        assert "allow line unused: gone.sh" in out.err
+        assert "clean (3 patterns)" in out.out
+
+    def test_the_allow_file_itself_is_never_scanned(self, repo):
+        path, words = repo
+        allow = path / ".private-allow"
+        allow.write_text("kit.sh\tsecret-host\tJMO: the pattern text sits in this file\n")
+        git(path, "add", "-f", ".private-allow")
+        assert pc.main(["--repo", str(path), "--words", str(words), "--allow", str(allow)]) == 0

@@ -37,7 +37,11 @@ When in doubt, ask your friend before commit. A little pre-work goes a long way.
 The gate enforces this before every commit and push: `scripts/private-check.py` scans tracked files,
 staged changes, unpushed commit messages and their tag notes against `.private-words`, a gitignored
 list of patterns (logins, hostnames, home paths, private tool and repo names) that each maintainer
-keeps in their own checkout. Without the file the step says it is skipped, loudly. The list must not depend on anyone
+keeps in their own checkout. Without the file the step says it is skipped, loudly. A hit that is known and accepted
+(the product name in the kit's tests, a path in a commit that history keeps) is written to `.private-allow`, also
+gitignored: where, pattern, and who approved it when and why, tab-separated; the gate prints every approved
+lapse by name and its reason, counts them apart from the clean total, and warns about an allow line that
+matched nothing. An approval without a reason fails the gate. The list must not depend on anyone
 remembering a name: `just private-sync` (`scripts/private-words-sync.py`) asks GitHub for every
 non-public repository in the organizations listed in the gitignored `.private-orgs` and writes
 them into a dated block of `.private-words`; the gate warns when that block is two weeks old and
