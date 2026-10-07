@@ -6,7 +6,9 @@ disable-model-invocation: true
 Run this command:
 
 ```bash
-claude-tts kraken
+claude-tts kraken $ARGUMENTS
 ```
+
+`--drop` drops what the hold kept before releasing, so nothing held is replayed.
 
 Summarize the output to the user in one line.

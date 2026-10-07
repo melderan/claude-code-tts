@@ -30,7 +30,7 @@ import os
 import secrets
 import stat
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -66,7 +66,7 @@ def hook_dir() -> Path:
 
 
 @contextmanager
-def _locked(directory: Path) -> Iterator[None]:
+def _locked(directory: Path) -> Generator[None, None, None]:
     """flock on the directory's lock file: held by everyone who removes an existing claim.
 
     The fast path (O_EXCL create of an absent claim) never takes it. Removers do: a takeover,

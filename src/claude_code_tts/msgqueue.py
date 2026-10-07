@@ -183,6 +183,76 @@ def is_supersede(msg: dict) -> bool:
     return msg.get("type") == "control" and msg.get("pre_action") == SUPERSEDE
 
 
+DROP_ALL = "drop_all"
+
+
+def write_drop_all_message(drop_ids: list[str], log: Log | None = None) -> Path:
+    """Say "drop these queued messages": the kraken is released over an empty queue.
+
+    Written by `claude-tts kraken --drop` before it releases the hold, so a night's worth of
+    held speech is dropped, not replayed. drop_ids are the ids the CLI saw in the queue; the
+    daemon drops exactly those (by id, never by time: hooks in other rooms stamp with their own
+    clocks), takes the control at the top of its next pass, held or not, and writes a
+    `dropped (kraken)` outcome for every hook message it removes. An older daemon logs
+    "Control message: pre=drop_all" at INFO and removes the file; the CLI knows that and drops
+    the files itself in that case.
+    """
+    fields: dict = {
+        "type": "control", "session_id": "system", "text": "", "pre_action": DROP_ALL,
+        "drop_ids": [str(i) for i in drop_ids],
+    }
+    queue_file, _ = write_message(fields)
+    _say(log, f"Drop-all written for {len(drop_ids)} message(s): {queue_file.name}")
+    return queue_file
+
+
+def is_drop_all(msg: dict) -> bool:
+    """A drop-all control: taken by apply_drop_all(), never handed to the control handler."""
+    return msg.get("type") == "control" and msg.get("pre_action") == DROP_ALL
+
+
+def apply_drop_all(
+    messages: list[dict], log: Log | None = None, on_removed: Callable[[dict], None] | None = None
+) -> list[dict]:
+    """Take every drop-all control in messages and drop the messages it names.
+
+    Returns the messages left, in the same order, without the controls: other controls (a
+    restart behind the drop still restarts), and speech the CLI had not seen when it asked.
+    Hook and bridge messages alike go; on_removed is called with each (the daemon settles a
+    bridge job and writes the ledger outcome there). A file gone already is no error, and a
+    control that cannot be removed is logged, not raised: the loop must go on.
+    """
+    controls = [m for m in messages if is_drop_all(m)]
+    if not controls:
+        return messages
+    wanted: set[str] = set()
+    for c in controls:
+        ids = c.get("drop_ids")
+        if isinstance(ids, list):
+            wanted.update(str(i) for i in ids)
+    kept: list[dict] = []
+    dropped = 0
+    for m in messages:
+        if is_drop_all(m):
+            try:
+                Path(m["_file"]).unlink(missing_ok=True)
+            except OSError as e:
+                _say(log, f"Drop-all control {m['_file']} could not be removed: {e}", "WARN")
+            continue
+        if m.get("type") == "control" or str(m.get("id") or "") not in wanted:
+            kept.append(m)
+            continue
+        try:
+            Path(m["_file"]).unlink()
+        except OSError:
+            continue  # gone already: aged out, superseded or flushed meanwhile
+        dropped += 1
+        if on_removed is not None:
+            on_removed(m)
+    _say(log, f"Drop-all: {dropped} of {len(wanted)} named message(s) dropped on release")
+    return kept
+
+
 def _stamp(value: object) -> float | None:
     """A time a comparison can trust, or None."""
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):

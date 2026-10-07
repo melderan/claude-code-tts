@@ -338,7 +338,8 @@ def test_pause_get_reports_the_hold(server: Bridge) -> None:
     status, body, _ = call(server, "GET", "/pause")
     assert status == 200
     assert body == {"paused": False, "paused_by": None, "held_since": None, "held_until": None,
-                    "let_through": [], "mic_held": False, "speaking": False, "current": {}}
+                    "let_through": [], "mic_held": False, "speaking": False, "current": {},
+                    "output_device": None}
     server.fake.state.update(  # type: ignore[attr-defined]
         paused=True,
         paused_by="mic",

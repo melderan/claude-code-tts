@@ -55,6 +55,7 @@ from claude_code_tts.handy import AnalyzerThread, save_speech_wav
 from claude_code_tts.level import normalize as normalize_level
 from claude_code_tts.mic_watcher import MicWatcher
 from claude_code_tts.msgqueue import PauseLedger, next_speakable, play_order, text_of
+from claude_code_tts.outputdevice import OutputDeviceWatch
 from claude_code_tts.state import (
     UNSET,
     acquire_lock,
@@ -66,11 +67,13 @@ from claude_code_tts.state import (
     is_daemon_running,
     may_play,
     pid_alive,
+    read_output_device,
     read_playback_state,
     release_lock,
     set_paused,
     take_respawn_marker,
     write_heartbeat,
+    write_output_device,
     write_pid,
     write_playback_state,
     write_protocol_marker,
@@ -1205,6 +1208,36 @@ def drop_superseded(
     return kept
 
 
+def drop_all_requested(messages: list[dict]) -> list[dict]:
+    """`claude-tts kraken --drop` asked: drop what is queued, the half-played message too.
+
+    Runs on the pass's one scan before the hold filter, so a held queue is dropped while it
+    is still held and the release that follows finds nothing to replay. Each hook message
+    gets a `dropped (kraken)` outcome; a bridge job is settled as cancelled.
+    """
+    if not any(msgqueue.is_drop_all(m) for m in messages):
+        return messages
+    # The interrupted message first: taking it rewrites playback.json, and the CLI releases
+    # the hold (its own rewrite, from another process) the moment the control file is gone.
+    # Done the other way round the daemon's write could land on top of the release and keep
+    # the hold (the blind review of 9.49.0).
+    interrupted = get_interrupted_message()
+    dropped_ids: set[str] = set()
+
+    def _drop(m: dict) -> None:
+        dropped_ids.add(str(m.get("id") or ""))
+        _dropped(m, "kraken")
+
+    kept = msgqueue.apply_drop_all(messages, log=log, on_removed=_drop)
+    if interrupted:
+        if str(interrupted.get("id") or "") in dropped_ids:
+            log("Drop-all: the interrupted message was also queued; one outcome written")
+        else:
+            _dropped(interrupted, "kraken")
+            log(f"Drop-all: the interrupted message from {interrupted.get('project', 'unknown')} is dropped too")
+    return kept
+
+
 def enforce_max_depth(
     max_depth: int, ledger: PauseLedger | None = None, messages: list[dict] | None = None
 ) -> int:
@@ -1565,6 +1598,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             set_paused=set_paused,
             mic_hold_max_s=lambda: float(load_raw_config().get("mic_pause_max_s", MIC_PAUSE_MAX_S)),
             set_let_through=hold,
+            read_output_device=read_output_device,
         )
         if not bridge.start(http_config):
             bridge = None
@@ -1676,6 +1710,13 @@ def daemon_loop(lockpick: bool = False) -> None:
     else:
         log("Mic-aware pause disabled (set mic_aware_pause: true in config.json to enable)")
 
+    # Which device the Mac plays through, for a room that cannot hear it (playback.json
+    # output_device, `claude-tts status` Output line). macOS only; elsewhere nothing starts.
+    output_watch: OutputDeviceWatch | None = OutputDeviceWatch(log_fn=log, write_state=write_output_device)
+    if output_watch is not None and not output_watch.start():
+        output_watch = None
+        write_output_device(None)  # a file an earlier daemon left on another machine says nothing here
+
     # Start Handy voice analyzer if recordings directory exists
     handy_analyzer: AnalyzerThread | None = None
     if raw_config.get("handy_analyzer", True):
@@ -1767,7 +1808,8 @@ def daemon_loop(lockpick: bool = False) -> None:
                     )
                     set_paused(False)
                     continue
-                allowed = [m for m in get_queue_messages() if may_play(state, str(m.get("session_id", "")))]
+                scanned = drop_all_requested(get_queue_messages())
+                allowed = [m for m in scanned if may_play(state, str(m.get("session_id", "")))]
                 if not allowed:
                     time.sleep(poll_interval)
                     continue
@@ -1780,7 +1822,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 # remembered cutoffs), then ageing, then trimming, then the pick. Stale
                 # messages go first, so an overflow trims a stale reply, not another
                 # room's older one.
-                queued = drop_superseded(get_queue_messages(), supersedes, ledger)
+                queued = drop_superseded(drop_all_requested(get_queue_messages()), supersedes, ledger)
                 cleanup_old_messages(config["max_age_seconds"], ledger, queued)
                 enforce_max_depth(config["max_depth"], ledger, queued)
             JOBS.evict_finished()
@@ -2180,6 +2222,8 @@ def daemon_loop(lockpick: bool = False) -> None:
     prefetch.discard()  # a synthesis for a message nobody will play now; its WAV goes too
     if mic_watcher:
         mic_watcher.stop()
+    if output_watch:
+        output_watch.stop()
     if handy_analyzer:
         handy_analyzer.stop()
     if bridge:

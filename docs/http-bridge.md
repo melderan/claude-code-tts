@@ -175,8 +175,17 @@ wants only its own reading to stop uses `/stop`. A person's hold can let named r
 ```json
 {"paused": true, "paused_by": "mic", "held_since": "2026-10-02T15:04:05Z",
  "held_until": "2026-10-02T15:07:05Z", "speaking": false,
- "current": {"id": "3f9c2b7e1a04d5c6", "source": "page", "project": "page:PR 1223 cascade"}}
+ "current": {"id": "3f9c2b7e1a04d5c6", "source": "page", "project": "page:PR 1223 cascade"},
+ "output_device": {"name": "MacBook Pro Speakers", "transport": "builtin", "checked_at": "2026-10-02T15:07:01Z"}}
 ```
+
+- `output_device` is the Mac's default sound output as the daemon last saw it (it asks
+  `system_profiler` every 15 s, off the play loop, and records the answer in
+  `~/.claude-tts/output-device.json`): the device name, its transport without the profiler's
+  prefix (`builtin`, `bluetooth`, `usb`), and when it was checked, RFC 3339 UTC. A round the
+  profiler answers nothing leaves the last device standing with its own stamp, so `checked_at`
+  is the freshness. `null` on a daemon that is not on macOS. A page shows a person whether the
+  headphones are the output without a shell. Added additively in 9.49.0.
 
 - `paused_by` is `user` for a person (hotkey, CLI, or this route) and `mic` for the mic watcher;
   `null` when not paused.

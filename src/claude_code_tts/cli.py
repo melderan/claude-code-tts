@@ -105,6 +105,13 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(f"Heartbeat: {heartbeat}")
     print(f"Queue:    {queued} waiting")
     print(f"Mic-aware: {'enabled' if mic_aware else 'disabled'}")
+    from claude_code_tts.state import read_output_device
+
+    device = read_output_device()
+    if device:
+        from claude_code_tts.outputdevice import describe
+
+        print(f"Output:   {describe(device)}")
 
 
 def _flatten_config(data: dict, prefix: str = "") -> dict[str, object]:
@@ -1649,10 +1656,69 @@ def cmd_hold(args: argparse.Namespace) -> None:
 
 
 def cmd_kraken(args: argparse.Namespace) -> None:
-    """Release the kraken: everyone speaks again, in the order they queued."""
-    from claude_code_tts.state import release
+    """Release the kraken: everyone speaks again, in the order they queued.
 
+    With --drop, what the hold kept is dropped first (a drop-all control the daemon takes at
+    the top of its next pass, one `dropped (kraken)` ledger outcome per message), so a night
+    of held speech is not replayed in the morning. The release waits up to a few seconds for
+    a running daemon to take the control; without a daemon the control waits in the queue
+    and the next daemon takes it before anything older plays.
+    """
+    from claude_code_tts import msgqueue
+    from claude_code_tts.state import (
+        daemon_release,
+        is_daemon_running,
+        read_playback_state,
+        release,
+        release_at_least,
+    )
+
+    if getattr(args, "drop", False):
+        speech = [m for m in msgqueue.scan() if m.get("type") != "control"]
+        ids = [str(m.get("id") or "") for m in speech if m.get("id")]
+        running, _pid = is_daemon_running()
+        daemon_version = daemon_release()
+        if running and not release_at_least(daemon_version, "9.49.0"):
+            # An older daemon never takes a control while held (the hold filter hides it) and
+            # would replay the queue on release; drop the files here, without ledger outcomes.
+            dropped = 0
+            for m in speech:
+                try:
+                    Path(m["_file"]).unlink()
+                    dropped += 1
+                except OSError:
+                    pass
+            print(
+                f"Dropped {dropped} queued message(s) directly: the daemon is "
+                f"{daemon_version or 'of unknown release'}, older than 9.49.0, so no ledger outcomes were written"
+            )
+        else:
+            control = msgqueue.write_drop_all_message(ids)
+            taken = False
+            if running:
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    if not control.exists():
+                        taken = True
+                        break
+                    time.sleep(0.05)
+            if taken:
+                print(f"Dropped {len(ids)} queued message(s)")
+            elif running:
+                print(f"Asked the daemon to drop {len(ids)} queued message(s); it has not taken the request yet")
+            else:
+                print(f"Daemon not running; {len(ids)} queued message(s) are dropped when it next starts")
     state = release()
+    if getattr(args, "drop", False):
+        # The daemon rewrites playback.json as it takes the drop; a write of its own landing
+        # on this release would keep the hold, so the release is read back and said again
+        # when a person's hold is still there (a mic hold that began meanwhile is left alone).
+        for _ in range(3):
+            time.sleep(0.3)
+            state = read_playback_state()
+            if not (state.get("paused") and state.get("paused_by") == "user"):
+                break
+            state = release()
     print("The kraken is released; everyone speaks" if not state.get("paused") else "Could not release")
 
 
@@ -4352,6 +4418,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--me", action="store_true", help="Let this session through")
     p.set_defaults(func=cmd_hold)
     p = subparsers.add_parser("kraken", help="Release the kraken: everyone speaks again")
+    p.add_argument("--drop", action="store_true", help="Drop what the hold kept first, so nothing held is replayed")
     p.set_defaults(func=cmd_kraken)
 
     # --- ledger ---

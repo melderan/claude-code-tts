@@ -96,6 +96,7 @@ just release --check        # preflight and gate only; prints the plan
 - A new prompt in a session drops that session's queued speech that has not started playing (hooks/prompt-submitted.sh on UserPromptSubmit runs `claude-tts supersede --from-hook`, which writes a supersede control; the playing message finishes, other sessions and the bridge are untouched; counted as `stale dropped` in `claude-tts daemon stats`)
 - Every reply a hook accepts is appended, in full and before the filter, to `~/.claude/voice-ledger/<session>.jsonl` with an id the queue message carries; the daemon appends played, cancelled, failed or dropped (with the reason) under that id in `~/.claude-tts/ledger/<session>.outcomes.jsonl`. Two files, two writers, nothing deletes from either (9.43.0). `claude-tts ledger` reads them joined; the 50-row speech ring in handy.py is for the player, this is for the record
 - Every time a session's config is resolved (each hook, each `/tts-*` change) its voice card is rewritten at `~/.claude-tts/voice.d/<session>.json`: persona, backend, voice, speed, muted, written when. A status line or any reader that must not shell out reads that file and nothing else; the contract is docs/voice-card.md
+- The daemon on a Mac polls which device is the default sound output every 15 s (system_profiler, off the play loop) and writes it to `~/.claude-tts/output-device.json` (name, transport, checked_at; its own file, so the write never races a hold written into playback.json from another process); `claude-tts status` prints it as `Output:` and the bridge's `GET /pause` carries it as `output_device`, so a room that cannot hear the Mac sees whether the headphones are the output (9.49.0)
 - When `CLAUDE_TTS_SESSION` names a session the hook has not seen, it inherits the directory-keyed session's persona, speed and mute once (9.26.0), so a rebuilt room keeps its voice
 
 ## Commands
@@ -107,7 +108,7 @@ just release --check        # preflight and gate only; prints the plan
 | `/tts-mute` | Mute this session |
 | `/tts-unmute` | Unmute this session |
 | `/tts-focus` | Hold every other friend's voice, this session keeps speaking; `claude-tts hold --let <room>` lets another through |
-| `/tts-kraken` | Release the kraken: everyone speaks again (`claude-tts kraken`) |
+| `/tts-kraken` | Release the kraken: everyone speaks again (`claude-tts kraken`); `--drop` drops what the hold kept first (by id, one `dropped (kraken)` ledger line each), so a night's hold is not replayed in the morning |
 | `/tts-speed [value]` | Show/set speech speed (0.5-4.0) |
 | `/tts-persona [name]` | Show/set voice persona; `add <name> --voice <model>` and `remove <name>` edit config.json |
 | `/tts-mode [direct\|queue]` | Show/set playback mode |
@@ -154,6 +155,7 @@ src/claude_code_tts/
   msgqueue.py              # The queue directory: scan, order, age, trim, PauseLedger, control messages; the only module that names it
   ledger.py                # The voice ledger: every reply a hook accepted, in full and before the filter, plus the daemon's outcome per id; append only
   bridge.py                # Opt-in loopback HTTP bridge (browser pages -> queue, timing marks)
+  outputdevice.py          # Which device the Mac plays through, from system_profiler; the daemon's poll thread and the status line's words
   install.py               # Installer (hooks, voices, service)
   signature.py             # Voice signatures: tolerant shape of a WAV, compared with tolerances, not by ear
   release.py               # Release: preflight, gate, signed tag with notes, push, verify on GitHub

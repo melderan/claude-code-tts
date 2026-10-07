@@ -437,6 +437,7 @@ class BridgeHTTPServer(ThreadingHTTPServer):
         set_paused: Callable[[bool], dict],
         mic_hold_max_s: Callable[[], float] | None = None,
         set_let_through: Callable[[list[str]], dict] | None = None,
+        read_output_device: Callable[[], dict | None] | None = None,
     ) -> None:
         super().__init__(address, BridgeHandler)
         self.token = token
@@ -447,6 +448,7 @@ class BridgeHTTPServer(ThreadingHTTPServer):
         self.set_paused = set_paused
         self.mic_hold_max_s = mic_hold_max_s or (lambda: 0.0)
         self.set_let_through = set_let_through
+        self.read_output_device = read_output_device or (lambda: None)
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
@@ -559,7 +561,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 job.pop("updated_at", None)
             self._send_json(200, {"source": source, "jobs": jobs})
         elif path == "/pause":
-            self._send_json(200, pause_view(self.server.read_playback_state(), self.server.mic_hold_max_s()))
+            self._send_json(
+                200,
+                pause_view(
+                    self.server.read_playback_state(), self.server.mic_hold_max_s(), self.server.read_output_device()
+                ),
+            )
         elif path == "/queue":
             query = parse_qs(self.path.partition("?")[2])
             by = (query.get("by") or ["room"])[0]
@@ -682,7 +689,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self._send_json(200, view)
 
 
-def pause_view(state: dict, mic_hold_max_s: float = 0.0) -> dict:
+def pause_view(state: dict, mic_hold_max_s: float = 0.0, output_device: dict | None = None) -> dict:
     """The hold as a page sees it: the flag, who set it and since when, whether audio is out.
 
     `held_until` is the moment the daemon lets a mic hold go on its own (the hold's
@@ -707,6 +714,19 @@ def pause_view(state: dict, mic_hold_max_s: float = 0.0) -> dict:
         "mic_held": bool(state.get("mic_held")) if paused else False,
         "speaking": bool(state.get("audio_pid")),
         "current": {k: current[k] for k in ("id", "source", "project") if current.get(k)},
+        "output_device": _output_device_view(output_device),
+    }
+
+
+def _output_device_view(device: object) -> dict | None:
+    """The Mac's default output as the daemon last saw it: name, transport, checked_at in RFC 3339."""
+    if not isinstance(device, dict) or not device.get("name"):
+        return None
+    checked = device.get("checked_at")
+    return {
+        "name": str(device["name"]),
+        "transport": str(device.get("transport") or ""),
+        "checked_at": _rfc3339(float(checked)) if isinstance(checked, (int, float)) and not isinstance(checked, bool) else None,
     }
 
 
@@ -775,6 +795,7 @@ class Bridge:
         set_paused: Callable[[bool], dict],
         mic_hold_max_s: Callable[[], float] | None = None,
         set_let_through: Callable[[list[str]], dict] | None = None,
+        read_output_device: Callable[[], dict | None] | None = None,
     ) -> None:
         self._log = log_fn
         self._read_state = read_playback_state
@@ -782,6 +803,7 @@ class Bridge:
         self._set_paused = set_paused
         self._mic_hold_max_s = mic_hold_max_s or (lambda: 0.0)
         self._set_let_through = set_let_through
+        self._read_output_device = read_output_device
         self._server: BridgeHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -805,6 +827,7 @@ class Bridge:
                 set_paused=self._set_paused,
                 mic_hold_max_s=self._mic_hold_max_s,
                 set_let_through=self._set_let_through,
+                read_output_device=self._read_output_device,
             )
         except OSError as e:
             self._log(f"HTTP bridge could not listen on {bind}:{port}: {e}")

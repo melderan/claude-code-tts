@@ -32,6 +32,10 @@ PID_FILE = TTS_CONFIG_DIR / "daemon.pid"
 LOCK_FILE = TTS_CONFIG_DIR / "daemon.lock"
 HEARTBEAT_FILE = TTS_CONFIG_DIR / "daemon.heartbeat"
 PLAYBACK_STATE_FILE = TTS_CONFIG_DIR / "playback.json"
+# The Mac's default sound output as the daemon last saw it. Its own file, not a playback.json
+# field: that file is read-modify-written by the CLI from another process (hold, kraken), and
+# a periodic writer there would race a hold on exactly the night the hold matters.
+OUTPUT_DEVICE_FILE = TTS_CONFIG_DIR / "output-device.json"
 # The control-protocol tag, not a release; write_release_marker records the release beside it.
 VERSION_FILE = TTS_CONFIG_DIR / "daemon.version"
 RESPAWN_MARKER = TTS_CONFIG_DIR / "daemon.respawn"
@@ -195,6 +199,49 @@ def write_release_marker() -> Path:
     path = VERSION_FILE.with_name("daemon.release")
     path.write_text(__version__)
     return path
+
+
+def daemon_release() -> str | None:
+    """The release the running daemon wrote at start (daemon.release), None when unknown."""
+    try:
+        text = VERSION_FILE.with_name("daemon.release").read_text().strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def release_at_least(release: str | None, floor: str) -> bool:
+    """Whether a release string ("9.49.0") is floor or newer; an unknown release is not."""
+    if not release:
+        return False
+    try:
+        have = tuple(int(p) for p in release.split(".")[:3])
+        want = tuple(int(p) for p in floor.split(".")[:3])
+    except ValueError:
+        return False
+    return have >= want
+
+
+def write_output_device(device: dict | None) -> None:
+    """Record the default output device ({"name", "transport"}) with a checked_at stamp; None removes the file."""
+    if isinstance(device, dict) and device.get("name"):
+        atomic_write_json(
+            OUTPUT_DEVICE_FILE,
+            {"name": str(device["name"]), "transport": str(device.get("transport") or ""), "checked_at": time.time()},
+        )
+    else:
+        OUTPUT_DEVICE_FILE.unlink(missing_ok=True)
+
+
+def read_output_device() -> dict | None:
+    """The recorded output device, or None when there is none or the file is unreadable."""
+    try:
+        data = json.loads(OUTPUT_DEVICE_FILE.read_text("utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict) or not data.get("name"):
+        return None
+    return data
 
 
 def write_respawn_marker() -> None:
