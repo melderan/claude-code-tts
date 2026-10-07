@@ -75,12 +75,33 @@ class TestProbe:
             assert od.current_output_device() is None
         run.assert_not_called()
 
-    def test_macos_runs_the_profiler_and_parses(self, monkeypatch):
+    def test_macos_runs_the_profiler_by_absolute_path_and_parses(self, monkeypatch):
+        """The launchd service's PATH has no /usr/sbin: 9.49.0 asked by name and never found it."""
         monkeypatch.setattr(od, "detect_platform", lambda: "macos")
-        done = subprocess.CompletedProcess(["system_profiler"], 0, stdout=json.dumps(_profile(AIRPODS)), stderr="")
+        monkeypatch.setattr(od.Path, "exists", lambda self: str(self) == od.PROFILER)
+        done = subprocess.CompletedProcess([od.PROFILER], 0, stdout=json.dumps(_profile(AIRPODS)), stderr="")
         with patch.object(od.subprocess, "run", return_value=done) as run:
             assert od.current_output_device() == {"name": "JMO's AirPods Pro", "transport": "bluetooth"}
-        assert run.call_args.args[0][:2] == ["system_profiler", "SPAudioDataType"]
+        assert run.call_args.args[0] == ["/usr/sbin/system_profiler", "SPAudioDataType", "-json"]
+        assert od.last_error() == ""
+
+    def test_without_the_absolute_path_the_name_on_path_is_used(self, monkeypatch):
+        monkeypatch.setattr(od, "detect_platform", lambda: "macos")
+        monkeypatch.setattr(od.Path, "exists", lambda self: False)
+        done = subprocess.CompletedProcess([], 0, stdout=json.dumps(_profile(SPEAKERS)), stderr="")
+        with patch.object(od.subprocess, "run", return_value=done) as run, patch("shutil.which", lambda n: "/opt/x/system_profiler"):
+            assert od.current_output_device()["name"] == "MacBook Pro Speakers"
+        assert run.call_args.args[0][0] == "/opt/x/system_profiler"
+
+    def test_a_blank_answer_says_why(self, monkeypatch):
+        monkeypatch.setattr(od, "detect_platform", lambda: "macos")
+        with patch.object(od.subprocess, "run", side_effect=FileNotFoundError(2, "No such file")):
+            assert od.current_output_device() is None
+        assert "did not run" in od.last_error()
+        done = subprocess.CompletedProcess([], 0, stdout=json.dumps(_profile(dict(SPEAKERS, coreaudio_default_audio_output_device="spaudio_no"))), stderr="")
+        with patch.object(od.subprocess, "run", return_value=done):
+            assert od.current_output_device() is None
+        assert od.last_error() == "no item is flagged as the default output"
 
     @pytest.mark.parametrize(
         "outcome",
@@ -146,7 +167,8 @@ class TestWatch:
         w = od.OutputDeviceWatch(lambda m, lvl="INFO": None, lambda d: None, platform=lambda: "linux")
         assert w.start() is False
 
-    def test_poll_logs_changes_once_writes_answers_and_keeps_the_last_on_a_blank(self):
+    def test_poll_logs_changes_once_writes_answers_and_keeps_the_last_on_a_blank(self, monkeypatch):
+        monkeypatch.setattr(od, "_last_error", "")
         lines: list[tuple[str, str]] = []
         writes: list[dict | None] = []
         answers = iter([
@@ -164,7 +186,7 @@ class TestWatch:
         assert [m for _lvl, m in lines] == [
             "Output device: Speakers (builtin)",
             "Output device: AirPods (bluetooth)",
-            "Output device: unknown this round (system_profiler gave no default output); the last one seen stands",
+            "Output device: unknown this round (the probe answered nothing); the last one seen stands",
         ]
         assert lines[-1][0] == "WARN"
         assert writes == [

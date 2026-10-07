@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 from claude_code_tts.audio import detect_platform
 
@@ -32,6 +34,17 @@ _YES = "spaudio_yes"
 # `coreaudio_device_type_builtin` on some releases); either goes, the word stays.
 _TRANSPORT_PREFIX = re.compile(r"^(spaudio_|coreaudio_device_type_|coreaudio_)")
 _UNSEEN = object()  # the watch has not probed yet, so the first answer, even None, is logged
+
+# The daemon runs as a launchd service whose PATH has no /usr/sbin (9.49.0 asked by name and
+# never found it); the absolute path is where macOS keeps it, the bare name is the fallback.
+PROFILER = "/usr/sbin/system_profiler"
+
+_last_error = ""
+
+
+def last_error() -> str:
+    """Why the last probe answered nothing, for the log; empty after a probe that answered."""
+    return _last_error
 
 
 def parse_default_output(data: object) -> dict | None:
@@ -65,23 +78,37 @@ def parse_default_output(data: object) -> dict | None:
 
 
 def current_output_device(timeout_s: float = PROFILER_TIMEOUT_S) -> dict | None:
-    """Ask macOS for the default output device; None anywhere else or when it cannot say."""
+    """Ask macOS for the default output device; None anywhere else or when it cannot say (see last_error)."""
+    global _last_error
     if detect_platform() != "macos":
+        _last_error = "not macOS"
         return None
+    binary = PROFILER if Path(PROFILER).exists() else (shutil.which("system_profiler") or PROFILER)
     try:
         proc = subprocess.run(
-            ["system_profiler", "SPAudioDataType", "-json"],
+            [binary, "SPAudioDataType", "-json"],
             capture_output=True, text=True, timeout=timeout_s,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
+        _last_error = f"{binary} took over {timeout_s:.0f}s"
         return None
-    if proc.returncode != 0 or not proc.stdout.strip():
+    except OSError as e:
+        _last_error = f"{binary} did not run: {e}"
+        return None
+    if proc.returncode != 0:
+        _last_error = f"{binary} exit {proc.returncode}: {proc.stderr.strip()[-200:]}"
+        return None
+    if not proc.stdout.strip():
+        _last_error = f"{binary} printed nothing"
         return None
     try:
         data = json.loads(proc.stdout)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        _last_error = f"{binary} output is not JSON: {e}"
         return None
-    return parse_default_output(data)
+    device = parse_default_output(data)
+    _last_error = "" if device else "no item is flagged as the default output"
+    return device
 
 
 def describe(device: dict | None, now: float | None = None) -> str:
@@ -144,7 +171,7 @@ class OutputDeviceWatch:
             if device:
                 self._log(f"Output device: {device['name']} ({device.get('transport') or 'unknown transport'})", "INFO")
             else:
-                self._log("Output device: unknown this round (system_profiler gave no default output); the last one seen stands", "WARN")
+                self._log(f"Output device: unknown this round ({last_error() or 'the probe answered nothing'}); the last one seen stands", "WARN")
             self.last = device
         if device and not self._stop.is_set():  # a probe that outlived stop() writes nothing
             self._write_state(device)
