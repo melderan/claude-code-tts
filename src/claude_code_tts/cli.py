@@ -1659,8 +1659,8 @@ def cmd_kraken(args: argparse.Namespace) -> None:
     """Release the kraken: everyone speaks again, in the order they queued.
 
     With --drop, what the hold kept is dropped first (a drop-all control the daemon takes at
-    the top of its next pass, one `dropped (kraken)` ledger outcome per message), so a night
-    of held speech is not replayed in the morning. The release waits up to a few seconds for
+    the top of its next pass, one `dropped (kraken)` ledger outcome per message), so a long
+    hold's speech is not replayed on release. The release waits up to a few seconds for
     a running daemon to take the control; without a daemon the control waits in the queue
     and the next daemon takes it before anything older plays.
     """

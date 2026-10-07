@@ -429,7 +429,10 @@ tail -f ~/.claude-tts/debug.log
 # Daemon log (queue processing, mic watcher, playback)
 claude-tts daemon logs -f
 
-# Quick status check
+# Quick status check: mute, pause, daemon, heartbeat age, queue depth; on a Mac also the
+# default sound output (Output: <device> (<transport>), checked Ns ago), which the daemon
+# records in ~/.claude-tts/output-device.json every 15 s so a reader without ears can see
+# whether the headphones are on
 claude-tts status
 
 # Test speech directly
@@ -437,6 +440,18 @@ claude-tts speak "Can you hear me?"
 
 # Test with a realistic workflow sample
 claude-tts test
+```
+
+## Keeping the daemon current
+
+From a checkout, `just up` rebuilds the CLI, deploys hooks and commands, restarts the daemon and
+verifies it, logging each run to `.logs/just/`. `just up --if-changed` is the form to schedule
+(launchd, cron): it does nothing unless the checkout is clean and its HEAD carries the tag
+`v<version>`, so a published release is installed within one interval and work in progress never
+is. Every five minutes is a comfortable interval:
+
+```cron
+*/5 * * * * cd /path/to/claude-code-tts && just up --if-changed
 ```
 
 ## Philosophy

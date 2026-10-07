@@ -189,10 +189,10 @@ DROP_ALL = "drop_all"
 def write_drop_all_message(drop_ids: list[str], log: Log | None = None) -> Path:
     """Say "drop these queued messages": the kraken is released over an empty queue.
 
-    Written by `claude-tts kraken --drop` before it releases the hold, so a night's worth of
-    held speech is dropped, not replayed. drop_ids are the ids the CLI saw in the queue; the
-    daemon drops exactly those (by id, never by time: hooks in other rooms stamp with their own
-    clocks), takes the control at the top of its next pass, held or not, and writes a
+    Written by `claude-tts kraken --drop` before it releases the hold, so a long hold's worth of
+    speech is dropped, not replayed. drop_ids are the ids the CLI saw in the queue; the daemon
+    drops exactly those (by id, never by time: hooks on other machines or in containers stamp with
+    their own clocks), takes the control at the top of its next pass, held or not, and writes a
     `dropped (kraken)` outcome for every hook message it removes. An older daemon logs
     "Control message: pre=drop_all" at INFO and removes the file; the CLI knows that and drops
     the files itself in that case.

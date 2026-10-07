@@ -1220,7 +1220,7 @@ def drop_all_requested(messages: list[dict]) -> list[dict]:
     # The interrupted message first: taking it rewrites playback.json, and the CLI releases
     # the hold (its own rewrite, from another process) the moment the control file is gone.
     # Done the other way round the daemon's write could land on top of the release and keep
-    # the hold (the blind review of 9.49.0).
+    # the hold.
     interrupted = get_interrupted_message()
     dropped_ids: set[str] = set()
 
@@ -1710,8 +1710,8 @@ def daemon_loop(lockpick: bool = False) -> None:
     else:
         log("Mic-aware pause disabled (set mic_aware_pause: true in config.json to enable)")
 
-    # Which device the Mac plays through, for a room that cannot hear it (playback.json
-    # output_device, `claude-tts status` Output line). macOS only; elsewhere nothing starts.
+    # Which device the Mac plays through, for a reader that cannot hear it (output-device.json,
+    # `claude-tts status` Output line, GET /pause). macOS only; elsewhere nothing starts.
     output_watch: OutputDeviceWatch | None = OutputDeviceWatch(log_fn=log, write_state=write_output_device)
     if output_watch is not None and not output_watch.start():
         output_watch = None

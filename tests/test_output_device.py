@@ -1,8 +1,8 @@
-"""Which device the Mac plays through, seen from a room (the night watch's ask, 2026-10-06).
+"""Which device the Mac plays through, seen by something that cannot hear it.
 
-The daemon polls macOS's system profiler off the play loop and writes `output_device` into
-playback.json; `claude-tts status` prints it as an Output line and the bridge's /pause view
-carries it. A room that cannot hear the Mac reads whether the headphones are the default output.
+The daemon polls macOS's system profiler off the play loop and records the default output in
+~/.claude-tts/output-device.json; `claude-tts status` prints it as an Output line and the bridge's
+/pause view carries it. A reader that cannot hear the Mac learns whether the headphones are on.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ SPEAKERS = {
     "coreaudio_output_source": "spaudio_default",
 }
 AIRPODS = {
-    "_name": "JMO's AirPods Pro",
+    "_name": "AirPods Pro",
     "coreaudio_default_audio_output_device": "spaudio_yes",
     "coreaudio_device_transport": "spaudio_bluetooth",
 }
@@ -47,7 +47,7 @@ class TestParse:
     def test_the_flagged_item_is_the_default_output(self):
         speakers = dict(SPEAKERS, coreaudio_default_audio_output_device="spaudio_no")
         assert od.parse_default_output(_profile(speakers, AIRPODS)) == {
-            "name": "JMO's AirPods Pro", "transport": "bluetooth",
+            "name": "AirPods Pro", "transport": "bluetooth",
         }
 
     def test_builtin_speakers(self):
@@ -81,7 +81,7 @@ class TestProbe:
         monkeypatch.setattr(od.Path, "exists", lambda self: str(self) == od.PROFILER)
         done = subprocess.CompletedProcess([od.PROFILER], 0, stdout=json.dumps(_profile(AIRPODS)), stderr="")
         with patch.object(od.subprocess, "run", return_value=done) as run:
-            assert od.current_output_device() == {"name": "JMO's AirPods Pro", "transport": "bluetooth"}
+            assert od.current_output_device() == {"name": "AirPods Pro", "transport": "bluetooth"}
         assert run.call_args.args[0] == ["/usr/sbin/system_profiler", "SPAudioDataType", "-json"]
         assert od.last_error() == ""
 
@@ -247,14 +247,14 @@ class TestReaders:
         from claude_code_tts import cli
 
         monkeypatch.setattr(st, "PLAYBACK_STATE_FILE", tmp_path / "playback.json")
-        st.write_output_device({"name": "JMO's AirPods Pro", "transport": "bluetooth"})
+        st.write_output_device({"name": "AirPods Pro", "transport": "bluetooth"})
         with patch.object(cli, "get_session_id", lambda: "x"):
             try:
                 cli.cmd_status(argparse.Namespace())
             except Exception:  # noqa: BLE001  config may be missing in a bare test env; the lines we need print first
                 pass
         out = capsys.readouterr().out
-        assert "Output:   JMO's AirPods Pro (bluetooth), checked 0s ago" in out
+        assert "Output:   AirPods Pro (bluetooth), checked 0s ago" in out
 
     def test_status_without_the_file_prints_no_output_line(self, device_file, tmp_path, monkeypatch, capsys):
         from claude_code_tts import cli

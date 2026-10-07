@@ -1,11 +1,11 @@
 """`claude-tts kraken --drop`: release the hold over an empty queue.
 
 A hold is a pause: held time does not age a message and the depth cap skips held messages,
-so `kraken` after a night's hold replays the whole night in order (the night watch, 2026-10-06).
-With --drop the CLI writes a drop-all control naming the ids it saw; the daemon takes it at the
-top of its next pass, held or not, drops exactly those (hook and bridge alike, the half-played
-one too) with a `dropped (kraken)` outcome each, and leaves other controls and speech the CLI
-had not seen. Ids, never times: hooks in other rooms stamp with their own clocks.
+so `kraken` after a long hold replays everything held, in order. With --drop the CLI writes a
+drop-all control naming the ids it saw; the daemon takes it at the top of its next pass, held or
+not, drops exactly those (hook and bridge alike, the half-played one too) with a `dropped (kraken)`
+outcome each, and leaves other controls and speech the CLI had not seen. Ids, never times: hooks
+on other machines or in containers stamp with their own clocks.
 """
 
 from __future__ import annotations
@@ -21,11 +21,11 @@ import claude_code_tts.daemon as d
 import claude_code_tts.msgqueue as mq
 import claude_code_tts.state as st
 
-ROOM_A = "-room-a"
-ROOM_B = "-room-b"
+SESSION_A = "-session-a"
+SESSION_B = "-session-b"
 
 
-def _reply(text: str, session: str = ROOM_A, **over) -> Path:
+def _reply(text: str, session: str = SESSION_A, **over) -> Path:
     fields: dict = {
         "project": text.split()[0], "text": text, "persona": "claude-prime",
         "speed": 2.0, "speed_method": "playback", "session_id": session,
@@ -50,17 +50,17 @@ def queue(tmp_path, monkeypatch):
 
 class TestApplyDropAll:
     def test_the_named_messages_go_other_controls_and_unseen_speech_stay(self, queue):
-        a = _reply("a from room a")
-        b = _reply("b from room b", ROOM_B)
+        a = _reply("a from session a")
+        b = _reply("b from session b", SESSION_B)
         page = _reply("page reading", session="browser", source="page")
         restart = mq.write_control_message(post_action="restart")
         ctl = mq.write_drop_all_message(_ids())
-        after = _reply("after the ask", timestamp=time.time() - 3600)  # an old clock in another room
+        after = _reply("after the ask", timestamp=time.time() - 3600)  # an old clock on another machine
         removed: list[dict] = []
         said: list[str] = []
         kept = mq.apply_drop_all(mq.scan(), log=lambda m, level="INFO": said.append(m), on_removed=removed.append)
         assert sorted(m["_file"] for m in kept) == sorted([restart, after])
-        assert sorted(m["text"] for m in removed) == ["a from room a", "b from room b", "page reading"]
+        assert sorted(m["text"] for m in removed) == ["a from session a", "b from session b", "page reading"]
         for p in (a, b, page, ctl):
             assert not p.exists()
         assert restart.exists() and after.exists()
@@ -117,7 +117,7 @@ class TestDaemonSide:
         _reply("held reply", id="held-1")
         _reply("page reading", session="browser", source="page", id="job-1")
         mq.write_drop_all_message(_ids())
-        st.write_playback_state(current_message={"id": "half-1", "session_id": ROOM_B, "project": "b", "text": "half played"})
+        st.write_playback_state(current_message={"id": "half-1", "session_id": SESSION_B, "project": "b", "text": "half played"})
         outcomes: list[tuple[str, str, str, str]] = []
         jobs: list[tuple[object, dict]] = []
         with patch.object(d.voice_ledger, "record_outcome", lambda sid, mid, out, reason, extra=None: outcomes.append((sid, mid, out, reason)) or True), \
@@ -125,7 +125,7 @@ class TestDaemonSide:
              patch.object(d, "log", lambda m, level="INFO": None):
             kept = d.drop_all_requested(mq.scan())
         assert kept == []
-        assert sorted(outcomes) == [(ROOM_A, "held-1", "dropped", "kraken"), (ROOM_B, "half-1", "dropped", "kraken")]
+        assert sorted(outcomes) == [(SESSION_A, "held-1", "dropped", "kraken"), (SESSION_B, "half-1", "dropped", "kraken")]
         assert jobs == [("job-1", {"state": "cancelled", "position_ms": 0})]
         assert st.read_playback_state().get("current_message") is None
 
@@ -135,7 +135,7 @@ class TestDaemonSide:
         _reply("held", id="held-1")
         ctl = mq.write_drop_all_message(_ids())
         st.hold([])
-        st.write_playback_state(current_message={"id": "half-1", "session_id": ROOM_B, "project": "b"})
+        st.write_playback_state(current_message={"id": "half-1", "session_id": SESSION_B, "project": "b"})
         order: list[str] = []
         real_take = d.get_interrupted_message
 
@@ -152,7 +152,7 @@ class TestDaemonSide:
     def test_one_outcome_when_the_interrupted_message_is_also_queued(self, queue):
         _reply("replayed after a restart", id="same-1")
         mq.write_drop_all_message(_ids())
-        st.write_playback_state(current_message={"id": "same-1", "session_id": ROOM_A, "project": "a"})
+        st.write_playback_state(current_message={"id": "same-1", "session_id": SESSION_A, "project": "a"})
         outcomes: list[str] = []
         with patch.object(d.voice_ledger, "record_outcome", lambda sid, mid, out, reason, extra=None: outcomes.append(mid) or True), \
              patch.object(d, "log", lambda m, level="INFO": None):
@@ -178,7 +178,7 @@ class TestCli:
         monkeypatch.setattr(cli.time, "sleep", lambda s: None)
         st.hold([])
         _reply("held a")
-        _reply("held b", ROOM_B)
+        _reply("held b", SESSION_B)
         expected = sorted(_ids())
         _daemon("9.49.0")
         written: list[dict] = []

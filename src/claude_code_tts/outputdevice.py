@@ -1,10 +1,10 @@
 """The sound output device the Mac plays through, as macOS reports it.
 
-The daemon polls this on macOS and writes the answer into playback.json (`output_device`), so a
-room that cannot hear the Mac can still read which device is the default output: the built-in
-speakers, a Bluetooth headset, a USB interface. The ask (the night watch, 2026-10-06): a person's
-headphones leaving the Mac is the tell that the house should fall silent, and the watcher needs
-to see that tell from a room. Only the system profiler is asked, nothing is changed.
+The daemon polls this on macOS and records the answer in ~/.claude-tts/output-device.json, so
+anything that cannot hear the Mac (a status line, a page, a session in a container sharing the
+directory) can still read which device is the default output: the built-in speakers, a Bluetooth
+headset, a USB interface. A person's headphones leaving the Mac is a good sign that the voices
+should pause, and this is how a reader sees it. Only the system profiler is asked; nothing is changed.
 """
 
 from __future__ import annotations
