@@ -80,6 +80,7 @@ After installation, just use Claude Code. Every response gets spoken, in new ses
 | `/tts-voices` | Every provider's voices: installed, available, who uses them, how to hear one |
 | `/tts-mute` | Silence voice for this session |
 | `/tts-focus` | Hold everyone else's voice; this session keeps speaking (`claude-tts hold --me`) |
+| `/tts-name [name\|reset]` | The name this session says for itself when the speaker changes (see `speaker_transition`) |
 | `/tts-kraken` | Release the kraken: everyone speaks again (`claude-tts kraken`); `claude-tts kraken --drop` drops what the hold kept first |
 | `/tts-status` | Show session status (mute, persona, mode, daemon, mic-aware) |
 | `/tts-config` | Every stored config key next to the shipped default; `--changed` shows only the ones that differ |
@@ -177,6 +178,11 @@ Running multiple Claude Code sessions? Use queue mode so they don't talk over ea
 ```
 
 The daemon queues messages and plays them in order, with a chime when switching between sessions.
+`queue.speaker_transition` picks the marker: `"chime"` (the default), `"announce"` (the new speaker
+introduces itself in its own voice), `"chime+announce"` (both) or `"none"`. A session whose id has the
+shape `owner--house--room` introduces itself as "<name> of <house> house in <room> room", the name
+being what it set with `claude-tts name <name>` ("Friend" until then); any other session says
+"<project> says:".
 While one message plays, the next is already being synthesized, so the boundary between two
 messages costs the chime and the player start, not a synthesis. Set `queue.prefetch_next` to
 `false` to hear the difference. Loaded models (sherpa, mlx) stay resident between messages and

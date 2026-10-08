@@ -39,6 +39,8 @@ process it ran under; `<host>` is the machine's short host name with the same da
 - `schema`: the shape of this file. A field may be added under the same number; a field is
   renamed, removed or changes meaning only with a new number. A reader checks it and shows
   nothing it does not understand.
+- `name`: the name the session set with `claude-tts name`, spoken when it takes the floor; `""`
+  when it has none (added in 9.51.0 under schema 1, so an older reader sees one extra key).
 - `persona`: the persona name after the whole chain (session file, then `project_personas`,
   then the global default).
 - `backend`: which engine the persona asks for, in the order the player chooses them:

@@ -52,6 +52,7 @@ class TestFields:
         assert card == {
             "schema": 1,
             "session": "-Users-dev-room",
+            "name": "",
             "persona": "room-heart",
             "backend": "mlx",
             "voice": "mlx-community/Kokoro-82M-bf16:af_heart",

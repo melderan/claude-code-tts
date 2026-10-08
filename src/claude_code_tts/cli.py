@@ -371,6 +371,44 @@ def set_default_speed(speed: float, all_personas: bool = False, session_id: str 
     return names
 
 
+def cmd_name(args: argparse.Namespace) -> None:
+    """Show or set the name this session says for itself when it takes the floor.
+
+    With `queue.speaker_transition` set to "announce" or "chime+announce", a room introduces
+    itself as "<name> of <house> house in <room> room" when the speaker changes, "Friend" until
+    it has chosen a name. The name is a session key, so a rebuilt room inherits it the way it
+    inherits its persona, and the voice card carries it.
+    """
+    from claude_code_tts.daemon import speaker_line
+    from claude_code_tts.state import house_tag, room_tag
+
+    sid = get_session_id()
+    value = (args.name or "").strip()
+    if value.lower() == "reset":
+        session_set(sid, "name", "")
+        print("Name cleared: this session introduces itself as Friend")
+        return
+    if value:
+        if len(value) > 64:
+            print("A name is 64 characters at most")
+            sys.exit(1)
+        session_set(sid, "name", value)
+        print(f"Name set: {value}")
+    name = str(session_read(sid).get("name") or "")
+    line = speaker_line({"session_id": sid, "name": name, "project": sid})
+    print(f"Name:     {name or '(none, says Friend)'}")
+    if "--" in sid:
+        print(f"House:    {house_tag(sid) or '(none)'}")
+        print(f"Room:     {room_tag(sid)}")
+    print(f"Says:     {line}")
+    transition = load_raw_config().get("queue", {}).get("speaker_transition", "chime")
+    if transition not in ("announce", "chime+announce"):
+        print(f"Heard:    not yet; queue.speaker_transition is {transition!r}, set it to \"chime+announce\" to hear it")
+    if not value:
+        print("")
+        print("Usage: /tts-name <name|reset>")
+
+
 def cmd_persona(args: argparse.Namespace) -> None:
     """Show or set voice persona."""
     sid = get_session_id()
@@ -4219,6 +4257,10 @@ def main(argv: list[str] | None = None) -> None:
                    help="Set the persona's speed (what every session inherits) instead of this session's override")
     p.add_argument("--all", action="store_true", help="With --default: every persona, not just this session's")
     p.set_defaults(func=cmd_speed)
+
+    p = subparsers.add_parser("name", help="Show or set the name this session says for itself on a speaker change")
+    p.add_argument("name", nargs="?", help="The name, or 'reset' to say Friend again")
+    p.set_defaults(func=cmd_name)
 
     # --- persona ---
     p = subparsers.add_parser(

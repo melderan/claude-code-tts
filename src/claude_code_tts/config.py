@@ -117,6 +117,8 @@ class TTSConfig:
     active_persona: str = "claude-prime"
     session_id: str = ""
     project_name: str = ""
+    # The name this session gave itself (`claude-tts name`), spoken when it takes the floor.
+    name: str = ""
     # Set by the hook path only (queue fields hook_started and claude_session_id): when the
     # hook started, before any wait, and Claude Code's own session id from the hook input.
     hook_started: float = 0.0
@@ -244,6 +246,7 @@ def voice_card(cfg: TTSConfig) -> dict:
     return {
         "schema": VOICE_CARD_SCHEMA,
         "session": cfg.session_id,
+        "name": cfg.name,
         "persona": cfg.active_persona,
         "backend": backend,
         "voice": voice,
@@ -357,6 +360,7 @@ def load_config(session_id: str | None = None) -> TTSConfig:
 
     session_data = session_read(sid)
     cfg.raw_session = session_data
+    cfg.name = str(session_data.get("name") or "").strip()
 
     # Step 2: Read global config
     config = load_raw_config()

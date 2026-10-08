@@ -108,6 +108,7 @@ just release --check        # preflight and gate only; prints the plan
 | `/tts-config` | Every stored config key next to the shipped default; `--changed` shows only the ones that differ |
 | `/tts-mute` | Mute this session |
 | `/tts-unmute` | Unmute this session |
+| `/tts-name [name\|reset]` | Show/set the name this session says for itself on a speaker change: with `queue.speaker_transition` `"chime+announce"` (or `"announce"`), the boop then "<name> of <house> house in <room> room" in its own voice, "Friend" until named (9.51.0) |
 | `/tts-focus` | Hold every other friend's voice, this session keeps speaking; `claude-tts hold --let <room>` lets another through |
 | `/tts-kraken` | Release the kraken: everyone speaks again (`claude-tts kraken`); `--drop` drops what the hold kept first (by id, one `dropped (kraken)` ledger line each), so a long hold is not replayed on release |
 | `/tts-speed [value]` | Show/set speech speed (0.5-4.0) |

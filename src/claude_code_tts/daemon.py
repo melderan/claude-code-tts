@@ -1114,6 +1114,24 @@ def stream_message(
             msg_file.unlink(missing_ok=True)
 
 
+def speaker_line(msg: dict) -> str:
+    """The words a session says for itself when it takes the floor.
+
+    A room (session id owner--house--room) says "<name> of <house> house in <room> room", the
+    name being the one the session chose with `claude-tts name`, "Friend" until it has one. A
+    session that is not a room keeps the old "<project> says:", with its name in place of the
+    project when it has one.
+    """
+    session_id = str(msg.get("session_id") or "")
+    name = str(msg.get("name") or "").strip()
+    house = daemon_state.house_tag(session_id)
+    if "--" in session_id:
+        room = daemon_state.room_tag(session_id)
+        who = name or "Friend"
+        return f"{who} of {house} house in {room} room" if house else f"{who} in {room} room"
+    return f"{name or msg.get('project') or 'unknown'} says:"
+
+
 def speaker_transition(
     transition: str,
     last_speaker: str,
@@ -1122,15 +1140,22 @@ def speaker_transition(
     persona: str,
     speed: float,
     speed_method: str,
+    who: str = "",
 ) -> None:
-    """Mark a change of speaking session with a chime or a spoken name."""
-    if transition == "chime":
+    """Mark a change of speaking session with a chime, a spoken name, or both.
+
+    "chime" is the boop alone; "announce" the words (who, or "<project> says:" when the caller
+    gave none) in the new speaker's own voice; "chime+announce" the boop and then the words
+    (asked for 2026-10-08: "X of Y house in Z room" along with the boop); "none" is silence.
+    """
+    if transition in ("chime", "chime+announce"):
         log(f"Speaker change: {last_speaker} -> {speaker_key}")
         play_chime()
-    elif transition == "announce":
-        log(f"Announcing speaker: {project}")
+    if transition in ("announce", "chime+announce"):
+        words = who or f"{project} says:"
+        log(f"Announcing speaker: {words}")
         announce_file = AUDIO_TMP_DIR / "tts_announce.wav"
-        if daemon_generate_speech(f"{project} says:", persona, announce_file):
+        if daemon_generate_speech(words, persona, announce_file):
             if speed_method == "playback":
                 daemon_play_audio(announce_file, speed)
             else:
@@ -1473,6 +1498,7 @@ def prepare_message(msg: dict, raw_config: dict) -> PreparedMessage:
     current_msg_info = {
         "session_id": session_id,
         "project": project,
+        "name": str(msg.get("name") or ""),
         "text": text,
         "persona": persona,
         "speed": effective_speed,
@@ -2153,6 +2179,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                         persona,
                         speed,
                         speed_method,
+                        who=speaker_line(current_msg_info),
                     )
                 last_speaker = speaker_key
                 current_msg_info["tone"] = tone.name
@@ -2231,6 +2258,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                     persona,
                     speed,
                     speed_method,
+                    who=speaker_line(current_msg_info),
                 )
             last_speaker = speaker_key
 

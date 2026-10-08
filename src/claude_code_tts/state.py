@@ -446,6 +446,16 @@ def room_tag(session_id: str) -> str:
     return tag.removeprefix("claude-code-") or tag
 
 
+def house_tag(session_id: str) -> str:
+    """The house a session id names: the segment before the room in owner--house--room.
+
+    alice--claude--claude-code-tts is in the claude house; an id with fewer than three
+    segments names no house and gets "".
+    """
+    parts = session_id.split("--")
+    return parts[-2] if len(parts) >= 3 else ""
+
+
 def lets_through(session_id: str, let_through: list[str] | None) -> bool:
     """True when the let-through list names this session: by full id, room tag or last segment."""
     if not let_through:
