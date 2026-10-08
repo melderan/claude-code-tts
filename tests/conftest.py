@@ -60,6 +60,19 @@ def _own_audio_dir(monkeypatch, tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _no_remembered_engine():
+    """audio.py remembers which engine spoke last and why a spare stood in; a test that patches
+    generate_speech never sets it, so one test's fallback must not become the next test's WARN."""
+    import claude_code_tts.audio as _audio
+
+    _audio._spoke_with("", "")
+    _audio._set_last_error("")
+    yield
+    _audio._spoke_with("", "")
+    _audio._set_last_error("")
+
+
+@pytest.fixture(autouse=True)
 def _no_leaked_threads():
     """A test that starts a thread stops it before the next test runs.
 

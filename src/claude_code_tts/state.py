@@ -19,6 +19,7 @@ import fcntl
 import json
 import os
 import signal
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -120,9 +121,40 @@ def release_lock() -> None:
 # --- Pid and heartbeat ---
 
 
+def _write_text_atomic(path: Path, text: str) -> None:
+    """Write a small text file whole: a temp file in the same directory, then rename.
+
+    Path.write_text truncates first and writes second, so a reader in between sees an empty
+    file; a status probe reading the heartbeat through a shared mount saw exactly that
+    (2026-10-08, "daemon.heartbeat empty"). Every marker file the daemon writes goes this way.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+
+
 def write_pid() -> None:
     """Record this process as the daemon."""
-    PID_FILE.write_text(str(os.getpid()))
+    _write_text_atomic(PID_FILE, str(os.getpid()))
+
+
+def ensure_pid_file() -> bool:
+    """Write the pid file again if it is gone; True when it had to. Called by the daemon loop.
+
+    A status check in a sandbox sharing the directory cannot see the host's pid; before 9.49.3
+    it removed the pid file when the heartbeat happened to read empty, and status said "not
+    running" about a daemon that was speaking.
+    """
+    if PID_FILE.exists():
+        return False
+    write_pid()
+    return True
 
 
 def clear_pid() -> None:
@@ -139,12 +171,29 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
-def write_heartbeat() -> None:
-    """Touch the heartbeat file so hooks know we're alive."""
+# The loop passes every 100 ms and readers accept a heartbeat up to HEARTBEAT_MAX_AGE_S old, so
+# one write a second says the same thing for a tenth of the disk work (a temp file and a rename
+# each). The loop's other per-pass file work rides on the same cadence (see ensure_pid_file).
+HEARTBEAT_EVERY_S = 1.0
+_LAST_HEARTBEAT = 0.0
+
+
+def write_heartbeat(force: bool = False) -> bool:
+    """Touch the heartbeat file so hooks know we're alive; True when it was written this call.
+
+    Writes at most once per HEARTBEAT_EVERY_S unless force is set (the daemon's first pass, a
+    test that needs every write). Written whole, so a reader never sees it empty.
+    """
+    global _LAST_HEARTBEAT
+    now = time.monotonic()
+    if not force and now - _LAST_HEARTBEAT < HEARTBEAT_EVERY_S:
+        return False
     try:
-        HEARTBEAT_FILE.write_text(str(time.time()))
+        _write_text_atomic(HEARTBEAT_FILE, str(time.time()))
     except Exception:
-        pass
+        return False
+    _LAST_HEARTBEAT = now
+    return True
 
 
 def clear_heartbeat() -> None:
@@ -152,31 +201,51 @@ def clear_heartbeat() -> None:
     HEARTBEAT_FILE.unlink(missing_ok=True)
 
 
+def heartbeat_age() -> float | None:
+    """Seconds since the daemon last touched the heartbeat; None when the file is missing or
+    cannot be read as a number (a shared mount mid-write, a bad disk), which is not the same as old."""
+    try:
+        return time.time() - float(HEARTBEAT_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
 def heartbeat_fresh() -> bool:
     """True when a daemon touched the heartbeat within HEARTBEAT_MAX_AGE_S."""
-    try:
-        return time.time() - float(HEARTBEAT_FILE.read_text().strip()) <= HEARTBEAT_MAX_AGE_S
-    except (OSError, ValueError):
-        return False
+    age = heartbeat_age()
+    return age is not None and age <= HEARTBEAT_MAX_AGE_S
 
 
 def is_daemon_running() -> tuple[bool, int | None]:
-    """Check if daemon is running. Returns (is_running, pid)."""
-    if not PID_FILE.exists():
-        return False, None
+    """Check if daemon is running. Returns (is_running, pid).
+
+    A fresh heartbeat is the daemon, pid file or not: a sandbox sharing this directory cannot
+    see the host's pid, and the pid file can be missing for a moment. A pid this process cannot
+    see is forgotten (the pid file removed) only when the heartbeat is readable and old, or
+    there is none: a heartbeat that cannot be read right now says nothing about the daemon
+    (2026-10-08: one empty read through a shared mount deleted a speaking daemon's pid file).
+    """
+    pid: int | None = None
     try:
         pid = int(PID_FILE.read_text().strip())
-    except ValueError:
-        PID_FILE.unlink(missing_ok=True)
-        return False, None
-    # A fresh heartbeat wins: a sandbox sharing this directory cannot see the host pid.
-    if heartbeat_fresh():
+    except FileNotFoundError:
+        pid = None
+    except (ValueError, OSError):
+        pid = None
+    age = heartbeat_age()
+    if age is not None and age <= HEARTBEAT_MAX_AGE_S:
         return True, pid
+    heartbeat_says_dead = age is not None or not HEARTBEAT_FILE.exists()
+    if pid is None:
+        if PID_FILE.exists() and heartbeat_says_dead:
+            PID_FILE.unlink(missing_ok=True)  # unreadable pid, and the heartbeat agrees nobody is here
+        return False, None
     try:
         os.kill(pid, 0)
         return True, pid
     except (ProcessLookupError, PermissionError):
-        PID_FILE.unlink(missing_ok=True)
+        if heartbeat_says_dead:
+            PID_FILE.unlink(missing_ok=True)
         return False, None
 
 
@@ -185,7 +254,7 @@ def is_daemon_running() -> tuple[bool, int | None]:
 
 def write_protocol_marker() -> None:
     """Say which control protocol this daemon speaks."""
-    VERSION_FILE.write_text(CONTROL_PROTOCOL)
+    _write_text_atomic(VERSION_FILE, CONTROL_PROTOCOL)
 
 
 def write_release_marker() -> Path:
@@ -197,7 +266,7 @@ def write_release_marker() -> Path:
     redirect one redirect both.
     """
     path = VERSION_FILE.with_name("daemon.release")
-    path.write_text(__version__)
+    _write_text_atomic(path, __version__)
     return path
 
 
@@ -246,7 +315,7 @@ def read_output_device() -> dict | None:
 
 def write_respawn_marker() -> None:
     """Tell the next daemon that this exit is a controlled restart, not a crash."""
-    RESPAWN_MARKER.write_text(str(time.time()))
+    _write_text_atomic(RESPAWN_MARKER, str(time.time()))
 
 
 def take_respawn_marker() -> bool:

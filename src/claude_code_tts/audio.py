@@ -485,6 +485,33 @@ def last_error() -> str:
     return _LAST_ERROR
 
 
+_LAST_ENGINE = ""
+_LAST_FALLBACK = ""
+
+
+def _spoke_with(engine: str, fallback_from: str = "") -> None:
+    global _LAST_ENGINE, _LAST_FALLBACK
+    _LAST_ENGINE = engine
+    _LAST_FALLBACK = fallback_from
+
+
+def last_engine() -> str:
+    """The engine and voice that produced the most recent WAV: `mlx:<model>#<voice>`,
+    `kokoro:<voice>`, `sherpa:<model>#<speaker>` or `piper:<voice>`; empty before any."""
+    return _LAST_ENGINE
+
+
+def last_fallback() -> str:
+    """Why the most recent WAV came from the Piper spare instead of the engine the persona asked
+    for (the asked engine's error), or empty when the engine asked for is the one that spoke.
+
+    2026-10-08: a reply planned for Kokoro under mlx came out in the Piper voice while the GPU
+    was saturated; the mlx worker gave no answer in 120 s, Piper stood in, and nothing a person
+    reads said so. This is the line that now does.
+    """
+    return _LAST_FALLBACK
+
+
 def generate_speech(
     text: str,
     *,
@@ -521,6 +548,16 @@ def generate_speech(
         output_path = Path(f"/tmp/claude_tts_{slot}.wav")
     _set_last_error("")
 
+    # The engine the persona asked for, when it is not Piper; Piper is then the spare, and
+    # a WAV from the spare is reported as a fallback with the asked engine's reason.
+    asked = ""
+    if shutil.which("swift-kokoro") and (voice_kokoro_blend or voice_kokoro):
+        asked = f"kokoro:{voice_kokoro_blend or voice_kokoro}"
+    elif voice_mlx:
+        asked = f"mlx:{voice_mlx}" + (f"#{speaker_mlx}" if speaker_mlx else "")
+    elif voice_sherpa:
+        asked = f"sherpa:{voice_sherpa}" + (f"#{speaker_sherpa}" if speaker_sherpa is not None and speaker_sherpa >= 0 else "")
+
     # Priority 1: Kokoro blend
     if shutil.which("swift-kokoro") and voice_kokoro_blend:
         try:
@@ -530,9 +567,12 @@ def generate_speech(
             )
             if output_path.exists():
                 _apply_pitch_filter(output_path, pitch_filter)
+                _spoke_with(f"kokoro:{voice_kokoro_blend}")
                 return output_path
         except (subprocess.TimeoutExpired, OSError):
             pass
+        if not last_error():
+            _set_last_error(f"swift-kokoro produced no file for blend {voice_kokoro_blend}")
 
     # Priority 2: Kokoro single voice
     if shutil.which("swift-kokoro") and voice_kokoro:
@@ -543,9 +583,12 @@ def generate_speech(
             )
             if output_path.exists():
                 _apply_pitch_filter(output_path, pitch_filter)
+                _spoke_with(f"kokoro:{voice_kokoro}")
                 return output_path
         except (subprocess.TimeoutExpired, OSError):
             pass
+        if not last_error():
+            _set_last_error(f"swift-kokoro produced no file for voice {voice_kokoro}")
 
     # Priority 3: mlx-audio (opt-in per persona via voice_mlx; Apple silicon).
     # Speed follows the Piper rule: synthesised into the audio only when the
@@ -562,6 +605,7 @@ def generate_speech(
         )
         if wav:
             _apply_pitch_filter(wav, pitch_filter)
+            _spoke_with(f"mlx:{voice_mlx}" + (f"#{speaker_mlx}" if speaker_mlx else ""))
             return wav
 
     # Priority 4: Sherpa-onnx (opt-in per persona via voice_sherpa).
@@ -578,9 +622,11 @@ def generate_speech(
         )
         if wav:
             _apply_pitch_filter(wav, pitch_filter)
+            _spoke_with(f"sherpa:{voice_sherpa}" + (f"#{speaker_sherpa}" if speaker_sherpa is not None and speaker_sherpa >= 0 else ""))
             return wav
 
     # Priority 5: Piper
+    fallback_from = f"{asked}: {last_error() or 'produced nothing'}" if asked else ""
     if not shutil.which("piper"):
         if not last_error():  # an engine asked for above already said what went wrong
             _set_last_error(f"piper not on PATH ({os.environ.get('PATH', '')})")
@@ -608,6 +654,7 @@ def generate_speech(
             if output_path.exists():
                 _apply_pitch_filter(output_path, pitch_filter)
                 _set_last_error("")
+                _spoke_with(f"piper:{voice_path.stem}", fallback_from)
                 return output_path
             _set_last_error(f"piper exit {proc.returncode}: {proc.stderr.strip()[-300:]}")
         except (subprocess.TimeoutExpired, OSError) as e:

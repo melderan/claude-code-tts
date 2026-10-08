@@ -34,7 +34,9 @@ from claude_code_tts.audio import (
     warm_sherpa_workers,
 )
 from claude_code_tts.audio import generate_speech as _generate_speech
+from claude_code_tts.audio import last_engine as audio_last_engine
 from claude_code_tts.audio import last_error as audio_last_error
+from claude_code_tts.audio import last_fallback as audio_last_fallback
 from claude_code_tts.bridge import (
     JOBS,
     Bridge,
@@ -62,6 +64,7 @@ from claude_code_tts.state import (
     clear_current_message,
     clear_heartbeat,
     clear_pid,
+    ensure_pid_file,
     get_interrupted_message,
     hold,
     is_daemon_running,
@@ -476,9 +479,22 @@ def level_after_synthesis(output_file: Path, persona: str) -> None:
 def daemon_generate_speech(
     text: str, persona: str, output_file: Path, *args: Any, **kwargs: Any
 ) -> bool:
-    """Synthesize, then level: the one funnel every engine and every path goes through."""
+    """Synthesize, then level: the one funnel every engine and every path goes through.
+
+    A WAV from the Piper spare when the persona asked for another engine is one WARN line
+    here, naming what spoke and why the asked engine did not: the "Speaking for" line names
+    the plan, and until 9.49.3 nothing named the change (a reply in the wrong voice under GPU
+    load, 2026-10-08).
+    """
     ok = _generate_speech_unleveled(text, persona, output_file, *args, **kwargs)
     if ok:
+        fell_back = audio_last_fallback()
+        if fell_back:
+            log(
+                f"Fallback voice for {persona}: spoke with {audio_last_engine()} because {fell_back}"
+                f" | {' '.join(text.split())[:50]}...",
+                "WARN",
+            )
         level_after_synthesis(output_file, persona)
     return ok
 
@@ -1065,7 +1081,15 @@ def play_chime() -> None:
 
 
 def speak_announcement(text: str, persona: str = "claude-prime") -> None:
-    """Speak a short announcement (daemon lifecycle messages)."""
+    """Speak a short announcement (daemon lifecycle messages); under a hold, log it instead.
+
+    A hold means silence from every path, and a scheduled upgrade restarts the daemon at any
+    hour, so "Voice daemon online" through the speakers at night is exactly what the hold was
+    set to prevent. The hold itself is left as it is.
+    """
+    if read_playback_state().get("paused"):
+        log(f"Held, so not spoken: {text}")
+        return
     audio_file = AUDIO_TMP_DIR / "tts_daemon_announce.wav"
     if daemon_generate_speech(text, persona, audio_file):
         persona_config = get_persona_config(persona)
@@ -1679,7 +1703,7 @@ def daemon_loop(lockpick: bool = False) -> None:
         )
         log(f"Cleared stale state from previous run: {', '.join(stale_fields)}")
 
-    write_heartbeat()
+    write_heartbeat(force=True)
 
     # A recording flag over a hand hold is the previous daemon's; its watcher is gone and
     # this one's start sets the flag again if Handy is still recording.
@@ -1773,7 +1797,8 @@ def daemon_loop(lockpick: bool = False) -> None:
     while not _shutdown_requested:
         unplayed_claim = None
         try:
-            write_heartbeat()
+            if write_heartbeat() and ensure_pid_file():
+                log("daemon.pid was missing (a status check elsewhere removed it); written again", "WARN")
             if time.monotonic() - last_reap >= WORKER_REAP_EVERY_S:
                 last_reap = time.monotonic()
                 idle_s = float(config.get("worker_idle_unload_s", 1800))

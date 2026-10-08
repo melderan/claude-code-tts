@@ -145,8 +145,10 @@ class TestMicUnderAHandHold:
 def _enqueue(queue_dir: Path, text: str, session_id: str) -> Path:
     ts = time.time()
     f = queue_dir / f"{ts:.6f}_{abs(hash(text)) % 10**8:08x}.json"
-    f.write_text(json.dumps({"id": f"{abs(hash(text)) % 10**8:08x}", "session_id": session_id,
-                             "project": "p", "text": text, "timestamp": ts}))
+    tmp = f.with_suffix(".tmp")  # whole or not at all: the loop deletes a half-written file
+    tmp.write_text(json.dumps({"id": f"{abs(hash(text)) % 10**8:08x}", "session_id": session_id,
+                               "project": "p", "text": text, "timestamp": ts}))
+    tmp.rename(f)
     return f
 
 

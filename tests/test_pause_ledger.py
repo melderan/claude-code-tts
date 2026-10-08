@@ -52,7 +52,11 @@ class TestPauseLedger:
 def enqueue(queue_dir: Path, text: str, age_s: float) -> Path:
     ts = time.time() - age_s
     f = queue_dir / f"{ts}_{abs(hash(text)) % 10**8:08x}.json"
-    f.write_text(json.dumps({"session_id": "s", "project": "p", "text": text, "timestamp": ts}))
+    # Whole or not at all, as msgqueue writes it: a bare write_text is empty for an instant, and a
+    # loop scan in that instant deletes the file as unparseable (the message is never spoken).
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"session_id": "s", "project": "p", "text": text, "timestamp": ts}))
+    tmp.rename(f)
     return f
 
 

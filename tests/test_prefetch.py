@@ -198,7 +198,9 @@ class TestLoopOverlapsSynthesisWithPlayback:
             "voice_kokoro": "", "voice_kokoro_blend": "",
         }
         path = queue_dir / f"{ts:.6f}_{msg_id}.json"
-        path.write_text(json.dumps(msg))
+        tmp = path.with_suffix(".tmp")  # whole or not at all: the loop deletes a half-written file
+        tmp.write_text(json.dumps(msg))
+        tmp.rename(path)
         time.sleep(0.01)  # distinct timestamps keep the order
         return path
 
