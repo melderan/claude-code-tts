@@ -476,23 +476,93 @@ def level_after_synthesis(output_file: Path, persona: str) -> None:
     )
 
 
+FALLBACK_TELL_DEFAULT = "Spare voice standing in."
+
+
+def fallback_tell_text() -> str:
+    """The words the spare voice says before a reply its engine could not make; empty = none."""
+    value = load_raw_config().get("fallback_tell", FALLBACK_TELL_DEFAULT)
+    return str(value).strip() if value is not None else ""
+
+
+def prepend_wav(head: Path, body: Path) -> bool:
+    """Write head's audio in front of body's, in place; False (body untouched) on a mismatch."""
+    try:
+        with wave.open(str(head), "rb") as h, wave.open(str(body), "rb") as b:
+            if (h.getnchannels(), h.getsampwidth(), h.getframerate()) != (
+                b.getnchannels(),
+                b.getsampwidth(),
+                b.getframerate(),
+            ):
+                return False
+            params = b.getparams()
+            frames = h.readframes(h.getnframes()) + b.readframes(b.getnframes())
+        tmp = body.with_name(body.name + ".tell")
+        with wave.open(str(tmp), "wb") as w:
+            w.setparams(params._replace(nframes=0))
+            w.writeframes(frames)
+        tmp.replace(body)
+        return True
+    except Exception as e:
+        log(f"Fallback tell not joined: {e}", "ERROR")
+        return False
+
+
+def speak_fallback_tell(output_file: Path, persona: str) -> bool:
+    """Put the tell in front of output_file, said by the Piper voice that just stood in.
+
+    The tell goes straight to that Piper voice (audio.last_engine names it), never back
+    through the engine that just failed: a second two-minute wait would be the wrong answer
+    to the first. True when the WAV now starts with the tell.
+    """
+    tell = fallback_tell_text()
+    engine = audio_last_engine()
+    if not tell or not engine.startswith("piper:"):
+        return False
+    persona_config = get_persona_config(persona)
+    tell_file = output_file.with_name(output_file.stem + "_tell.wav")
+    try:
+        made = _generate_speech(
+            tell,
+            voice_path=VOICES_DIR / f"{engine[len('piper:'):]}.onnx",
+            speed=float(persona_config.get("speed", 2.0)),
+            speed_method=str(persona_config.get("speed_method", "playback")),
+            output_path=tell_file,
+            pitch_filter=str(persona_config.get("pitch_filter", "")),
+        )
+        if made is None:
+            log(f"Fallback tell not made: {audio_last_error()}", "WARN")
+            return False
+        return prepend_wav(tell_file, output_file)
+    finally:
+        tell_file.unlink(missing_ok=True)
+
+
 def daemon_generate_speech(
-    text: str, persona: str, output_file: Path, *args: Any, **kwargs: Any
+    text: str,
+    persona: str,
+    output_file: Path,
+    *args: Any,
+    tell_on_fallback: bool = False,
+    **kwargs: Any,
 ) -> bool:
     """Synthesize, then level: the one funnel every engine and every path goes through.
 
     A WAV from the Piper spare when the persona asked for another engine is one WARN line
     here, naming what spoke and why the asked engine did not: the "Speaking for" line names
     the plan, and until 9.49.3 nothing named the change (a reply in the wrong voice under GPU
-    load, 2026-10-08).
+    load, 2026-10-08). With tell_on_fallback the spare also says so before the words, so the
+    listener knows the voice changed (JMO's choice of 2026-10-08, decision D48: a tell over a
+    strict voice or a longer wait); message paths ask for it, announcements do not.
     """
     ok = _generate_speech_unleveled(text, persona, output_file, *args, **kwargs)
     if ok:
         fell_back = audio_last_fallback()
         if fell_back:
+            told = tell_on_fallback and speak_fallback_tell(output_file, persona)
             log(
                 f"Fallback voice for {persona}: spoke with {audio_last_engine()} because {fell_back}"
-                f" | {' '.join(text.split())[:50]}...",
+                f"{'; said so first' if told else ''} | {' '.join(text.split())[:50]}...",
                 "WARN",
             )
         level_after_synthesis(output_file, persona)
@@ -776,10 +846,17 @@ def sentence_generator(
     speaker_mlx: str = "",
     lang_mlx: str = "",
 ) -> Callable[[str, Path], bool]:
-    """Bind a persona and voice overrides into the generate(sentence, path) call."""
+    """Bind a persona and voice overrides into the generate(sentence, path) call.
+
+    One generator is one message. The first chunk the spare has to speak carries the tell;
+    the chunks after it do not, so a stalled engine costs one tell per reply, not one per
+    sentence.
+    """
+    told = False
 
     def gen(chunk: str, path: Path) -> bool:
-        return daemon_generate_speech(
+        nonlocal told
+        ok = daemon_generate_speech(
             chunk,
             persona,
             path,
@@ -789,7 +866,11 @@ def sentence_generator(
             voice_mlx_override=voice_mlx,
             speaker_mlx_override=speaker_mlx,
             lang_mlx_override=lang_mlx,
+            tell_on_fallback=not told,
         )
+        if ok and audio_last_fallback():
+            told = True
+        return ok
 
     return gen
 

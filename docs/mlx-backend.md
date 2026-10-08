@@ -43,6 +43,13 @@ mlx, since it records the intent). A request with no answer in two minutes kills
 a failed start is not retried for a minute, so a broken model costs one attempt per minute, not
 ten minutes per message.
 
+Whenever the Piper spare speaks in place of the engine a persona asked for, `daemon.log` gets one
+`WARN` line naming the persona, the voice that spoke and the reason, and the spare says so first:
+"Spare voice standing in." in that Piper voice, then the reply, once per message even when the
+reply streams sentence by sentence. The words are the `fallback_tell` key in `config.json`; an
+empty string keeps the log line and drops the spoken tell. Daemon announcements (online, speaker
+change) never carry it.
+
 `--enable-mlx` fetches spaCy's `en_core_web_sm`: Kokoro's English text processing (misaki) asks spaCy
 to download it on first use, and spaCy's downloader runs pip, which answers to the machine's pip config
 (a require-hashes default refuses the wheel, which spaCy publishes without a hash). So the installer

@@ -186,3 +186,117 @@ class TestPidFileSurvivesAStatusCheck:
         assert st.ensure_pid_file() is True
         assert st.PID_FILE.read_text() == str(__import__("os").getpid())
         assert st.ensure_pid_file() is False
+
+
+def _wav(path: Path, frames: bytes, rate: int = 22050) -> Path:
+    import wave
+
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(frames)
+    return path
+
+
+def _frames(path: Path) -> bytes:
+    import wave
+
+    with wave.open(str(path), "rb") as w:
+        return w.readframes(w.getnframes())
+
+
+class TestTheSpareSaysSoFirst:
+    """D48 (2026-10-08, A): the spare speaks a short tell before a reply its engine could not make."""
+
+    @pytest.fixture
+    def fallen_back(self, tmp_path):
+        """A funnel whose engine step writes a WAV from the Piper spare and names the fallback."""
+        tells: list[str] = []
+        lines: list[tuple[str, str]] = []
+
+        def body(text, persona, output_file, *a, **k):
+            _wav(output_file, b"BB" * 100)
+            audio._spoke_with("piper:en_US-hfc_male-medium", "mlx:m#af_heart: no answer in 120 s")
+            return True
+
+        def tell(text, *, voice_path, output_path, **k):
+            tells.append(f"{text}@{voice_path.name}")
+            return _wav(output_path, b"TT" * 10)
+
+        with patch.object(d, "_generate_speech_unleveled", body), \
+             patch.object(d, "_generate_speech", tell), \
+             patch.object(d, "level_after_synthesis", lambda *a, **k: None), \
+             patch.object(d, "load_raw_config", lambda: {}), \
+             patch.object(d, "log", lambda m, level="INFO": lines.append((level, m))):
+            yield tells, lines
+
+    def test_a_message_path_starts_with_the_tell_in_the_spare_voice(self, fallen_back, tmp_path):
+        tells, lines = fallen_back
+        out = tmp_path / "o.wav"
+        assert d.daemon_generate_speech("the reply", "jmo-heart", out, tell_on_fallback=True) is True
+        assert tells == ["Spare voice standing in.@en_US-hfc_male-medium.onnx"]
+        assert _frames(out) == b"TT" * 10 + b"BB" * 100
+        assert not out.with_name("o_tell.wav").exists()
+        assert lines[0][0] == "WARN" and "; said so first |" in lines[0][1]
+
+    def test_an_announcement_path_has_no_tell(self, fallen_back, tmp_path):
+        tells, lines = fallen_back
+        out = tmp_path / "o.wav"
+        assert d.daemon_generate_speech("Voice daemon online", "jmo-heart", out) is True
+        assert tells == []
+        assert _frames(out) == b"BB" * 100
+        assert "said so first" not in lines[0][1]
+
+    def test_one_tell_per_message_when_sentences_stream(self, fallen_back, tmp_path):
+        tells, _ = fallen_back
+        gen = d.sentence_generator("jmo-heart")
+        for i in range(3):
+            assert gen(f"sentence {i}", tmp_path / f"s{i}.wav") is True
+        assert len(tells) == 1
+        assert _frames(tmp_path / "s0.wav").startswith(b"TT" * 10)
+        assert _frames(tmp_path / "s1.wav") == b"BB" * 100
+
+    def test_a_new_message_tells_again(self, fallen_back, tmp_path):
+        tells, _ = fallen_back
+        d.sentence_generator("jmo-heart")("one", tmp_path / "a.wav")
+        d.sentence_generator("jmo-heart")("two", tmp_path / "b.wav")
+        assert len(tells) == 2
+
+    def test_an_empty_fallback_tell_keeps_the_log_line_only(self, fallen_back, tmp_path):
+        tells, lines = fallen_back
+        out = tmp_path / "o.wav"
+        with patch.object(d, "load_raw_config", lambda: {"fallback_tell": ""}):
+            d.daemon_generate_speech("the reply", "jmo-heart", out, tell_on_fallback=True)
+        assert tells == []
+        assert _frames(out) == b"BB" * 100
+        assert lines[0][0] == "WARN" and "said so first" not in lines[0][1]
+
+    def test_a_tell_the_spare_cannot_make_leaves_the_reply_whole(self, fallen_back, tmp_path):
+        tells, lines = fallen_back
+        out = tmp_path / "o.wav"
+        with patch.object(d, "_generate_speech", lambda *a, **k: None):
+            d.daemon_generate_speech("the reply", "jmo-heart", out, tell_on_fallback=True)
+        assert _frames(out) == b"BB" * 100
+        assert ("WARN", "Fallback tell not made: ") == lines[0]
+
+    def test_a_tell_with_other_wav_parameters_is_dropped_not_joined(self, fallen_back, tmp_path):
+        out = tmp_path / "o.wav"
+        with patch.object(d, "_generate_speech", lambda text, *, output_path, **k: _wav(output_path, b"TT", rate=24000)):
+            d.daemon_generate_speech("the reply", "jmo-heart", out, tell_on_fallback=True)
+        assert _frames(out) == b"BB" * 100
+
+    def test_when_the_asked_engine_spoke_nothing_is_added(self, tmp_path):
+        tells: list[str] = []
+
+        def body(text, persona, output_file, *a, **k):
+            _wav(output_file, b"BB" * 100)
+            audio._spoke_with("mlx:m#af_heart", "")
+            return True
+
+        out = tmp_path / "o.wav"
+        with patch.object(d, "_generate_speech_unleveled", body), \
+             patch.object(d, "_generate_speech", lambda *a, **k: tells.append("x")), \
+             patch.object(d, "level_after_synthesis", lambda *a, **k: None):
+            d.daemon_generate_speech("the reply", "jmo-heart", out, tell_on_fallback=True)
+        assert tells == [] and _frames(out) == b"BB" * 100

@@ -1483,6 +1483,7 @@ DEFAULT_CONFIG = {
     "active_persona": "claude-prime",
     "muted": False,
     "default_muted": False,  # New sessions speak; true (or `claude-tts mute --all`) starts them silent
+    "fallback_tell": "Spare voice standing in.",  # said by the Piper spare before a reply its engine could not make; "" = silent
     "queue": {
         "max_depth": 20,
         "max_age_seconds": 300,
