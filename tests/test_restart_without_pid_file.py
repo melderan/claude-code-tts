@@ -199,3 +199,20 @@ class TestTheDeployScriptTellsAnOldDaemonFromTheNewOne:
         monkeypatch.setattr(up, "TTS_DIR", tmp_path)
         (tmp_path / "daemon.heartbeat").write_text(str(time.time()))
         assert up.heartbeat_fresh() is True
+
+
+class TestTheHoldLineNamesWhatIsDirty:
+    def test_up_to_three_paths_then_a_count(self, monkeypatch):
+        answers = {
+            ("status", "--porcelain"): " M src/x.py\n?? .mcp.json\n?? a\n?? b\n",
+            ("tag", "--points-at", "HEAD"): "v9.51.2",
+        }
+        monkeypatch.setattr(up, "git", lambda *a: answers[a])
+        assert up.not_released("9.51.2") == (
+            "working tree has uncommitted changes: M src/x.py, ?? .mcp.json, ?? a and 1 more"
+        )
+
+    def test_one_path_is_named_alone(self, monkeypatch):
+        answers = {("status", "--porcelain"): "?? .mcp.json\n", ("tag", "--points-at", "HEAD"): ""}
+        monkeypatch.setattr(up, "git", lambda *a: answers[a])
+        assert up.not_released("9.51.2") == "working tree has uncommitted changes: ?? .mcp.json"

@@ -161,8 +161,14 @@ def not_released(ver: str) -> str | None:
     whose HEAD carries the tag v<ver>. Anything else is work in progress that a person
     may still deploy by hand with a plain `just up`.
     """
-    if git("status", "--porcelain") not in ("", "unknown"):
-        return "working tree has uncommitted changes"
+    dirty = git("status", "--porcelain")
+    if dirty not in ("", "unknown"):
+        # Name the paths: a hold that only says "uncommitted changes" cannot be acted on from
+        # anywhere but this machine (2026-10-09: a sandbox sharing the checkout saw a clean
+        # tree while the host held for 15 minutes on something it could not see).
+        lines = [line.strip() for line in dirty.splitlines() if line.strip()]
+        shown = ", ".join(lines[:3]) + (f" and {len(lines) - 3} more" if len(lines) > 3 else "")
+        return f"working tree has uncommitted changes: {shown}"
     tags = git("tag", "--points-at", "HEAD").split()
     if f"v{ver}" not in tags:
         return f"HEAD is not tagged v{ver}"
