@@ -66,6 +66,7 @@ from claude_code_tts.state import (
     clear_pid,
     ensure_pid_file,
     get_interrupted_message,
+    heartbeat_age,
     hold,
     is_daemon_running,
     may_play,
@@ -2455,7 +2456,17 @@ def stop_daemon() -> bool:
         print("Daemon is not running")
         return False
 
-    assert pid is not None
+    if pid is None:
+        # Alive by its heartbeat, but neither the pid file nor the lock file names a process
+        # this one can signal: a sandbox sharing the directory, or both markers gone. Say so;
+        # an assert here crashed `daemon restart` for a day and a half (2026-10-09, 9.51.1).
+        age = heartbeat_age()
+        print(
+            "Daemon is running (heartbeat "
+            f"{'unreadable' if age is None else f'{age:.0f}s old'}) but its pid is not visible "
+            "from here; stop it on the machine that runs it"
+        )
+        return False
 
     try:
         os.kill(pid, signal.SIGTERM)
@@ -2556,13 +2567,20 @@ def run_foreground(lockpick: bool = False) -> None:
         print("\nStopped")
 
 
-def daemon_restart(lockpick: bool = False) -> None:
-    """Restart the daemon (stop then start)."""
+def daemon_restart(lockpick: bool = False) -> bool:
+    """Restart the daemon (stop then start); True when the new daemon is up.
+
+    A stop that fails ends the restart with False, and no start is attempted: a start next to
+    a daemon that is still running says "already running" and would have reported the old
+    daemon as the new one (every `just up` from 9.49.3 to 9.51.0 did, 2026-10-09).
+    """
     running, _ = is_daemon_running()
     if running:
         print("Stopping daemon...")
-        stop_daemon()
-    start_daemon(lockpick=lockpick)
+        if not stop_daemon():
+            print("Restart abandoned: the running daemon was not stopped")
+            return False
+    return start_daemon(lockpick=lockpick)
 
 
 def _log_parts(line: str) -> tuple[str, str] | None:

@@ -110,6 +110,30 @@ def heartbeat_fresh() -> bool:
         return False
 
 
+def daemon_state(ver: str) -> str:
+    """What the timeline says about the daemon after a run: "running" only when the daemon
+    alive now is the release this run installed; "DOWN" with no heartbeat; "STALE(v<x>)" when
+    the heartbeat belongs to an older daemon, which is a restart that did not happen."""
+    if not heartbeat_fresh():
+        return "DOWN"
+    have = daemon_version()
+    if have == ver:
+        return "running"
+    return f"STALE(v{have or '?'})"
+
+
+def daemon_pid() -> str:
+    """The daemon's pid for the timeline: the pid file, else the lock file, else "-"."""
+    for name in ("daemon.pid", "daemon.lock"):
+        try:
+            text = (TTS_DIR / name).read_text().strip()
+        except OSError:
+            continue
+        if text.isdigit():
+            return text
+    return "-"
+
+
 def installed_version() -> str:
     """The claude-tts on PATH, or "" when there is none."""
     try:
@@ -262,7 +286,10 @@ def main(argv: list[str] | None = None) -> int:
     # The installer would restart the daemon itself; we do the one restart below instead,
     # so the daemon finishes its current sentence once, not twice.
     step("hooks", ["claude-tts-install", "--upgrade", "--no-daemon-restart"])
-    step("restart", ["claude-tts", "daemon", "restart"], ["claude-tts", "daemon", "start"])
+    # No `daemon start` as a second try: next to a daemon the restart failed to stop it says
+    # "already running" and exits 0, and the old daemon would pass as the new one (it did,
+    # from 9.49.3 to 9.51.0: a missing pid file crashed every restart, 2026-10-09).
+    step("restart", ["claude-tts", "daemon", "restart"])
     time.sleep(2)
 
     with run.open("a") as f:
@@ -270,11 +297,8 @@ def main(argv: list[str] | None = None) -> int:
         f.flush()
         subprocess.run(["claude-tts", "daemon", "status"], stdout=f, stderr=subprocess.STDOUT)
 
-    daemon = "running" if heartbeat_fresh() else "DOWN"
-    try:
-        pid = (TTS_DIR / "daemon.pid").read_text().strip() or "-"
-    except OSError:
-        pid = "-"
+    daemon = daemon_state(ver)
+    pid = daemon_pid()
     record(
         f"{stamp()} {ident} daemon={daemon} pid={pid} py={tool_python_version()} "
         f"bridge={config_flag(['http', 'enabled'])} mic={config_flag(['mic_aware_pause'])} "

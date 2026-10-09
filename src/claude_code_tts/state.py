@@ -71,23 +71,27 @@ def acquire_lock(lockpick: bool = False, log: Callable[[str, str], None] | None 
 
     try:
         LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _lock_fd = open(LOCK_FILE, "w")
+        # Opened without truncation: the file holds the running daemon's pid, and a second
+        # daemon that fails to take the lock must not blank it (see lock_pid).
+        _lock_fd = os.fdopen(os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o644), "r+")
 
         if lockpick:
             try:
                 fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                if PID_FILE.exists():
+                old_pid = daemon_pid()
+                if old_pid is not None:
                     try:
-                        old_pid = int(PID_FILE.read_text().strip())
                         os.kill(old_pid, signal.SIGTERM)
                         time.sleep(1)
-                    except (ValueError, ProcessLookupError):
+                    except ProcessLookupError:
                         pass
                 fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         else:
             fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
+        _lock_fd.seek(0)
+        _lock_fd.truncate()
         _lock_fd.write(str(os.getpid()))
         _lock_fd.flush()
         return True
@@ -162,6 +166,32 @@ def clear_pid() -> None:
     PID_FILE.unlink(missing_ok=True)
 
 
+def _pid_in(path: Path) -> int | None:
+    """The pid a marker file holds, or None when the file is missing, empty or not a number."""
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def lock_pid() -> int | None:
+    """The pid the lock holder wrote into daemon.lock, or None.
+
+    The second place the daemon's pid is written. The pid file alone was not enough: a
+    9.49.1 daemon lost its pid file to a status check from a sandbox, and `daemon restart`
+    then crashed on the missing pid for a day and a half while the heartbeat said the daemon
+    was fine (2026-10-09, 9.51.1). The lock file cannot be removed by that path, and the
+    daemon holds it open for its whole life.
+    """
+    return _pid_in(LOCK_FILE)
+
+
+def daemon_pid() -> int | None:
+    """The daemon's pid as far as the files say: the pid file, else the lock file."""
+    pid = _pid_in(PID_FILE)
+    return pid if pid is not None else lock_pid()
+
+
 def pid_alive(pid: int) -> bool:
     """True when a process with this pid exists and is visible to us."""
     try:
@@ -225,15 +255,15 @@ def is_daemon_running() -> tuple[bool, int | None]:
     there is none: a heartbeat that cannot be read right now says nothing about the daemon
     (2026-10-08: one empty read through a shared mount deleted a speaking daemon's pid file).
     """
-    pid: int | None = None
-    try:
-        pid = int(PID_FILE.read_text().strip())
-    except FileNotFoundError:
-        pid = None
-    except (ValueError, OSError):
-        pid = None
+    pid = _pid_in(PID_FILE)
     age = heartbeat_age()
     if age is not None and age <= HEARTBEAT_MAX_AGE_S:
+        if pid is None:
+            # The pid file is gone but the daemon is alive: the lock file names it, when
+            # that pid is one this process can see (a sandbox cannot see the host's).
+            held = lock_pid()
+            if held is not None and pid_alive(held):
+                pid = held
         return True, pid
     heartbeat_says_dead = age is not None or not HEARTBEAT_FILE.exists()
     if pid is None:

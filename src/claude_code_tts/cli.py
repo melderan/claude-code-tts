@@ -4020,6 +4020,7 @@ def cmd_daemon(args: argparse.Namespace) -> None:
     from claude_code_tts.daemon import (
         daemon_restart,
         install_service,
+        is_daemon_running,
         print_log_stats,
         run_foreground,
         show_logs,
@@ -4034,12 +4035,18 @@ def cmd_daemon(args: argparse.Namespace) -> None:
     dc = getattr(args, "daemon_command", None)
     lockpick = getattr(args, "lockpick", False)
 
+    # Exit 1 when the thing asked for did not happen, so a caller (scripts/up.py, a service
+    # manager) can tell; `start` next to a running daemon is the state asked for and exits 0.
     if dc == "start":
-        start_daemon(lockpick=lockpick)
+        running, _ = is_daemon_running()
+        if not start_daemon(lockpick=lockpick) and not running:
+            sys.exit(1)
     elif dc == "stop":
-        stop_daemon()
+        if not stop_daemon():
+            sys.exit(1)
     elif dc == "restart":
-        daemon_restart(lockpick=lockpick)
+        if not daemon_restart(lockpick=lockpick):
+            sys.exit(1)
     elif dc == "status":
         _daemon_status()
     elif dc == "logs":
