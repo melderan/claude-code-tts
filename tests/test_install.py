@@ -367,3 +367,11 @@ class TestSpeakByDefaultMigration:
 
     def test_a_fresh_install_has_no_speaker_lines(self):
         assert "speaker_lines" not in install.DEFAULT_CONFIG
+
+
+def test_every_hint_names_the_command_a_uv_install_puts_on_the_path():
+    """2026-10-20, a clean install in an empty container: --check said "Run: python install.py --install",
+    a file a uv tool install never puts in reach. The entry point is claude-tts-install."""
+    source = Path(install.__file__).read_text()
+    assert "python install.py --" not in source
+    assert "Run: claude-tts-install --install" in source

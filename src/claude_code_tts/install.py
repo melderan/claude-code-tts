@@ -8,10 +8,10 @@ Supports:
     - WSL 2 on Windows (via apt, audio through WSLg)
 
 Usage:
-    python install.py              Install TTS
-    python install.py --dry-run    Show what would be done
-    python install.py --uninstall  Remove TTS
-    python install.py --help       Show help
+    claude-tts-install             Install TTS
+    claude-tts-install --dry-run   Show what would be done
+    claude-tts-install --uninstall Remove TTS
+    claude-tts-install --help      Show help
 """
 
 import argparse
@@ -1663,9 +1663,9 @@ def do_check() -> None:
     if results["overall"] == "current":
         print(f"{Colors.GREEN}Everything is up to date!{Colors.NC}")
     elif results["overall"] == "outdated":
-        print(f"{Colors.YELLOW}Updates available. Run: python install.py --upgrade{Colors.NC}")
+        print(f"{Colors.YELLOW}Updates available. Run: claude-tts-install --upgrade{Colors.NC}")
     else:
-        print(f"{Colors.RED}TTS not installed. Run: python install.py --install{Colors.NC}")
+        print(f"{Colors.RED}TTS not installed. Run: claude-tts-install --install{Colors.NC}")
     print()
 
 
@@ -2862,16 +2862,16 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python install.py                      # Interactive menu
-  python install.py --install            # Direct install
-  python install.py --upgrade            # Update to latest version
-  python install.py --check              # Check for updates
-  python install.py --version            # Show version info
-  python install.py --personas           # Manage personas
-  python install.py --voices             # Download new voice models
-  python install.py --preview            # Preview installed voices
-  python install.py --bootstrap config.json  # Install from config file
-  python install.py --uninstall          # Remove TTS
+  claude-tts-install                     # Interactive menu
+  claude-tts-install --install           # Direct install
+  claude-tts-install --upgrade           # Update to latest version
+  claude-tts-install --check             # Check for updates
+  claude-tts-install --version           # Show version info
+  claude-tts-install --personas          # Manage personas
+  claude-tts-install --voices            # Download new voice models
+  claude-tts-install --preview           # Preview installed voices
+  claude-tts-install --bootstrap config.json # Install from config file
+  claude-tts-install --uninstall         # Remove TTS
         """,
     )
     parser.add_argument(
