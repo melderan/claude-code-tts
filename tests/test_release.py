@@ -1,5 +1,6 @@
 """The release command: preflight, notes from the commit, and the plan it prints."""
 
+import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -216,6 +217,83 @@ class TestCiProblem:
             rel.main(["--check"])
         assert e.value.code == 1
         gate.assert_not_called()
+
+
+class TestWaitCi:
+    """--wait-ci hands the wait to the house's ci-wait, then reads the run back before tagging."""
+
+    @pytest.fixture
+    def bin_dir(self, tmp_path_factory, monkeypatch):
+        # outside the repo fixture's tree, which a file in it would make dirty
+        d = tmp_path_factory.mktemp("bin")
+        real_which = shutil.which
+
+        # ci-wait only from the fake bin, so a real one on this machine cannot leak in; gh is
+        # never run (_gh is patched), it only has to be found
+        def which(name, *args, **kwargs):
+            if name == "ci-wait":
+                return real_which(name, path=str(d))
+            if name == "gh":
+                return "/usr/bin/gh"
+            return real_which(name, *args, **kwargs)
+
+        monkeypatch.setattr(rel.shutil, "which", which)
+        return d
+
+    def ci_wait(self, bin_dir: Path, rc: int) -> Path:
+        log = bin_dir / "ci-wait.args"
+        exe = bin_dir / "ci-wait"
+        exe.write_text(f'#!/bin/sh\necho "$@" > {log}\nexit {rc}\n')
+        exe.chmod(0o755)
+        return log
+
+    @pytest.fixture
+    def releasable(self, repo):
+        set_version(repo, "1.3.0")
+        git(repo, "commit", "-q", "-am", "feat: streaming")
+        git(repo, "config", "user.signingkey", "DEADBEEF")
+        git(repo, "remote", "add", "origin", "https://github.com/o/r.git")
+        return repo
+
+    def test_green_wait_reaches_the_gate_with_the_run_read_back(self, releasable, bin_dir, monkeypatch):
+        log = self.ci_wait(bin_dir, 0)
+        reads = []
+        monkeypatch.setattr(rel, "_gh", lambda *a: reads.append(a) or (0, '[{"status":"completed","conclusion":"success","url":"u"}]'))
+        with patch.object(rel, "_repo_dir", return_value=releasable), \
+             patch.object(rel, "run_gate", return_value=True) as gate:
+            rel.main(["--check", "--wait-ci"])
+        gate.assert_called_once()
+        assert log.read_text().split() == ["o/r", git(releasable, "rev-parse", "HEAD"), "-workflow", "ci.yml"]
+        assert len(reads) == 1
+
+    @pytest.mark.parametrize(("rc", "words"), [(1, "ci failed"), (124, "in time"), (69, "kept erroring")])
+    def test_a_wait_that_does_not_end_green_exits_before_the_gate(self, releasable, bin_dir, monkeypatch, capsys, rc, words):
+        self.ci_wait(bin_dir, rc)
+        monkeypatch.setattr(rel, "_gh", lambda *a: pytest.fail("ci_problem must not run after a failed wait"))
+        with patch.object(rel, "_repo_dir", return_value=releasable), \
+             patch.object(rel, "run_gate") as gate, pytest.raises(SystemExit) as e:
+            rel.main(["--check", "--wait-ci"])
+        assert e.value.code == 1
+        gate.assert_not_called()
+        out = capsys.readouterr().out
+        assert f"ci-wait exited {rc}" in out and words in out
+
+    def test_without_ci_wait_it_refuses_and_says_so(self, releasable, bin_dir, capsys):
+        with patch.object(rel, "_repo_dir", return_value=releasable), \
+             patch.object(rel, "run_gate") as gate, pytest.raises(SystemExit) as e:
+            rel.main(["--check", "--wait-ci"])
+        assert e.value.code == 1
+        gate.assert_not_called()
+        assert "ci-wait not installed" in capsys.readouterr().out
+
+    def test_other_problems_refuse_before_any_wait(self, repo, bin_dir):
+        # repo's HEAD is already released as v1.2.0: a wait would end in a refusal anyway
+        git(repo, "remote", "add", "origin", "https://github.com/o/r.git")
+        log = self.ci_wait(bin_dir, 0)
+        with patch.object(rel, "_repo_dir", return_value=repo), pytest.raises(SystemExit) as e:
+            rel.main(["--check", "--wait-ci"])
+        assert e.value.code == 1
+        assert not log.exists()
 
 
 class TestVerifyOnGithub:

@@ -4171,6 +4171,8 @@ def cmd_release(args: argparse.Namespace) -> None:
         release_args.append("--dry-run")
     if args.no_wait:
         release_args.append("--no-wait")
+    if args.wait_ci:
+        release_args.append("--wait-ci")
     if args.notes:
         release_args += ["--notes", args.notes]
     release_main(release_args)
@@ -4610,6 +4612,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--notes", help="Release notes (first line summary); default: HEAD commit")
     p.add_argument("--dry-run", action="store_true", help="Everything but tag and push")
     p.add_argument("--no-wait", action="store_true", help="Push and return without waiting")
+    p.add_argument("--wait-ci", action="store_true", help="Wait for HEAD's ci run (with ci-wait) instead of refusing")
     p.set_defaults(func=cmd_release)
 
     args = parser.parse_args(argv)

@@ -254,6 +254,23 @@ def ci_problem(repo: Path, slug: str) -> str | None:
     return None
 
 
+def wait_for_ci(slug: str, sha: str) -> str | None:
+    """Wait for HEAD's ci run with the house's ci-wait; why the wait did not end green, or None.
+
+    ci-wait keeps asking until the run exists and retries GitHub errors, which a bare
+    `gh run watch` does not (an empty run id exited 0 here on 2026-10-20). One poller lives
+    in ci-wait; release does not carry a second.
+    """
+    exe = shutil.which("ci-wait")
+    if not exe:
+        return "ci-wait not installed; release without --wait-ci once ci is green"
+    rc = subprocess.run([exe, slug, sha, "-workflow", CI_WORKFLOW]).returncode
+    if rc == 0:
+        return None
+    reasons = {1: "ci failed", 124: "ci did not finish in time", 69: "GitHub kept erroring"}
+    return f"ci-wait exited {rc} for {sha[:7]}: {reasons.get(rc, 'see its output above')}"
+
+
 def print_plan(plan: Plan) -> None:
     print(f"tag:      {plan.tag} on {plan.sha} ({plan.branch})")
     print(f"subject:  {plan.subject}")
@@ -278,13 +295,25 @@ def main(args: list[str] | None = None) -> None:
     )
     parser.add_argument("--dry-run", action="store_true", help="everything but tag and push")
     parser.add_argument("--no-wait", action="store_true", help="push and return without waiting")
+    parser.add_argument(
+        "--wait-ci", action="store_true", help="wait for HEAD's ci run (with ci-wait) instead of refusing"
+    )
     parsed = parser.parse_args(args)
     repo = _repo_dir()
 
     plan = preflight(repo, parsed.notes)
     slug = repo_slug(repo)
     if slug:
-        problem = ci_problem(repo, slug)
+        problem = None
+        if parsed.wait_ci:
+            # the rest of the preflight first, so a dirty tree is not found after a long wait
+            if plan.problems:
+                print_plan(plan)
+                sys.exit(1)
+            print(f"== waiting for ci on {plan.sha}", flush=True)
+            problem = wait_for_ci(slug, _git(repo, "rev-parse", "HEAD"))
+        # after a green wait, ci_problem reads the same run back: the release rests on what GitHub says
+        problem = problem or ci_problem(repo, slug)
         if problem:
             plan.problems.append(problem)
     else:
