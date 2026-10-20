@@ -217,6 +217,38 @@ class TestLoopLetsRoomsThrough:
         assert "letting b through" in log
         assert "Resumed with" in log
 
+    def test_a_hold_keeps_the_newest_max_depth_of_what_it_holds(self, tmp_path):
+        """2026-10-19: a four-hour focus held 731 messages under max_depth 20; the count only grew."""
+        loop_harness, stop_loop = _ledger_helpers()
+
+        state_dir, queue_dir, spoken, patches = loop_harness(tmp_path, {})
+        for p in patches:
+            p.start()
+        try:
+            st.write_playback_state(paused=False, paused_by=None, audio_pid=None, current_message=None)
+            hold(["b"])
+
+            def run():
+                d._shutdown_requested = False
+                d._daemon_mode = True
+                d.daemon_loop()
+
+            runner = threading.Thread(target=run, daemon=True)
+            runner.start()
+            assert _wait_for(lambda: (state_dir / "daemon.heartbeat").exists())
+            held = [_enqueue(queue_dir, f"a held {i}", "alice--claude--a") for i in range(25)]
+            _enqueue(queue_dir, "b speaks", "alice--claude--b")
+            assert _wait_for(lambda: "b speaks" in spoken)
+            assert _wait_for(lambda: len(list(queue_dir.glob("*.json"))) == 20)
+            time.sleep(0.2)
+            assert [f.exists() for f in held] == [False] * 5 + [True] * 20, "the oldest five go, the newest twenty wait"
+            assert not any(t.startswith("a held") for t in spoken), "still held, nothing of a's played"
+        finally:
+            stop_loop(runner)
+            for p in reversed(patches):
+                p.stop()
+        assert (state_dir / "daemon.log").read_text().count("Queue overflow, removed") == 5
+
     def test_a_held_rooms_interrupted_message_goes_back_to_the_queue(self, tmp_path):
         """Paused mid-sentence in room a, then b is let through: a's half message is not lost."""
         loop_harness, stop_loop = _ledger_helpers()

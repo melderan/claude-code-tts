@@ -2006,9 +2006,10 @@ def daemon_loop(lockpick: bool = False) -> None:
             ledger.mark(bool(state.get("paused")))
             letting_through = False
             if state.get("paused"):
-                # Paused holds the queue: nothing expires, nothing is trimmed. A person's
-                # hold may let named rooms through (JMO 2026-10-02); their messages are the
-                # only ones picked, everyone else's wait where they are.
+                # Paused holds the queue: nothing expires. A person's hold may let named rooms
+                # through (JMO 2026-10-02); their messages are the only ones picked, everyone
+                # else's wait where they are, the newest max_depth of them: a four-hour focus
+                # held 731 on 2026-10-19, and a count that only grows says nothing.
                 if not was_paused:
                     hold_notices = 0
                     log(f"Paused by {state.get('paused_by') or 'user'}; holding the queue{let_through_note(state)}")
@@ -2030,6 +2031,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                     continue
                 scanned = drop_all_requested(get_queue_messages())
                 allowed = [m for m in scanned if _may_play(state, m)]
+                enforce_max_depth(config["max_depth"], None, [m for m in scanned if not _may_play(state, m)])
                 # A message cut off on deck that the hold lets play (a click a recording paused,
                 # a room let through) resumes with nothing queued; else it waits for a release.
                 on_deck_msg = state.get("current_message")

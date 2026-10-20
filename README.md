@@ -286,9 +286,11 @@ hooks inside the sandbox; the daemon stays on the host. See [`docs/docker-sandbo
 
 Toggle playback with a hotkey. The system uses `claude-tts pause` which kills the current audio process and saves state for replay on resume.
 
-Pause holds the queue. Going into a meeting? `claude-tts pause` and nothing is lost: time spent
-paused does not count toward `queue.max_age_seconds`, and messages that waited through a pause are
-not trimmed by `queue.max_depth`. Toggle again afterwards and the backlog plays in order. A daemon
+Pause holds the queue. Going into a meeting? `claude-tts pause` and the newest replies wait for
+you: time spent paused does not count toward `queue.max_age_seconds`, and while paused the queue
+keeps the newest `queue.max_depth` messages it holds, so a long hold does not pile up hours of
+speech (each one dropped is still in `claude-tts ledger`, with the reason `depth`). Toggle again
+afterwards and the backlog plays in order. A daemon
 restart while paused (say, an upgrade) keeps the hold from the moment you paused.
 
 See [`docs/hotkey-setup.md`](docs/hotkey-setup.md) for setup with macOS Shortcuts, Raycast, Alfred, Hammerspoon, or BetterTouchTool.

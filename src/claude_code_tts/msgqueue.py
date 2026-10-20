@@ -471,7 +471,8 @@ class PauseLedger:
 
     A pause means "hold everything", so time spent paused is subtracted from a
     message's age before the max_age check, and a message that waited through a
-    pause is exempt from depth trimming until it plays. The ledger lives in
+    pause is exempt from depth trimming until it plays (while the pause lasts, the
+    daemon keeps only the newest max_depth of what it holds). The ledger lives in
     memory: a daemon restart forgets it and wall-clock age applies again.
     """
 
