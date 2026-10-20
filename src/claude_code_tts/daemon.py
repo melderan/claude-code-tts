@@ -69,6 +69,7 @@ from claude_code_tts.state import (
     heartbeat_age,
     hold,
     is_daemon_running,
+    lets_through,
     may_play,
     pid_alive,
     read_output_device,
@@ -214,6 +215,21 @@ def _speaking(msg: dict) -> None:
 
 def _may_play(state: dict, msg: dict) -> bool:
     return may_play(state, str(msg.get("session_id", "")), str(msg.get("lane") or ""), msg.get("timestamp"))
+
+
+def _trimmed_while_held(state: dict, msg: dict) -> bool:
+    """Whether a held message counts toward the hold's max_depth, the oldest of which are dropped.
+
+    Never a room the person let through (a recording holds it too, it still plays after), a now
+    block (a person's click), or the half-played message a hold put back: that one is the oldest
+    in the queue and the one the person was hearing.
+    """
+    return not (
+        _may_play(state, msg)
+        or lets_through(str(msg.get("session_id", "")), state.get("let_through"))
+        or str(msg.get("lane") or "") == NOW_LANE
+        or msg.get("requeued")
+    )
 
 
 def held_now(state: dict | None = None) -> bool:
@@ -437,7 +453,7 @@ def requeue_interrupted(interrupted: dict) -> None:
     deck and it would be lost. In the queue it keeps its place and replays whole on release.
     """
     fields = {k: v for k, v in interrupted.items() if k not in _ON_DECK_ONLY}
-    msgqueue.write_message(fields)
+    msgqueue.write_message({**fields, "requeued": True})
     clear_current_message()
     log(f"Held room's interrupted message {fields.get('id', '?')} put back in the queue; it replays on release")
 
@@ -2031,7 +2047,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                     continue
                 scanned = drop_all_requested(get_queue_messages())
                 allowed = [m for m in scanned if _may_play(state, m)]
-                enforce_max_depth(config["max_depth"], None, [m for m in scanned if not _may_play(state, m)])
+                enforce_max_depth(config["max_depth"], None, [m for m in scanned if _trimmed_while_held(state, m)])
                 # A message cut off on deck that the hold lets play (a click a recording paused,
                 # a room let through) resumes with nothing queued; else it waits for a release.
                 on_deck_msg = state.get("current_message")

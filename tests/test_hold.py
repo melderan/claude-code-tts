@@ -249,6 +249,29 @@ class TestLoopLetsRoomsThrough:
                 p.stop()
         assert (state_dir / "daemon.log").read_text().count("Queue overflow, removed") == 5
 
+    @pytest.mark.parametrize(
+        "state, msg, trimmed",
+        [
+            ({"paused": True, "paused_by": "user", "let_through": ["b"]}, {"session_id": "x--claude--a"}, True),
+            ({"paused": True, "paused_by": "user", "let_through": ["b"]}, {"session_id": "x--claude--b"}, False),
+            ({"paused": True, "paused_by": "mic", "let_through": ["b"]}, {"session_id": "x--claude--b"}, False),
+            ({"paused": True, "paused_by": "user"}, {"session_id": "x--claude--a", "lane": "now"}, False),
+            ({"paused": True, "paused_by": "user"}, {"session_id": "x--claude--a", "requeued": True}, False),
+        ],
+        ids=["held-room", "let-through", "let-through-under-a-recording", "now-block", "put-back-half-played"],
+    )
+    def test_what_a_hold_may_trim(self, state, msg, trimmed):
+        assert d._trimmed_while_held(state, {"timestamp": 1.0, **msg}) is trimmed
+
+    def test_a_put_back_message_is_marked_so_the_hold_keeps_it(self, tmp_path):
+        with patch.object(d.msgqueue, "QUEUE_DIR", tmp_path), patch.object(d, "clear_current_message"), \
+             patch.object(d, "log"):
+            d.requeue_interrupted({"id": "aaaa0001", "session_id": "x--claude--a", "text": "t",
+                                   "timestamp": 1.0, "audio_position": 2.0})
+        [f] = list(tmp_path.glob("*.json"))
+        msg = json.loads(f.read_text())
+        assert msg["requeued"] is True and "audio_position" not in msg
+
     def test_a_held_rooms_interrupted_message_goes_back_to_the_queue(self, tmp_path):
         """Paused mid-sentence in room a, then b is let through: a's half message is not lost."""
         loop_harness, stop_loop = _ledger_helpers()
