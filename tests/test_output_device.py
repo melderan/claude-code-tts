@@ -248,7 +248,7 @@ class TestReaders:
 
         monkeypatch.setattr(st, "PLAYBACK_STATE_FILE", tmp_path / "playback.json")
         st.write_output_device({"name": "AirPods Pro", "transport": "bluetooth"})
-        with patch.object(cli, "get_session_id", lambda: "x"):
+        with patch.object(cli, "get_session_id", lambda **_: "x"):
             try:
                 cli.cmd_status(argparse.Namespace())
             except Exception:  # noqa: BLE001  config may be missing in a bare test env; the lines we need print first
@@ -260,7 +260,7 @@ class TestReaders:
         from claude_code_tts import cli
 
         monkeypatch.setattr(st, "PLAYBACK_STATE_FILE", tmp_path / "playback.json")
-        with patch.object(cli, "get_session_id", lambda: "x"):
+        with patch.object(cli, "get_session_id", lambda **_: "x"):
             try:
                 cli.cmd_status(argparse.Namespace())
             except Exception:  # noqa: BLE001

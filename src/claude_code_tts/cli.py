@@ -262,7 +262,7 @@ def cmd_mute(args: argparse.Namespace) -> None:
         print("Use /tts-unmute to restore voice for a specific session.")
         return
 
-    sid = get_session_id()
+    sid = get_session_id(for_write=True)
     session_set(sid, "muted", True)
     print(f"Session muted: {sid}")
     print("")
@@ -305,7 +305,7 @@ def cmd_unmute(args: argparse.Namespace) -> None:
         print("Use /tts-mute in a session to silence just that one.")
         return
 
-    sid = get_session_id()
+    sid = get_session_id(for_write=True)
     session_set(sid, "muted", False)
     print(f"Session unmuted: {sid}")
     print("")
@@ -315,7 +315,7 @@ def cmd_unmute(args: argparse.Namespace) -> None:
 
 def cmd_speed(args: argparse.Namespace) -> None:
     """Show or set speech speed."""
-    sid = get_session_id()
+    sid = get_session_id(for_write=True)
     config = load_raw_config()
 
     value = args.value
@@ -424,7 +424,7 @@ def cmd_name(args: argparse.Namespace) -> None:
     """
     from claude_code_tts.speakerline import speak_line
 
-    sid = get_session_id()
+    sid = get_session_id(for_write=True)
     value = (args.name or "").strip()
     if value.lower() == "reset":
         session_set(sid, "name", "")
@@ -454,7 +454,7 @@ def cmd_name(args: argparse.Namespace) -> None:
 
 def cmd_persona(args: argparse.Namespace) -> None:
     """Show or set voice persona."""
-    sid = get_session_id()
+    sid = get_session_id(for_write=True)
     config = load_raw_config()
     if not config:
         print("No config file found")
@@ -695,7 +695,7 @@ def cmd_intermediate(args: argparse.Namespace) -> None:
         print("Run claude-tts-install first")
         sys.exit(1)
 
-    sid = get_session_id()
+    sid = get_session_id(for_write=True)
 
     if args.action == "on":
         session_set(sid, "intermediate", True)
@@ -899,7 +899,7 @@ def cmd_random(args: argparse.Namespace) -> None:
     config["personas"] = personas
     save_raw_config(config)
 
-    sid = get_session_id()
+    sid = get_session_id(for_write=True)
     session_set(sid, "persona", persona_name)
 
     print("Random persona applied:")
@@ -1755,7 +1755,7 @@ def cmd_hold(args: argparse.Namespace) -> None:
 
     rooms = list(args.let or [])
     if args.me:
-        rooms.append(get_session_id())
+        rooms.append(get_session_id(for_write=True))
     before = read_playback_state()
     held_by_person = bool(before.get("paused") and before.get("paused_by") == "user")
     if args.clear:
@@ -1767,7 +1767,7 @@ def cmd_hold(args: argparse.Namespace) -> None:
     else:
         state = hold([])
     letting = state.get("let_through") or []
-    names = ", ".join(room_tag(r) if r == get_session_id() else r for r in letting)
+    names = ", ".join(room_tag(r) if r == get_session_id(for_write=True) else r for r in letting)
     if state is before:
         print(f"Already held, nothing changed. Letting through: {names or 'nobody'}")
         print("claude-tts hold --let <room> adds one, --clear empties the list, claude-tts kraken releases")

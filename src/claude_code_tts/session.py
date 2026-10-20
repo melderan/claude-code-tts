@@ -171,12 +171,15 @@ def cleanup_stale_pins() -> int:
     return removed
 
 
-def get_session_id() -> str:
+def get_session_id(for_write: bool = False) -> str:
     """Resolve the current Claude Code session ID.
 
     Priority:
         1. CLAUDE_TTS_SESSION env override
         2. Pinned session (canonical, set by hooks from transcript_path)
+        2.5. latest.session, the session that spoke last on any machine sharing
+             ~/.claude-tts; skipped when for_write, so a command that changes a
+             session never changes whichever one spoke last
         3. PROJECT_ROOT → scan ~/.claude/projects/ for matching folder (legacy)
         4. CWD fallback (path-to-session-id encoding)
     """
@@ -189,9 +192,11 @@ def get_session_id() -> str:
         return pinned
 
     # 2.5. Latest breadcrumb — set by pin_session() for cross-process callers
-    # (e.g. VoiceServer daemon that has no claude ancestor in its process tree)
+    # (e.g. VoiceServer daemon that has no claude ancestor in its process tree).
+    # Never for a write: a sandbox's start script ran `claude-tts name` with no
+    # override and no claude ancestor, and named another sandbox's session (2026-10-19).
     latest = ACTIVE_DIR / "latest.session"
-    if latest.is_file():
+    if not for_write and latest.is_file():
         try:
             content = latest.read_text().strip()
             if content:

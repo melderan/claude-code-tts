@@ -6,6 +6,7 @@ no transcript). The hook writes a file keyed by the parent `claude` PID;
 the CLI walks its process tree to find the same PID and reads the file.
 """
 
+import json
 import os
 import time
 from unittest.mock import patch
@@ -173,6 +174,28 @@ class TestGetSessionIdPriority:
             os.environ.pop("CLAUDE_TTS_SESSION", None)
             from claude_code_tts.session import get_session_id
             assert get_session_id() == "-Users-melderan-vault-code-repos-melderan-claude-code-tts"
+
+    def test_a_write_never_lands_on_the_session_that_spoke_last(self, fake_active_dir, tmp_path, monkeypatch):
+        """2026-10-19: a start script with no override set its own name on another machine's session."""
+        import argparse
+
+        import claude_code_tts.cli as cli
+        import claude_code_tts.config as config
+
+        fake_active_dir.mkdir(parents=True)
+        (fake_active_dir / "latest.session").write_text("bob--claude--other\n")
+        monkeypatch.setattr(config, "TTS_SESSIONS_DIR", tmp_path / "sessions.d")
+        monkeypatch.delenv("CLAUDE_TTS_SESSION", raising=False)
+        monkeypatch.delenv("PROJECT_ROOT", raising=False)
+        monkeypatch.chdir(tmp_path)
+        with patch("claude_code_tts.session.find_claude_ancestor_pid", return_value=None):
+            from claude_code_tts.session import get_session_id
+
+            assert get_session_id() == "bob--claude--other", "a read still follows the breadcrumb"
+            cli.cmd_name(argparse.Namespace(name="Alice"))
+        assert not (tmp_path / "sessions.d" / "bob--claude--other.json").exists()
+        own = config.session_file(get_session_id(for_write=True))
+        assert json.loads(own.read_text())["name"] == "Alice"
 
     def test_pinned_beats_latest_session(self, fake_active_dir):
         """Process-tree pinned session still wins over latest.session."""

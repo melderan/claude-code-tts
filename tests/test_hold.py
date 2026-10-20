@@ -292,7 +292,7 @@ class TestCli:
     def test_hold_me_then_let_another_then_kraken(self, state_file, monkeypatch, capsys):
         from claude_code_tts import cli
 
-        monkeypatch.setattr(cli, "get_session_id", lambda: "alice--claude--claude-code-tts")
+        monkeypatch.setattr(cli, "get_session_id", lambda **_: "alice--claude--claude-code-tts")
         cli.cmd_hold(argparse.Namespace(let=None, me=True, clear=False))
         s = st.read_playback_state()
         assert s["paused"] and s["let_through"] == ["alice--claude--claude-code-tts"]
@@ -346,7 +346,7 @@ class TestCli:
         hold(["jmo"])
         st.write_playback_state(mic_held=True)
         pb = st.read_playback_state()
-        with patch.object(cli, "get_session_id", lambda: "x"), patch("claude_code_tts.state.read_playback_state", lambda: pb):
+        with patch.object(cli, "get_session_id", lambda **_: "x"), patch("claude_code_tts.state.read_playback_state", lambda: pb):
             try:
                 cli.cmd_status(argparse.Namespace())
             except Exception:  # noqa: BLE001  config may be missing in a bare test env; the lines we need print first
