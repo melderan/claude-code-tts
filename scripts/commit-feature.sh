@@ -1,18 +1,22 @@
 #!/bin/bash
 #
-# commit-feature.sh - Commit a feature/fix with proper version bump
-#
-# This ensures version bump and feature changes are in ONE commit,
-# not two separate commits.
+# commit-feature.sh - Commit a change and its version bump as ONE commit
 #
 # Usage:
+#   ./scripts/commit-feature.sh [-y] [-F FILE] <type> <subject>
+#
 #   ./scripts/commit-feature.sh feat "add pause/resume toggle"
-#   ./scripts/commit-feature.sh fix "handle empty queue gracefully"
-#   ./scripts/commit-feature.sh patch "typo in error message"
+#   ./scripts/commit-feature.sh -y -F /tmp/body.txt fix "handle empty queue gracefully"
 #
 # Arguments:
-#   $1 - Type: "feat" (minor bump), "fix" (patch bump), or "patch" (patch bump)
-#   $2 - Commit message (without the type prefix)
+#   <type>     feat (minor bump); fix, docs, chore, refactor, perf, test (patch bump);
+#              patch is fix
+#   <subject>  The subject line without the type prefix
+#   -F FILE    The commit body: everything after the subject, trailers included
+#   -y         Commit without asking; needed when stdin is not a terminal
+#
+# Stages every change (git add -A). Tags nothing: `just release` makes the signed tag,
+# and a tag made here would make it refuse.
 #
 
 set -euo pipefail
@@ -22,102 +26,109 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-cd "$(dirname "$0")/.."
-
-if [[ $# -lt 2 ]]; then
-    echo "Usage: $0 <type> <message>"
+usage() {
+    echo "Usage: $0 [-y] [-F FILE] <type> <subject>"
     echo ""
     echo "Types:"
-    echo "  feat   - New feature (bumps minor: 5.4.0 -> 5.5.0)"
-    echo "  fix    - Bug fix (bumps patch: 5.4.0 -> 5.4.1)"
-    echo "  patch  - Small change (bumps patch: 5.4.0 -> 5.4.1)"
+    echo "  feat                                - bumps minor: 5.4.0 -> 5.5.0"
+    echo "  fix docs chore refactor perf test   - bump patch: 5.4.0 -> 5.4.1"
+    echo "  patch                               - same as fix"
     echo ""
-    echo "Examples:"
-    echo "  $0 feat \"add pause/resume toggle for TTS\""
-    echo "  $0 fix \"handle empty queue gracefully\""
-    exit 1
+    echo "  -F FILE  commit body (everything after the subject, trailers included)"
+    echo "  -y       do not ask before committing"
+}
+
+BODY_FILE=""
+YES=0
+while getopts "F:yh" opt; do
+    case "$opt" in
+        F) BODY_FILE="$OPTARG" ;;
+        y) YES=1 ;;
+        h) usage; exit 0 ;;
+        *) usage; exit 2 ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -ne 2 ]]; then
+    usage
+    exit 2
 fi
 
 TYPE="$1"
-MESSAGE="$2"
+SUBJECT="$2"
 
-# Determine bump type
+if [[ -n "$BODY_FILE" ]]; then
+    if [[ ! -s "$BODY_FILE" ]]; then
+        echo -e "${RED}Body file missing or empty: $BODY_FILE${NC}"
+        exit 2
+    fi
+    BODY_FILE="$(cd "$(dirname "$BODY_FILE")" && pwd)/$(basename "$BODY_FILE")"
+fi
+
+cd "$(dirname "$0")/.."
+
 case "$TYPE" in
-    feat|feature)
-        BUMP="minor"
-        PREFIX="feat"
-        ;;
-    fix|bugfix)
-        BUMP="patch"
-        PREFIX="fix"
-        ;;
-    patch)
-        BUMP="patch"
-        PREFIX="fix"
-        ;;
+    feat|feature) BUMP="minor"; PREFIX="feat" ;;
+    fix|bugfix|patch) BUMP="patch"; PREFIX="fix" ;;
+    docs|chore|refactor|perf|test) BUMP="patch"; PREFIX="$TYPE" ;;
     *)
         echo -e "${RED}Unknown type: $TYPE${NC}"
-        echo "Use: feat, fix, or patch"
-        exit 1
+        usage
+        exit 2
         ;;
 esac
 
-# Check for uncommitted changes
 if [[ -z $(git status --porcelain) ]]; then
     echo -e "${RED}No changes to commit${NC}"
     exit 1
 fi
 
-# Show what we're about to do
-CURRENT_VERSION=$(grep -m1 'current_version' pyproject.toml | cut -d'"' -f2)
+version() {
+    sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/claude_code_tts/__init__.py
+}
+
+CURRENT_VERSION=$(version)
 echo ""
 echo -e "${YELLOW}Current version:${NC} $CURRENT_VERSION"
 echo -e "${YELLOW}Bump type:${NC} $BUMP"
-echo -e "${YELLOW}Commit message:${NC} $PREFIX: $MESSAGE"
+echo -e "${YELLOW}Subject:${NC} $PREFIX: $SUBJECT"
+echo -e "${YELLOW}Body:${NC} ${BODY_FILE:-(none)}"
 echo ""
-
-# Show changes
 echo -e "${YELLOW}Changes to be committed:${NC}"
 git status --short
 echo ""
 
-# Confirm
-read -p "Proceed? [y/N] " -n 1 -r
-echo ""
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Aborted."
-    exit 1
+if [[ $YES -eq 0 ]]; then
+    if [[ ! -t 0 ]]; then
+        echo -e "${RED}stdin is not a terminal; pass -y to commit without asking${NC}"
+        exit 2
+    fi
+    read -p "Proceed? [y/N] " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Aborted."
+        exit 1
+    fi
 fi
 
-# Bump version WITHOUT auto-commit
-echo ""
 echo -e "${GREEN}Bumping version...${NC}"
 bump-my-version bump "$BUMP" --no-commit --no-tag --allow-dirty
-
-# Get new version
-NEW_VERSION=$(grep -m1 'current_version' pyproject.toml | cut -d'"' -f2)
+NEW_VERSION=$(version)
 echo -e "${GREEN}New version:${NC} $NEW_VERSION"
 
-# Stage all changes (feature + version bump)
-echo ""
-echo -e "${GREEN}Staging all changes...${NC}"
 git add -A
 
-# Commit with proper message
-echo ""
-echo -e "${GREEN}Committing...${NC}"
-git commit -m "$PREFIX: $MESSAGE
-
-Version: $NEW_VERSION
-
-Co-Authored-By: Claude Connery <noreply@anthropic.com>"
-
-# Tag with version
-echo ""
-echo -e "${GREEN}Tagging v$NEW_VERSION...${NC}"
-git tag -a "v$NEW_VERSION" -m "v$NEW_VERSION - $MESSAGE"
+if [[ -n "$BODY_FILE" ]]; then
+    # git refuses -m with -F, so the subject and body go in one message file
+    MSG_FILE=$(mktemp)
+    trap 'rm -f "$MSG_FILE"' EXIT
+    { printf '%s: %s\n\n' "$PREFIX" "$SUBJECT"; cat "$BODY_FILE"; } > "$MSG_FILE"
+    git commit -F "$MSG_FILE"
+else
+    git commit -m "$PREFIX: $SUBJECT"
+fi
 
 echo ""
-echo -e "${GREEN}Done!${NC}"
-echo ""
-echo "To push: git push && git push --tags"
+echo -e "${GREEN}Committed $PREFIX: $SUBJECT ($CURRENT_VERSION -> $NEW_VERSION)${NC}"
+echo "Next: git push, then just release once ci is green"

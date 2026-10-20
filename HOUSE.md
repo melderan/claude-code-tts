@@ -172,7 +172,7 @@ hooks/
   prompt-submitted.sh      # UserPromptSubmit -> claude-tts supersede --from-hook (silent, never blocks)
 commands/tts-*.md          # Slash command definitions (call claude-tts CLI)
 scripts/
-  commit-feature.sh        # Commit helper (version bump + feature in one)
+  commit-feature.sh        # Commit helper: version bump + change in one commit, -F body, no tag
   check-version.sh         # Version consistency checker
   up.py                    # `just up`: rebuild, install, restart, verify, log to .logs/just/
   gate.py                  # `just gate` and the git hooks: lint, mypy, ty, version, tests [, build]
@@ -236,22 +236,17 @@ claude-tts status                    # Quick status: mute, pause, daemon, heartb
 | `test:` | PATCH | 5.8.0 → 5.8.1 |
 | BREAKING CHANGE | MAJOR | 5.8.0 → 6.0.0 |
 
-Use the helper script for features/fixes:
+Use the helper script. It bumps, stages everything (`git add -A`) and commits in one go. It does not tag:
+`just release` makes the signed tag.
 ```bash
-# For new features (bumps minor)
+# New feature (bumps minor)
 ./scripts/commit-feature.sh feat "add pause/resume toggle"
 
-# For bug fixes (bumps patch)
+# fix, docs, chore, refactor, perf, test (bump patch)
 ./scripts/commit-feature.sh fix "handle empty queue gracefully"
-```
 
-For other commit types (docs, chore, etc.):
-```bash
-# 1. Make your changes
-# 2. Bump version
-bump-my-version bump patch --no-commit --no-tag --allow-dirty
-# 3. Stage everything and commit
-git add -A && git commit -m "docs: update README"
+# The body (why, trailers) from a file; -y skips the prompt, required without a terminal
+./scripts/commit-feature.sh -y -F body.txt fix "handle empty queue gracefully"
 ```
 
 Then push: `git push`. To publish a release, `just release` (or `claude-tts release`): it runs the
