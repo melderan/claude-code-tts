@@ -32,6 +32,8 @@ _TRAILER = re.compile(r"^([A-Za-z][A-Za-z-]*): \S.*$")
 _VERSION_LINE = re.compile(r'^__version__ = "([^"]+)"', re.MULTILINE)
 
 CI_WORKFLOW = "ci.yml"
+# ci-wait matches the display name (`name:` in ci.yml, workflowName in gh run list), not the file
+CI_WORKFLOW_NAME = "ci"
 RELEASE_WAIT_S = 300
 POLL_S = 10
 
@@ -264,7 +266,7 @@ def wait_for_ci(slug: str, sha: str) -> str | None:
     exe = shutil.which("ci-wait")
     if not exe:
         return "ci-wait not installed; release without --wait-ci once ci is green"
-    rc = subprocess.run([exe, slug, sha, "-workflow", CI_WORKFLOW]).returncode
+    rc = subprocess.run([exe, slug, sha, "-workflow", CI_WORKFLOW_NAME]).returncode
     if rc == 0:
         return None
     reasons = {1: "ci failed", 124: "ci did not finish in time", 69: "GitHub kept erroring"}

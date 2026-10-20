@@ -263,8 +263,13 @@ class TestWaitCi:
              patch.object(rel, "run_gate", return_value=True) as gate:
             rel.main(["--check", "--wait-ci"])
         gate.assert_called_once()
-        assert log.read_text().split() == ["o/r", git(releasable, "rev-parse", "HEAD"), "-workflow", "ci.yml"]
+        assert log.read_text().split() == ["o/r", git(releasable, "rev-parse", "HEAD"), "-workflow", "ci"]
         assert len(reads) == 1
+
+    def test_the_name_given_to_ci_wait_is_the_workflow_name_in_ci_yml(self):
+        # ci-wait matches workflowName; with the file name it waits for a run that never appears
+        ci_yml = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml"
+        assert f"\nname: {rel.CI_WORKFLOW_NAME}\n" in ci_yml.read_text()
 
     @pytest.mark.parametrize(("rc", "words"), [(1, "ci failed"), (124, "in time"), (69, "kept erroring")])
     def test_a_wait_that_does_not_end_green_exits_before_the_gate(self, releasable, bin_dir, monkeypatch, capsys, rc, words):
