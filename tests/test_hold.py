@@ -249,6 +249,38 @@ class TestLoopLetsRoomsThrough:
                 p.stop()
         assert (state_dir / "daemon.log").read_text().count("Queue overflow, removed") == 5
 
+    def test_a_new_prompt_in_a_held_room_drops_its_older_reply_while_held(self, tmp_path):
+        """2026-10-20: under a bare hold 36 supersede controls waited, counted as waiting, never applied."""
+        import claude_code_tts.msgqueue as mq
+
+        loop_harness, stop_loop = _ledger_helpers()
+        state_dir, queue_dir, spoken, patches = loop_harness(tmp_path, {})
+        for p in patches:
+            p.start()
+        try:
+            st.write_playback_state(paused=False, paused_by=None, audio_pid=None, current_message=None)
+            hold([])
+
+            def run():
+                d._shutdown_requested = False
+                d._daemon_mode = True
+                d.daemon_loop()
+
+            runner = threading.Thread(target=run, daemon=True)
+            runner.start()
+            assert _wait_for(lambda: (state_dir / "daemon.heartbeat").exists())
+            stale = _enqueue(queue_dir, "a's old reply", "alice--claude--a")
+            other = _enqueue(queue_dir, "c waits", "alice--claude--c")
+            time.sleep(0.01)
+            mq.write_supersede_message("alice--claude--a")
+            assert _wait_for(lambda: not stale.exists())
+            assert _wait_for(lambda: [f.name for f in queue_dir.glob("*.json")] == [other.name]), "the control is taken"
+            assert spoken == []
+        finally:
+            stop_loop(runner)
+            for p in reversed(patches):
+                p.stop()
+
     @pytest.mark.parametrize(
         "state, msg, trimmed",
         [

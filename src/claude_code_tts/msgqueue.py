@@ -342,7 +342,8 @@ class Supersedes:
         replies and intermediate narration alike. Only queue files are touched, so the
         message playing now (the loop is busy playing it and never calls this meanwhile)
         is never cut, and playback.json is untouched on purpose: a message interrupted by a
-        pause resumes after a new prompt, a design call left open. Never dropped: control
+        pause resumes after a new prompt, a design call left open; the same holds for one a
+        hold put back in the queue (requeued). Never dropped: control
         messages, bridge messages (any source), and a message with no session or no
         usable time. The control itself never speaks. A cutoff ages like the messages it
         guards: paused time in ledger does not count toward keep_s.
@@ -361,7 +362,7 @@ class Supersedes:
         for m in messages:
             if is_supersede(m):
                 continue
-            cutoff = None if m.get("type") == "control" or m.get("source") else self.cutoff_for(m)
+            cutoff = None if m.get("type") == "control" or m.get("source") or m.get("requeued") else self.cutoff_for(m)
             when = _spoken_since(m)
             if cutoff is None or when is None or when >= cutoff[0]:
                 kept.append(m)

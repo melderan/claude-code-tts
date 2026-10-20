@@ -2045,7 +2045,10 @@ def daemon_loop(lockpick: bool = False) -> None:
                     )
                     set_paused(False)
                     continue
-                scanned = drop_all_requested(get_queue_messages())
+                # Supersedes act on the whole held queue: a new prompt in a held room makes its
+                # older replies as stale as in any other, and its control would otherwise wait,
+                # counted as waiting, until the release (36 of 56 on 2026-10-20).
+                scanned = drop_superseded(drop_all_requested(get_queue_messages()), supersedes, ledger)
                 allowed = [m for m in scanned if _may_play(state, m)]
                 enforce_max_depth(config["max_depth"], None, [m for m in scanned if _trimmed_while_held(state, m)])
                 # A message cut off on deck that the hold lets play (a click a recording paused,
@@ -2056,7 +2059,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                     time.sleep(poll_interval)
                     continue
                 letting_through = True
-                queued = drop_superseded(allowed, supersedes, ledger)
+                queued = allowed
             else:
                 if was_paused:
                     log(f"Resumed with {len(get_queue_messages())} message(s) waiting")

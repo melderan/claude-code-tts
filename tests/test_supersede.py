@@ -64,6 +64,15 @@ class TestSupersedeRule:
         monkeypatch.setattr(mq, "QUEUE_DIR", tmp_path / "queue")
         self.queue_dir = tmp_path / "queue"
 
+    def test_a_message_a_hold_put_back_resumes_like_one_on_deck(self):
+        """A half-played message requeued by a hold survives a new prompt, as it would on deck."""
+        put_back = _reply("half played when the hold came", requeued=True)
+        stale = _reply("an older reply")
+        _supersede()
+        kept = mq.supersede(mq.scan())
+        assert [m["text"] for m in kept] == ["half played when the hold came"]
+        assert put_back.exists() and not stale.exists()
+
     def test_older_reply_and_narration_of_the_room_are_dropped(self):
         reply = _reply("reply of the last turn")
         narration = _reply("narration between tools")
