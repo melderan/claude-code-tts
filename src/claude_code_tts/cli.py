@@ -422,6 +422,7 @@ def cmd_name(args: argparse.Namespace) -> None:
     key, so a rebuilt session inherits it the way it inherits its persona, and the voice card
     carries it. This prints which rule matched and every rule that was skipped and why.
     """
+    from claude_code_tts.filter import pronounce
     from claude_code_tts.speakerline import speak_line
 
     sid = get_session_id(for_write=True)
@@ -444,6 +445,9 @@ def cmd_name(args: argparse.Namespace) -> None:
     for why in spoken.skipped:
         print(f"Skipped:  {why}")
     print(f"Says:     {spoken.line}")
+    said = pronounce(spoken.line, load_raw_config().get("pronounce"))
+    if said != spoken.line:
+        print(f"Said as:  {said} (claude-tts pronounce)")
     transition = load_raw_config().get("queue", {}).get("speaker_transition", "chime")
     if transition not in ("announce", "chime+announce"):
         print(f"Heard:    not yet; queue.speaker_transition is {transition!r}, set it to \"chime+announce\" to hear it")

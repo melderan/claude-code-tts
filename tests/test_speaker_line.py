@@ -211,6 +211,22 @@ class TestNameCommand:
         assert "Skipped:  #0: match does not compile" in out
         assert "Rule:     (none matched" in out and f"Says:     {room} says:" in out
 
+    def test_shows_the_line_as_the_pronounce_map_says_it(self, room, tmp_path, capsys):
+        import argparse
+
+        cfg = '{"speaker_lines": ["rooms"], "pronounce": {"tts": "tee tee ess"}}'
+        (tmp_path / "config.json").write_text(cfg)
+        cmd_name(argparse.Namespace(name="Connery"))
+        out = capsys.readouterr().out
+        assert "Says:     Connery of House claude, in room tts" in out
+        assert "Said as:  Connery of House claude, in room tee tee ess" in out
+
+    def test_no_said_as_line_when_the_map_changes_nothing(self, room, capsys):
+        import argparse
+
+        cmd_name(argparse.Namespace(name="Connery"))
+        assert "Said as:" not in capsys.readouterr().out
+
     def test_says_when_the_transition_will_not_speak_it(self, room, tmp_path, capsys):
         import argparse
 
