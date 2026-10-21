@@ -209,13 +209,14 @@ class TestLoopLetsRoomsThrough:
 
             release()
             assert _wait_for(lambda: "a waits" in spoken)
+            # spoken is synthesis: the prefetch can make "a waits" while "b waits..." still
+            # plays, a pass before the one that logs the resume (CI macOS 3.12, 2026-10-21).
+            assert _wait_for(lambda: "Resumed with" in (state_dir / "daemon.log").read_text())
         finally:
             stop_loop(runner)
             for p in reversed(patches):
                 p.stop()
-        log = (state_dir / "daemon.log").read_text()
-        assert "letting b through" in log
-        assert "Resumed with" in log
+        assert "letting b through" in (state_dir / "daemon.log").read_text()
 
     def test_a_hold_keeps_the_newest_max_depth_of_what_it_holds(self, tmp_path):
         """2026-10-19: a four-hour focus held 731 messages under max_depth 20; the count only grew."""
