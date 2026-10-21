@@ -452,6 +452,52 @@ def cmd_name(args: argparse.Namespace) -> None:
         print("Usage: /tts-name <name|reset>")
 
 
+def cmd_pronounce(args: argparse.Namespace) -> None:
+    """Show or set how a word is said: the config's `pronounce` map, for every voice and session.
+
+    The daemon replaces each listed word, whole and in any case, before any engine sees the
+    text (filter.pronounce), so a coined name like "kubectl" is said "cube control" in
+    replies and in speaker lines alike. Read at each synthesis: no restart.
+    """
+    from claude_code_tts.filter import pronounce
+
+    config = load_raw_config()
+    stored = config.get("pronounce")
+    table: dict[str, str] = stored if isinstance(stored, dict) else {}
+    word = (args.word or "").strip()
+    if args.remove:
+        if not word:
+            print("Name the word to remove: claude-tts pronounce WORD --remove")
+            sys.exit(2)
+        match = next((k for k in table if k.lower() == word.lower()), None)
+        if match is None:
+            print(f"No pronunciation for {word!r}")
+            sys.exit(1)
+        del table[match]
+        config["pronounce"] = table
+        save_raw_config(config)
+        print(f"Removed: {match}")
+    elif word and args.said is not None:
+        said = args.said.strip()
+        if not said or len(said) > 200 or any(c.isspace() for c in word):
+            print("A word is one token with no spaces; how it is said is 1 to 200 characters")
+            sys.exit(2)
+        for k in [k for k in table if k.lower() == word.lower()]:
+            del table[k]
+        table[word] = said
+        config["pronounce"] = table
+        save_raw_config(config)
+        print(f"Set: {word} -> {said}")
+    elif word:
+        print(f"{word} is said: {pronounce(word, table)}")
+        return
+    if not table:
+        print("No pronunciations. Add one: claude-tts pronounce WORD 'how it is said'")
+        return
+    for k in sorted(table, key=str.lower):
+        print(f"{k:<24} {table[k]}")
+
+
 def cmd_persona(args: argparse.Namespace) -> None:
     """Show or set voice persona."""
     sid = get_session_id(for_write=True)
@@ -4365,6 +4411,13 @@ def main(argv: list[str] | None = None) -> None:
     p = subparsers.add_parser("name", help="Show or set the name this session says for itself on a speaker change")
     p.add_argument("name", nargs="?", help="The name, or 'reset' to say Friend again")
     p.set_defaults(func=cmd_name)
+
+    # --- pronounce ---
+    p = subparsers.add_parser("pronounce", help="Show or set how a word is said, for every voice (config key pronounce)")
+    p.add_argument("word", nargs="?", help="The word as it is written; with no SAID, shows how it is said")
+    p.add_argument("said", nargs="?", help="How it is said, e.g. relocatable")
+    p.add_argument("--remove", action="store_true", help="Remove WORD from the list")
+    p.set_defaults(func=cmd_pronounce)
 
     # --- persona ---
     p = subparsers.add_parser(

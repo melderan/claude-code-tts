@@ -1,7 +1,7 @@
 """A session introduces itself when it takes the floor: the boop, then a line in its own voice.
 
 The line comes from the config's `speaker_lines` rules (speakerline.py); the shipped "rooms" set
-says "<name> of house <house> in room <room>" for owner--house--room ids, "Friend" until named.
+says "<name> of House <house>, in room <room>" for owner--house--room ids, "Friend" until named.
 With no rule matching, "<name or project> says:". The name is a session key set with
 `claude-tts name`.
 """
@@ -42,16 +42,16 @@ def rooms(msg: dict) -> str:
 class TestTheRoomsRuleSet:
     def test_a_named_room_says_name_house_and_room(self):
         msg = {"session_id": "alice--claude--claude-code-tts", "name": "Connery", "project": "tts"}
-        assert rooms(msg) == "Connery of house claude in room tts"
+        assert rooms(msg) == "Connery of House claude, in room tts"
 
     def test_an_unnamed_room_is_a_friend(self):
-        assert rooms({"session_id": "alice--claude--k8s", "project": "k8s"}) == "Friend of house claude in room k8s"
+        assert rooms({"session_id": "alice--claude--k8s", "project": "k8s"}) == "Friend of House claude, in room k8s"
 
     def test_a_room_with_no_house_names_the_room_only(self):
-        assert rooms({"session_id": "two--notes", "name": "Lyra"}) == "Lyra in room notes"
+        assert rooms({"session_id": "two--notes", "name": "Lyra"}) == "Lyra, in room notes"
 
     def test_more_segments_take_the_last_two_as_house_and_room(self):
-        assert rooms({"session_id": "owner--a--b--c", "name": "Z"}) == "Z of house b in room c"
+        assert rooms({"session_id": "owner--a--b--c", "name": "Z"}) == "Z of House b, in room c"
 
     def test_a_plain_session_keeps_project_says(self):
         assert rooms({"session_id": "-Users-x-proj", "project": "proj"}) == "proj says:"
@@ -72,7 +72,7 @@ class TestTheRoomsRuleSet:
         assert rooms({"session_id": "x--y", "source": "s", "project": "s:L"}) != "L says:"
 
     def test_blank_name_is_no_name(self):
-        assert rooms({"session_id": "a--h--r", "name": "   "}) == "Friend of house h in room r"
+        assert rooms({"session_id": "a--h--r", "name": "   "}) == "Friend of House h, in room r"
 
 
 class TestRules:
@@ -120,7 +120,7 @@ class TestRules:
         msg = {"session_id": "a--h--r", "name": "N", "project": "r"}
         assert d.speaker_line(msg) == "N says:"
         (tmp_path / "config.json").write_text('{"speaker_lines": ["rooms"]}')
-        assert d.speaker_line(msg) == "N of house h in room r"
+        assert d.speaker_line(msg) == "N of House h, in room r"
 
 
 @pytest.fixture
@@ -143,7 +143,7 @@ def transition(tmp_path, monkeypatch):
 
 
 class TestSpeakerTransition:
-    WHO = "Connery of house claude in room tts"
+    WHO = "Connery of House claude, in room tts"
 
     def run(self, mode, who=WHO):
         d.speaker_transition(mode, "a", "b", "tts", "claude-connery", 1.8, "playback", who=who)
@@ -188,7 +188,7 @@ class TestNameCommand:
         cmd_name(argparse.Namespace(name="Connery"))
         out = capsys.readouterr().out
         assert "Name set: Connery" in out
-        assert "Says:     Connery of house claude in room tts" in out
+        assert "Says:     Connery of House claude, in room tts" in out
         assert config.session_read(room)["name"] == "Connery"
 
         cmd_name(argparse.Namespace(name=None))
@@ -200,7 +200,7 @@ class TestNameCommand:
         cmd_name(argparse.Namespace(name="reset"))
         assert config.session_read(room)["name"] == ""
         out = capsys.readouterr().out
-        assert "Name cleared" in out and "Says:     Friend of house claude in room tts" in out
+        assert "Name cleared" in out and "Says:     Friend of House claude, in room tts" in out
 
     def test_shows_a_skipped_rule_and_the_plain_line(self, room, tmp_path, capsys):
         import argparse

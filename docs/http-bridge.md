@@ -87,7 +87,7 @@ separate "daemon down" answer because the bridge lives inside the daemon.
   hooks, say). `session` is the room's id, `owner--house--room` in letters, digits, `_` and
   single dashes (anything else: `400`); the message takes that room's place, so the announcement
   comes from the config's `speaker_lines` rules for that id (docs/speaker-lines.md; with the
-  `rooms` set, "<name> of house <house> in room <room>") and `claude-tts hold --let <room>` lets
+  `rooms` set, "<name> of House <house>, in room <room>") and `claude-tts hold --let <room>` lets
   it through. `name` is 64 characters at most. `source` still keys `/jobs`
   and `/stop`.
 - `want_marks` asks for timing. Costs one synthesis per sentence instead of one per block.

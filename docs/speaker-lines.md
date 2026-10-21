@@ -28,14 +28,19 @@ values the rule pulled out, and every rule it skipped with the reason.
 
 A plain string in the list names a set shipped with claude-tts, expanded in place:
 
-- `"rooms"`: ids shaped `owner--house--room` say "<name> of house <house> in room <room>";
-  `house--room` says "<name> in room <room>". A `claude-code-` prefix on the room is not spoken,
+- `"rooms"`: ids shaped `owner--house--room` say "<name> of House <house>, in room <room>";
+  `house--room` says "<name>, in room <room>" (the comma is a pause, 9.65.0). A `claude-code-` prefix on the room is not spoken,
   and "Friend" stands in until the session has a name. With more than three parts, the last two
   are the house and the room.
 
 ```json
 "speaker_lines": [{"match": "ops--.*", "say": "{name}, on call"}, "rooms"]
 ```
+
+A room or a name an engine says wrong ("k8s" read letter by letter) is fixed once for every
+voice and every line, replies included: `claude-tts pronounce k8s kubernetes` writes
+`"pronounce": {"k8s": "kubernetes"}` to config.json. A word matches whole and in any case,
+the daemon reads the map at each synthesis, and `claude-tts pronounce` lists it (9.65.0).
 
 Rules are tried in order and the first match wins, so put your own rules before a shipped set to
 override it for the ids they match.

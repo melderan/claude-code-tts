@@ -34,12 +34,12 @@ PRESETS: dict[str, list[dict]] = {
     "rooms": [
         {
             "match": rf"[A-Za-z0-9_][A-Za-z0-9_-]*?--(?P<house>{_WORD})--(?:claude-code-)?(?P<room>{_WORD})",
-            "say": "{name} of house {house} in room {room}",
+            "say": "{name} of House {house}, in room {room}",
             "default_name": "Friend",
         },
         {
             "match": rf"{_WORD}--(?:claude-code-)?(?P<room>{_WORD})",
-            "say": "{name} in room {room}",
+            "say": "{name}, in room {room}",
             "default_name": "Friend",
         },
     ],

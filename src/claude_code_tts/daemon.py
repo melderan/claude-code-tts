@@ -53,6 +53,7 @@ from claude_code_tts.config import (
     VOICES_DIR,
     load_raw_config,
 )
+from claude_code_tts.filter import pronounce
 from claude_code_tts.handy import AnalyzerThread, save_speech_wav
 from claude_code_tts.level import normalize as normalize_level
 from claude_code_tts.mic_watcher import MicWatcher
@@ -663,6 +664,9 @@ def _generate_speech_unleveled(
     # Clean punctuation clusters that make Piper produce noise artifacts.
     # Applied here so ALL text hitting Piper is safe, regardless of source.
     text = re.sub(r"([.!?])[)\]}>\"']+", r"\1", text)
+    # The config's own words for names an engine says wrong; here so replies, speaker lines
+    # and announcements all say them the same way.
+    text = pronounce(text, load_raw_config().get("pronounce"))
 
     persona_config = get_persona_config(persona)
 

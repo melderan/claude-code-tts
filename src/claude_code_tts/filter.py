@@ -628,3 +628,21 @@ def read_and_filter(path: str | Path) -> str:
 
     content = path.read_text(encoding="utf-8", errors="replace")
     return filter_document(content)
+
+
+def pronounce(text: str, table: object) -> str:
+    """`text` with each word in `table` replaced by how it should be said.
+
+    `table` is the config's `pronounce` map, word to spoken form ({"kubectl": "cube control"}):
+    a coined name an engine spells out or reads by its letters. A word matches whole and in any
+    case, so "kube" never touches "kubectl" and both are said right in "kube-proxy, kubectl.";
+    the longest word is tried first. Anything that is not a map of strings changes nothing.
+    """
+    if not isinstance(table, dict):
+        return text
+    said = {str(k).lower(): v for k, v in table.items() if isinstance(k, str) and k.strip() and isinstance(v, str)}
+    if not said:
+        return text
+    words = "|".join(re.escape(w) for w in sorted(said, key=len, reverse=True))
+    pattern = re.compile(rf"(?<![A-Za-z0-9])(?:{words})(?![A-Za-z0-9])", re.IGNORECASE)
+    return pattern.sub(lambda m: said[m.group(0).lower()], text)

@@ -244,7 +244,7 @@ def write_bridge_message(
     session_id is "browser" and project is "<source>:<label>", so the daemon's
     speaker-transition chime fires when a room and the page interleave. A client that
     speaks for a room gives `session` (owner--house--room) and `name`: the message then
-    takes that room's place, so it says "<name> of house <house> in room <room>" and a
+    takes that room's place, so it says "<name> of House <house>, in room <room>" and a
     hold's --let names it like any room. lane "background" lets every other message go
     first, and lane "now" goes before everything (see msgqueue.play_order); the caller
     tells the daemon a now block is waiting.
