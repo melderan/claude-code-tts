@@ -191,7 +191,7 @@ class TestLoopLetsRoomsThrough:
             runner = threading.Thread(target=run, daemon=True)
             runner.start()
             assert _wait_for(lambda: (state_dir / "daemon.heartbeat").exists()), "loop never reached its idle pass"
-            time.sleep(0.1)
+            assert loop_passes.wait_passes(2), "the loop stopped passing"
 
             hold(["b"])
             _enqueue(queue_dir, "a waits", "alice--claude--a")
