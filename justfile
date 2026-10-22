@@ -35,6 +35,10 @@ PY := "3.12"
 test:
     uv run --python {{PY}} --with pytest pytest -q --ignore=tests/docker
 
+# Some tests, one line back: `just t tests/test_x.py -k name` prints failures, the summary, rc and the log path
+t *ARGS:
+    @scripts/test-files.sh "$@"
+
 # Coverage report
 cov:
     uv run --with pytest --with pytest-cov pytest -q --ignore=tests/docker --cov=claude_code_tts --cov-report=term-missing
