@@ -18,6 +18,7 @@ check: lint typecheck
 
 lint:
     uv tool run ruff check src tests scripts
+    scripts/sleep-race-check.py
 
 fmt:
     uv tool run ruff check --fix src tests scripts

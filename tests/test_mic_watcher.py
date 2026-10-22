@@ -33,6 +33,15 @@ def _logged(w: MicWatcher, words: str) -> bool:
     return any(words in str(c) for c in w._log.call_args_list)  # type: ignore[attr-defined]
 
 
+def _polled_twice(w: MicWatcher) -> bool:
+    """True once two looks at the recordings dir began after the call: the first finished."""
+    since = time.monotonic()
+    if not _wait_for(lambda: w._last_dir_check > since):  # type: ignore[attr-defined]
+        return False
+    first = w._last_dir_check  # type: ignore[attr-defined]
+    return _wait_for(lambda: w._last_dir_check > first)  # type: ignore[attr-defined]
+
+
 def _start_tailing(w: MicWatcher) -> None:
     """Start the watcher and wait until it has seeked to the log's end; a line written before is skipped."""
     w.start()
@@ -860,7 +869,7 @@ class TestSavedRecordingEndsTheHold:
         try:
             self._start_recording(w, log_file)
             (rec / f"handy-{int(time.time()) - 7}.wav").write_bytes(b"RIFF")
-            time.sleep(0.3)
+            assert _polled_twice(w), "the watcher stopped looking at the recordings"
             assert state == {"paused": True, "paused_by": "mic"} and w.recording
         finally:
             w.stop()
@@ -891,9 +900,11 @@ class TestSavedRecordingEndsTheHold:
             self._start_recording(w, log_file)
             assert w.recording_saved(time.time()) is True
             state.update(paused=True, paused_by="user")  # the person paused by hand meanwhile
+            read = w.lines_read
             with open(log_file, "a") as f:
-                f.write("[DEBUG] TranscribeAction::stop called for binding: transcribe\n")
-            time.sleep(0.3)
+                # The blank line after the stop line: once it is read, the stop line was handled.
+                f.write("[DEBUG] TranscribeAction::stop called for binding: transcribe\n\n")
+            assert _wait_for(lambda: w.lines_read >= read + 2), "the watcher never read the stop line"
             assert state == {"paused": True, "paused_by": "user"}, "a stale stop line must not lift a hand pause"
         finally:
             w.stop()
@@ -905,7 +916,7 @@ class TestSavedRecordingEndsTheHold:
         try:
             self._start_recording(w, log_file)
             assert state == {"paused": True, "paused_by": "mic"}
-            time.sleep(0.2)
+            time.sleep(0.2)  # sleep-ok: SAVED_RECORDING_POLL_S must pass before a direct poll looks
             assert w._poll_saved_recording() is False
         finally:
             w.stop()

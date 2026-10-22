@@ -234,7 +234,7 @@ class TestJsonLineWorkerProtocol:
         assert len(w.starts) == 1
         assert any("not trying again" in str(c) for c in dbg.call_args_list)
         assert any("Traceback: no such model" in str(c) for c in dbg.call_args_list)  # stderr tail in the log line
-        time.sleep(0.35)
+        time.sleep(0.35)  # sleep-ok: the 0.3 s start backoff must pass on the clock
         assert w.request({"text": "x", "output": "o"}) is None
         assert len(w.starts) == 2
 

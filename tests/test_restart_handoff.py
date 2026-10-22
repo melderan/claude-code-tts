@@ -25,6 +25,7 @@ from unittest.mock import patch
 
 import claude_code_tts.daemon as daemon_mod
 import tests.test_daemon_integration as _integ
+from tests import loop_passes
 
 daemon_env = _integ.daemon_env  # the shared fixture, registered under its own name in this module
 make_fake_player, make_wav, read_playback_state = _integ.make_fake_player, _integ.make_wav, _integ.read_playback_state
@@ -146,8 +147,9 @@ class TestStartupHandoff:
 
             _run_loop(daemon_env, fake_generate, play_duration=0.2, stop_when=lambda: bool(spoken))
             assert spoken == ["the message the old daemon was cut off in"]  # resumed, not dropped
-            time.sleep(0.2)
-            assert not _alive(orphan.pid) or orphan.poll() is not None, "the orphaned player kept talking"
+            assert loop_passes.wait_for(lambda: not _alive(orphan.pid) or orphan.poll() is not None), (
+                "the orphaned player kept talking"
+            )
             log_text = daemon_env["log_file"].read_text()
             assert "Killed the previous daemon's player" in log_text
             assert "Resuming the message the previous daemon stopped in" in log_text

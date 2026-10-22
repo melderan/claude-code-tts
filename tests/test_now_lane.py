@@ -23,6 +23,7 @@ import claude_code_tts.msgqueue as mq
 import claude_code_tts.state as st
 from claude_code_tts.bridge import JOBS, write_bridge_message
 from claude_code_tts.state import hold, may_play
+from tests import loop_passes
 
 
 def _m(ts: float, **extra: object) -> dict:
@@ -186,7 +187,7 @@ def test_a_click_plays_through_a_hold_set_before_it(tmp_path: Path) -> None:
         _enqueue_room(queue_dir, "a room waits", "alice--claude--a")
         _click("what JMO clicked")
         assert _wait_for(lambda: "what JMO clicked" in spoken)
-        time.sleep(0.3)
+        assert loop_passes.wait_passes(3), "the loop stopped passing"
         assert spoken == ["what JMO clicked"], "the room must wait for the hold"
         assert st.read_playback_state()["paused"] is True
     finally:
@@ -214,7 +215,7 @@ def test_the_hotkey_during_a_click_through_a_hold_stops_only_that_read(tmp_path:
         _pause_hotkey()
         assert _wait_for(lambda: JOBS.state(click["id"]) == "cancelled")
         assert _wait_for(lambda: not st.read_playback_state().get("current_message"))
-        time.sleep(0.4)
+        assert loop_passes.wait_passes(3), "the loop stopped passing"
         state = st.read_playback_state()
         assert state["paused"] is True and state["paused_by"] == "user", "the hold stays"
         assert "stop_read" not in state
@@ -242,7 +243,7 @@ def test_a_pause_during_a_click_stops_it_and_it_resumes_first(tmp_path: Path) ->
         st.set_paused(True)
         _enqueue_room(queue_dir, "a room waits", "alice--claude--a")
         assert _wait_for(lambda: st.read_playback_state().get("current_message", {}) and not st.read_playback_state().get("audio_pid"))
-        time.sleep(0.3)
+        assert loop_passes.wait_passes(3), "the loop stopped passing"
         assert len(playing.read_text().splitlines()) == 1, "the pause stopped the click"
         st.set_paused(False)
         assert _wait_for(lambda: spoken.count("what JMO clicked") == 2 and "a room waits" in spoken)
@@ -269,7 +270,7 @@ def test_a_drop_drops_the_message_a_click_cut_off(tmp_path: Path) -> None:
     try:
         mq.write_drop_all_message([str(m["id"]) for m in mq.scan() if m.get("type") != "control"])
         assert _wait_for(lambda: not st.read_playback_state().get("preempted_message"))
-        time.sleep(2.0)
+        assert loop_passes.wait_passes(3), "the loop stopped passing"
         assert spoken.count("a long room reply") == 1, f"a dropped message spoke again: {spoken}"
     finally:
         stop()
@@ -296,7 +297,7 @@ def test_a_stale_cut_off_message_is_cleared_at_start(tmp_path: Path) -> None:
         runner.start()
         try:
             assert _wait_for(lambda: (state_dir / "daemon.heartbeat").exists())
-            time.sleep(0.3)
+            assert loop_passes.wait_passes(3), "the loop stopped passing"
             assert spoken == []
             assert not st.read_playback_state().get("preempted_message")
         finally:

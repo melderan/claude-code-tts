@@ -18,6 +18,7 @@ import claude_code_tts.daemon as d
 import claude_code_tts.state as st
 from claude_code_tts.bridge import JOBS
 from claude_code_tts.state import hold
+from tests import loop_passes
 from tests import test_now_lane as nl
 
 
@@ -48,7 +49,7 @@ def test_a_press_during_the_clicks_synthesis_keeps_the_hold(tmp_path: Path, unit
         state = st.read_playback_state()
         assert state.get("paused") is True, f"the press released every room: {state}"
         assert nl._wait_for(lambda: JOBS.state(click["id"]) == "cancelled")
-        time.sleep(0.3)
+        assert loop_passes.wait_passes(3), "the loop stopped passing"
         assert "a room waits" not in spoken
     finally:
         p.stop()
@@ -79,7 +80,7 @@ def test_a_press_the_moment_the_click_starts_synthesizing_keeps_the_hold(tmp_pat
         assert nl._wait_for(lambda: JOBS.state(click["id"]) == "cancelled")
         state = st.read_playback_state()
         assert state.get("paused") is True, f"the press released every room: {state}"
-        time.sleep(0.3)
+        assert loop_passes.wait_passes(3), "the loop stopped passing"
         assert "a room waits" not in spoken
     finally:
         p.stop()
@@ -141,7 +142,7 @@ def test_a_stop_for_the_read_on_deck_at_start_drops_it(tmp_path: Path) -> None:
         runner.start()
         try:
             assert nl._wait_for(lambda: (state_dir / "daemon.heartbeat").exists())
-            time.sleep(0.3)
+            assert loop_passes.wait_passes(3), "the loop stopped passing"
             assert spoken == []
             state = st.read_playback_state()
             assert not state.get("current_message") and "stop_read" not in state
@@ -184,7 +185,7 @@ def test_a_synthesis_that_raises_does_not_play_the_message_twice(tmp_path: Path)
     try:
         nl._enqueue_room(queue_dir, "one room reply", "alice--claude--a")
         assert nl._wait_for(lambda: plays.exists(), timeout=6)
-        time.sleep(2.5)
+        assert loop_passes.wait_passes(3), "the loop stopped passing"
         n = len(plays.read_text().splitlines())
         assert n == 1, f"played {n} times; synth calls {calls['n']}"
         assert not st.read_playback_state().get("current_message")
@@ -203,7 +204,7 @@ def test_a_held_room_on_deck_stays_held(tmp_path: Path) -> None:
             "id": "r1", "session_id": "bob--claude--b", "project": "b", "text": "held room",
             "audio_position": 0.5, "timestamp": time.time() - 5,
         })
-        time.sleep(1.0)
+        assert loop_passes.wait_passes(3), "the loop stopped passing"
         assert not plays.exists()
         assert st.read_playback_state().get("current_message", {}).get("id") == "r1"
     finally:
@@ -220,7 +221,7 @@ def test_a_let_through_room_on_deck_resumes_once_under_the_hold(tmp_path: Path) 
             "audio_position": 0.5, "timestamp": time.time() - 5,
         })
         assert nl._wait_for(lambda: plays.exists())
-        time.sleep(1.0)
+        assert loop_passes.wait_passes(3), "the loop stopped passing"
         assert len(plays.read_text().splitlines()) == 1
         assert st.read_playback_state()["paused"] is True
     finally:

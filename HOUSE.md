@@ -180,6 +180,7 @@ scripts/
   up.py                    # `just up`: rebuild, install, restart, verify, log to .logs/just/
   gate.py                  # `just gate` and the git hooks: lint, mypy, ty, version, tests [, build]
   test-audit.py            # `just test-audit`: per-test mutation audit, which tests would notice a change
+  sleep-race-check.py      # gate and `just lint`: a fixed sleep before an assert in a test; wait with tests/loop_passes.py
   voice-signatures.py      # `just voices-capture|spread|verify`: does the real speech path still sound the same
   build-check.sh           # `just build`: wheel + cold-install proof
   tts-builder.py           # Voice builder TUI (Textual, standalone)
@@ -271,7 +272,10 @@ pyproject reads it at build time (hatch dynamic version) and the installer impor
 check, tests, wheel build with a cold install. `just gate` runs the same through `scripts/gate.py` with
 real exit codes, and `just hooks` installs it as the pre-commit (fast) and pre-push (full) hook. Run
 `just hooks` once per clone. Never judge a check through a pipe (`pytest | tail`): the pipe's exit
-code wins and a failure disappears, which is how a flaky test once reached a signed commit. `just test-audit` answers a different question: which tests
+code wins and a failure disappears, which is how a flaky test once reached a signed commit. A test that sleeps a fixed time and then
+asserts what a thread did is a bet on the runner's load: `scripts/sleep-race-check.py` refuses it, and
+`tests/loop_passes.py` waits for the event or for passes of the daemon loop instead; a sleep that is
+a real deadline carries `# sleep-ok: <why>`. `just test-audit` answers a different question: which tests
 would notice a one-line change to the source. It mutates every covered line and runs each mutant
 against the tests that cover it; the tests that never kill anything are listed for a reader to
 judge (9.32.2 pruned 42 that re-implemented the logic they claimed to test). Voice signatures answer a third: does it still sound the

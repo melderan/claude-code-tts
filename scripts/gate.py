@@ -49,6 +49,8 @@ FAST: list[tuple[str, list[str]]] = [
     # public repo, in files, staged changes, unpushed commit messages or tag notes.
     ("private", ["scripts/private-check.py"]),
     ("lint", ["uv", "tool", "run", "ruff", "check", "src", "tests", "scripts"]),
+    # A fixed sleep before an assert bets on a thread's timing; macOS ci lost that bet (9.66.1).
+    ("sleep-race", ["scripts/sleep-race-check.py"]),
     ("mypy", ["uv", "tool", "run", "mypy", "src"]),
     ("ty", ["uv", "tool", "run", "ty", "check", "src"]),
     ("version", ["scripts/check-version.sh"]),

@@ -188,6 +188,9 @@ class MicWatcher:
         self._recordings_dir = recordings_dir
         self._files_at_start: set[str] = set()  # Handy's recordings when the hold began
         self._last_dir_check = 0.0
+        # Lines read from the log. Counted as each is read, so a count past line N says line N
+        # was handled; a stop line skipped for no open recording logs nothing else to wait on.
+        self.lines_read = 0
 
     @property
     def active(self) -> bool:
@@ -444,6 +447,7 @@ class MicWatcher:
                         self._stop_event.wait(0.05)
                         continue
 
+                    self.lines_read += 1
                     line = line.strip()
                     if not line:
                         continue

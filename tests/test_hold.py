@@ -15,6 +15,7 @@ import claude_code_tts.daemon as d
 import claude_code_tts.state as st
 from claude_code_tts.mic_watcher import MicWatcher
 from claude_code_tts.state import hold, let_rooms, lets_through, may_play, release, room_tag
+from tests import loop_passes
 from tests.test_mic_watcher import _logged, _start_tailing
 
 
@@ -196,12 +197,12 @@ class TestLoopLetsRoomsThrough:
             _enqueue(queue_dir, "a waits", "alice--claude--a")
             _enqueue(queue_dir, "b speaks", "alice--claude--b")
             assert _wait_for(lambda: "b speaks" in spoken)
-            time.sleep(0.3)
+            assert loop_passes.wait_passes(3), "the loop stopped passing"
             assert spoken == ["b speaks"], "a's message must wait while held"
 
             st.write_playback_state(mic_held=True)
             _enqueue(queue_dir, "b waits for the recording", "alice--claude--b")
-            time.sleep(0.4)
+            assert loop_passes.wait_passes(3), "the loop stopped passing"
             assert spoken == ["b speaks"], "a recording under the hold holds the let-through room too"
             st.write_playback_state(mic_held=False)
             assert _wait_for(lambda: "b waits for the recording" in spoken)
@@ -241,7 +242,7 @@ class TestLoopLetsRoomsThrough:
             _enqueue(queue_dir, "b speaks", "alice--claude--b")
             assert _wait_for(lambda: "b speaks" in spoken)
             assert _wait_for(lambda: len(list(queue_dir.glob("*.json"))) == 20)
-            time.sleep(0.2)
+            assert loop_passes.wait_passes(3), "the loop stopped passing"
             assert [f.exists() for f in held] == [False] * 5 + [True] * 20, "the oldest five go, the newest twenty wait"
             assert not any(t.startswith("a held") for t in spoken), "still held, nothing of a's played"
         finally:

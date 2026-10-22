@@ -18,6 +18,7 @@ from claude_code_tts.daemon import (
     read_playback_state,
     write_playback_state,
 )
+from tests import loop_passes
 
 
 class TestPauseLedger:
@@ -136,6 +137,7 @@ class TestLoopHoldsQueueWhilePaused:
         patches = [
             patch.object(st, "PLAYBACK_STATE_FILE", state_dir / "playback.json"),
             patch.object(st, "HEARTBEAT_FILE", state_dir / "daemon.heartbeat"),
+            patch.object(d, "write_heartbeat", new=loop_passes.counting(st.write_heartbeat)),
             patch.object(d, "LOG_FILE", state_dir / "daemon.log"),
             patch.object(mq, "QUEUE_DIR", queue_dir),
             patch.object(st, "PID_FILE", state_dir / "daemon.pid"),
@@ -165,6 +167,7 @@ class TestLoopHoldsQueueWhilePaused:
         ]
         for p in patches:
             p.start()
+        runner: threading.Thread | None = None
         try:
             # Paused 5 s ago (before this daemon started), message arrived 4 s ago: a
             # restart while paused must still hold it, so the pause time comes from
@@ -189,7 +192,8 @@ class TestLoopHoldsQueueWhilePaused:
 
             runner = threading.Thread(target=run, daemon=True)
             runner.start()
-            time.sleep(1.0)  # well past max_age while paused
+            time.sleep(1.0)  # sleep-ok: max_age (1 s) must pass on the clock while paused
+            assert loop_passes.wait_passes(3), "the loop stopped passing"
             assert msg.exists(), "paused queue must not expire"
             assert "holding the queue since the pause" in (state_dir / "daemon.log").read_text()
             write_playback_state(paused=False, paused_by=None)
@@ -197,10 +201,9 @@ class TestLoopHoldsQueueWhilePaused:
                 if spoken:
                     break
                 time.sleep(0.05)
-            d._shutdown_requested = True
-            runner.join(timeout=5)
         finally:
-            d._shutdown_requested = False
+            if runner is not None:
+                stop_loop(runner)
             for p in reversed(patches):
                 p.stop()
         assert spoken == ["waited through the meeting"]
@@ -249,6 +252,7 @@ def loop_harness(tmp_path, raw_config, player_marker=None):
     patches = [
         patch.object(st, "PLAYBACK_STATE_FILE", state_dir / "playback.json"),
         patch.object(st, "HEARTBEAT_FILE", state_dir / "daemon.heartbeat"),
+        patch.object(d, "write_heartbeat", new=loop_passes.counting(st.write_heartbeat)),
         patch.object(d, "LOG_FILE", state_dir / "daemon.log"),
         patch.object(mq, "QUEUE_DIR", queue_dir),
         patch.object(st, "PID_FILE", state_dir / "daemon.pid"),
@@ -334,7 +338,8 @@ class TestMicHoldLimit:
         return loop_harness(tmp_path, raw_config)
 
     def test_loop_releases_a_mic_hold_nobody_ends(self, tmp_path):
-        state_dir, queue_dir, spoken, patches = self._loop_harness(tmp_path, {"mic_pause_max_s": 0.3})
+        # The cap outlasts the passes the held check waits for, even on a starved loop (3 at 400 ms).
+        state_dir, queue_dir, spoken, patches = self._loop_harness(tmp_path, {"mic_pause_max_s": 1.5})
         for p in patches:
             p.start()
         try:
@@ -357,7 +362,7 @@ class TestMicHoldLimit:
             time.sleep(0.1)
             write_playback_state(paused=True, paused_by="mic")  # the watcher's hold, never released
             enqueue(queue_dir, "spoken once the hold expires", age_s=0)
-            time.sleep(0.2)
+            assert loop_passes.wait_passes(3), "the loop stopped passing"
             assert spoken == [], "held: the message must wait while the mic pause is fresh"
             for _ in range(100):
                 if spoken:
@@ -369,7 +374,7 @@ class TestMicHoldLimit:
                 p.stop()
         assert spoken == ["spoken once the hold expires"]
         log = (state_dir / "daemon.log").read_text()
-        assert "passed mic_pause_max_s=0" in log and "resuming" in log
+        assert "passed mic_pause_max_s=2" in log and "resuming" in log
         assert json.loads((state_dir / "playback.json").read_text())["paused"] is False
 
     def test_loop_says_still_paused_every_interval(self, tmp_path):
@@ -398,7 +403,8 @@ class TestMicHoldLimit:
             write_playback_state(paused=True, paused_by="user")
             time.sleep(0.05)
             enqueue(queue_dir, "waits through the hold", age_s=0)
-            time.sleep(0.45)
+            time.sleep(0.45)  # sleep-ok: two notice intervals (0.1 s) must pass on the clock
+            assert loop_passes.wait_passes(3), "the loop stopped passing"
             assert spoken == [], "held: nothing may play while paused"
             write_playback_state(paused=False, paused_by=None)
             for _ in range(100):
@@ -485,7 +491,8 @@ class TestPauseLandsWithTheMessage:
             runner = start_loop()
             wait_for_idle_pass(state_dir)
             armed["fire"] = True
-            time.sleep(0.3)
+            assert loop_passes.wait_for(lambda: not armed["fire"]), "the pass that pauses never ran"
+            assert loop_passes.wait_passes(3), "the loop stopped passing"
             assert spoken == [], "a message that arrives with the pause waits like any other"
             write_playback_state(paused=False, paused_by=None)
             for _ in range(100):
@@ -523,11 +530,11 @@ class TestPauseLandsWithTheMessage:
                     if spoken:
                         break
                     time.sleep(0.05)
-                time.sleep(0.3)
+                log_file = state_dir / "daemon.log"
+                assert loop_passes.wait_for(lambda: "Paused before playback" in log_file.read_text()), log_file.read_text()
+                assert loop_passes.wait_passes(3), "the loop stopped passing"
                 assert spoken == ["synthesized, then held"]
                 assert not played.exists(), "no audio may start once the pause has landed"
-                log = (state_dir / "daemon.log").read_text()
-                assert "Paused before playback" in log, log
                 write_playback_state(paused=False, paused_by=None)
                 for _ in range(100):
                     if played.exists():
