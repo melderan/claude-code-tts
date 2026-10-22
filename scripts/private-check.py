@@ -7,7 +7,9 @@ words that must never appear are themselves private, so each maintainer keeps th
 
   1. every tracked file, plus staged changes, is searched for the patterns;
   2. the messages of commits not yet on any remote are searched too, since a commit body becomes
-     public on push and a release tag copies it into the release notes;
+     public on push and a release tag copies it into the release notes, and so is every line
+     those commits add, since a file one commit adds and a later one removes is gone from the
+     tree yet published by the push;
   3. annotated tags pointing at those commits are searched the same way.
 
 Any hit fails the gate with file:line (or the commit) and the matching pattern. With no word list
@@ -64,7 +66,10 @@ class Allow:
         self.used = 0
 
     def covers(self, where: str, pattern: str) -> bool:
-        return fnmatch.fnmatchcase(where, self.where) and self.pattern in ("*", pattern)
+        # a line a commit adds ("commit <sha> <path>") is covered by an approval of its path too
+        kind, _, rest = where.partition(" ")
+        places = [where, rest.partition(" ")[2]] if kind == "commit" and " " in rest else [where]
+        return any(fnmatch.fnmatchcase(p, self.where) for p in places) and self.pattern in ("*", pattern)
 
 
 def synced_block_age(words_text: str, today: dt.date | None = None) -> int | None:
@@ -161,8 +166,38 @@ def scan_files(repo: Path, patterns: list[re.Pattern[str]]) -> list[str]:
     return hits
 
 
+def scan_added_lines(repo: Path, sha: str, patterns: list[re.Pattern[str]]) -> list[str]:
+    """Lines a commit adds, as "commit <sha> <path>:<line>" hits.
+
+    The tree scan sees only the tip: a file one unpushed commit adds and a later one removes
+    is gone from the tree, yet the push publishes it (proved by a planted name, 2026-10-22).
+    A line the tip still carries at that path is left to the tree scan, so one lapse counts once.
+    """
+    patch = _git(repo, "show", "--format=", "-p", "-U0", "--no-color", "--no-ext-diff", "--first-parent", sha)
+    hits: list[str] = []
+    path, line_no = "", 0
+    tip: set[str] = set()
+    for line in patch.splitlines():
+        if line.startswith("+++ "):
+            path = line[6:] if line.startswith("+++ b/") else ""
+            try:
+                tip = set((repo / path).read_text(encoding="utf-8").splitlines()) if path else set()
+            except (UnicodeDecodeError, OSError):
+                tip = set()
+        elif line.startswith("@@"):
+            m = re.search(r"\+(\d+)", line)
+            line_no = int(m.group(1)) if m else 0
+        elif line.startswith("+") and path and path not in (WORDS_FILE, ALLOW_FILE) and line[1:] not in tip:
+            for p in patterns:
+                if p.search(line[1:]):
+                    hits.append(f"commit {sha[:7]} {path}:{line_no}: matches /{p.pattern}/")
+                    break
+            line_no += 1
+    return hits
+
+
 def scan_unpushed(repo: Path, patterns: list[re.Pattern[str]]) -> list[str]:
-    """Messages of commits on no remote branch, and of annotated tags on those commits."""
+    """Commits on no remote branch (message and every line added), and annotated tags on them."""
     hits: list[str] = []
     log = _git(repo, "log", "--branches", "--not", "--remotes", "--format=%H%x00%B%x01")
     shas: list[str] = []
@@ -172,6 +207,7 @@ def scan_unpushed(repo: Path, patterns: list[re.Pattern[str]]) -> list[str]:
             continue
         shas.append(sha.strip())
         hits += scan_text(body, patterns, f"commit {sha[:7]}")
+        hits += scan_added_lines(repo, sha.strip(), patterns)
     # `git tag --format` takes for-each-ref atoms only (no %x00), so split on spaces.
     for tag in _git(
         repo, "tag", "-l", "--format=%(refname:short) %(*objectname) %(objectname)"

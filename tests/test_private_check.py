@@ -100,6 +100,29 @@ class TestMessages:
         assert pc.main(["--repo", str(path), "--words", str(words)]) == 1
         assert "tag v0.1.0" in capsys.readouterr().err
 
+    def test_file_added_then_removed_before_the_push_is_caught(self, repo, capsys):
+        path, words = repo
+        (path / "notes.md").write_text("fine\nsee secret-host\n")
+        git(path, "add", "notes.md")
+        git(path, "commit", "-q", "-m", "docs: add notes")
+        git(path, "rm", "-q", "notes.md")
+        git(path, "commit", "-q", "-m", "docs: tidy")
+        assert pc.main(["--repo", str(path), "--words", str(words)]) == 1
+        err = capsys.readouterr().err
+        assert re.search(r"commit [0-9a-f]{7} notes\.md:2: matches /secret-host/", err), err
+
+    def test_removed_lines_are_not_hits(self, repo):
+        path, words = repo
+        (path / "README.md").write_text("see secret-host\n")
+        git(path, "commit", "-q", "-am", "docs: oops")
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=path, capture_output=True, text=True
+        ).stdout.strip()
+        git(path, "update-ref", "refs/remotes/origin/main", sha)
+        (path / "README.md").write_text("A public file.\n")
+        git(path, "commit", "-q", "-am", "docs: drop the name")
+        assert pc.main(["--repo", str(path), "--words", str(words)]) == 0
+
     def test_pushed_commits_are_not_rescanned(self, repo):
         path, words = repo
         git(path, "commit", "-q", "--allow-empty", "-m", "chore: mentions secret-host")

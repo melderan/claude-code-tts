@@ -35,7 +35,7 @@ This is a public open-source repo. Do not commit:
 When in doubt, ask your friend before commit. A little pre-work goes a long way.
 
 The gate enforces this before every commit and push: `scripts/private-check.py` scans tracked files,
-staged changes, unpushed commit messages and their tag notes against `.private-words`, a gitignored
+staged changes, unpushed commit messages, the lines those commits add, and their tag notes against `.private-words`, a gitignored
 list of patterns (logins, hostnames, home paths, private tool and repo names) that each maintainer
 keeps in their own checkout. Without the file the step says it is skipped, loudly. A hit that is known and accepted
 (the product name in the kit's tests, a path in a commit that history keeps) is written to `.private-allow`, also
