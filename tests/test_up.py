@@ -121,6 +121,46 @@ def test_a_released_build_writes_the_ledger_row(tmp_path: Path, monkeypatch: pyt
     assert announced == ["9.30.0"]
 
 
+@pytest.mark.parametrize(
+    ("argv", "config", "expect"),
+    [
+        (["--dirty"], "{}", ""),
+        (["--dirty", "--offline"], "{}", "1"),
+        (["--dirty"], '{"up_offline": true}', "1"),
+        (["--dirty"], '{"up_offline": false}', ""),
+    ],
+)
+def test_offline_reaches_every_uv_command_and_the_timeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str], config: str, expect: str | None
+) -> None:
+    """A run that must add no code from a package index: uv sees UV_OFFLINE=1 on every step."""
+    _checkout(monkeypatch, tmp_path, " M src/x.py")
+    tts = tmp_path / "tts"
+    tts.mkdir()
+    (tts / "config.json").write_text(config)
+    monkeypatch.setattr(up, "TTS_DIR", tts)
+    monkeypatch.setenv("UV_OFFLINE", "")  # recorded, so teardown removes what main() sets
+    seen: list[str | None] = []
+
+    class Done:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def run(cmd, **k):
+        if cmd[0] == "uv":
+            seen.append(up.os.environ.get("UV_OFFLINE"))
+        return Done()
+
+    monkeypatch.setattr(up.subprocess, "run", run)
+    monkeypatch.setattr(up.time, "sleep", lambda s: None)
+    monkeypatch.setattr(up, "daemon_state", lambda ver: "running")
+    assert up.main(argv) == 0
+    assert seen == [expect]
+    mode = "offline" if expect else "online"
+    assert f" uv={mode} " in (tmp_path / "timeline.log").read_text()
+
+
 def test_installed_version_parses_the_cli_line(monkeypatch: pytest.MonkeyPatch) -> None:
     class R:
         stdout = "claude-tts 9.30.0\n"

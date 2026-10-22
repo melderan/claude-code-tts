@@ -18,6 +18,11 @@ from a terminal, launchd or cron; it never reads a TTY. The scheduled form also 
 only a released checkout: a clean working tree whose HEAD carries the tag v<version>.
 The checkout is a working tree a sandbox edits in place, so a version bump mid-edit must
 not reach the daemon; the tag is what "released" means here (see `claude-tts release`).
+
+`just up --offline` (or `UV_OFFLINE=1`, or `"up_offline": true` in ~/.claude-tts/config.json,
+which is how a scheduled run on that machine gets it) builds from uv's cache alone: the build
+backend and its dependencies must already be there, and no package index is asked. An empty
+cache fails the install step and nothing changes. The timeline line says uv=offline or uv=online.
 """
 
 from __future__ import annotations
@@ -225,13 +230,19 @@ def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if_changed = "--if-changed" in args
     allow_dirty = "--dirty" in args
-    unknown = [a for a in args if a not in ("--if-changed", "--dirty")]
+    unknown = [a for a in args if a not in ("--if-changed", "--dirty", "--offline")]
     if unknown:
-        print(f"up: unknown argument(s): {' '.join(unknown)} (only --if-changed, --dirty)", file=sys.stderr)
+        print(f"up: unknown argument(s): {' '.join(unknown)} (only --if-changed, --dirty, --offline)", file=sys.stderr)
         return 2
     # uv installs tools into ~/.local/bin, which a launchd or cron PATH does not have.
     # The run must not depend on who launched it, so put it first ourselves.
     os.environ["PATH"] = f"{Path.home() / '.local' / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
+    # Offline, uv builds only from its cache and asks no index for the build backend, so the
+    # run adds no code from a package index to the machine. A scheduled run has no flags to
+    # pass, so the config key `up_offline` says it for that machine.
+    if "--offline" in args or config_flag(["up_offline"]) == "on":
+        os.environ["UV_OFFLINE"] = "1"
+    uv_mode = "offline" if os.environ.get("UV_OFFLINE") not in (None, "", "0", "false") else "online"
     LOGDIR.mkdir(parents=True, exist_ok=True)
     ref = git("describe", "--always", "--dirty", "--tags")
     branch = git("branch", "--show-current") or "detached"
@@ -317,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
     record(
         f"{stamp()} {ident} daemon={daemon} pid={pid} py={tool_python_version()} "
         f"bridge={config_flag(['http', 'enabled'])} mic={config_flag(['mic_aware_pause'])} "
-        f"took={int(time.time() - started)}s run={run.name}"
+        f"uv={uv_mode} took={int(time.time() - started)}s run={run.name}"
     )
     # The shared ledger tells other machines to pull v<ver>: only a release has that tag.
     if daemon == "running" and not_released(ver) is None:
