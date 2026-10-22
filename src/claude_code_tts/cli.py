@@ -1900,6 +1900,28 @@ def cmd_kraken(args: argparse.Namespace) -> None:
     print("The kraken is released; everyone speaks" if not state.get("paused") else "Could not release")
 
 
+def cmd_verify(args: argparse.Namespace) -> None:
+    """Hash the installed voices against their pins and look for distrusted CA roots; local only."""
+    from claude_code_tts import trust
+    from claude_code_tts.config import MLX_VENV_DIR, SHERPA_VENV_DIR
+    from claude_code_tts.piper_pins import PIPER_SHA256
+
+    checks = (trust.check_voices(VOICES_DIR, PIPER_SHA256) + trust.check_stores()
+              + trust.check_venvs({"sherpa": SHERPA_VENV_DIR, "mlx": MLX_VENV_DIR}))
+    if args.json:
+        print(json.dumps([c.__dict__ for c in checks], indent=2))
+    else:
+        for c in sorted(checks, key=lambda c: trust.STATUS_ORDER.index(c.status)):
+            if c.status == "ok" and not args.all:
+                continue
+            print(f"{c.status:<9}{c.what}: {c.detail}")
+            if c.fix:
+                print(f"{'':9}fix: {c.fix}")
+        counts = {s: sum(c.status == s for c in checks) for s in trust.STATUS_ORDER}
+        print(", ".join(f"{n} {s}" for s, n in counts.items() if n) + " (nothing was sent anywhere)")
+    sys.exit(trust.exit_code(checks))
+
+
 def cmd_ledger(args: argparse.Namespace) -> None:
     """What a session's hooks were asked to speak, in full, and what the daemon did with each."""
     from claude_code_tts import ledger
@@ -4636,6 +4658,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--full", action="store_true", help="Print each row's whole text")
     p.add_argument("--json", action="store_true", help="JSON rows")
     p.set_defaults(func=cmd_ledger)
+
+    # --- verify ---
+    p = subparsers.add_parser(
+        "verify",
+        help="Check installed voices against their pinned SHA-256 and look for distrusted CA roots (local, exit 1 if affected)",
+    )
+    p.add_argument("--all", action="store_true", help="Also print the checks that passed")
+    p.add_argument("--json", action="store_true", help="Every check as JSON")
+    p.set_defaults(func=cmd_verify)
 
     # --- install ---
     p = subparsers.add_parser("install", help="Install/upgrade Claude Code TTS")

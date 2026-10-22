@@ -32,6 +32,8 @@ from typing import Any
 
 # Version of this installer/package
 from claude_code_tts import __version__
+from claude_code_tts.piper_pins import PIPER_BASE, PIPER_SHA256
+from claude_code_tts.trust import file_sha256
 
 # --- Platform Detection ---
 
@@ -79,8 +81,8 @@ VOICES_DIR = HOME / ".local" / "share" / "piper-voices"
 SETTINGS_FILE = CLAUDE_DIR / "settings.json"
 
 VOICE_MODEL = "en_US-hfc_male-medium"
-VOICE_URL = f"https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/hfc_male/medium/{VOICE_MODEL}.onnx"
-VOICE_JSON_URL = f"https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/hfc_male/medium/{VOICE_MODEL}.onnx.json"
+VOICE_URL = f"{PIPER_BASE}/en/en_US/hfc_male/medium/{VOICE_MODEL}.onnx"
+VOICE_JSON_URL = f"{PIPER_BASE}/en/en_US/hfc_male/medium/{VOICE_MODEL}.onnx.json"
 VOICE_FILE = VOICES_DIR / f"{VOICE_MODEL}.onnx"
 VOICE_JSON = VOICES_DIR / f"{VOICE_MODEL}.onnx.json"
 
@@ -120,7 +122,7 @@ TTS_SESSIONS_DIR = TTS_CONFIG_DIR / "sessions.d"
 # All functionality is in the `claude-tts` CLI binary (via uv tool install).
 MANIFEST: dict[str, list[str]] = {
     "hooks": ["speak-response.sh", "speak-intermediate.sh", "play-sound.sh", "voice-context.sh", "prompt-submitted.sh"],
-    "commands": ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md", "tts-persona.md", "tts-personas.md", "tts-voices.md", "tts-status.md", "tts-config.md", "tts-cleanup.md", "tts-random.md", "tts-test.md", "tts-discover.md", "tts-intermediate.md", "tts-release.md", "tts-focus.md", "tts-kraken.md", "tts-name.md"],
+    "commands": ["tts-mute.md", "tts-unmute.md", "tts-speed.md", "tts-sounds.md", "tts-mode.md", "tts-persona.md", "tts-personas.md", "tts-voices.md", "tts-status.md", "tts-config.md", "tts-cleanup.md", "tts-random.md", "tts-test.md", "tts-discover.md", "tts-intermediate.md", "tts-release.md", "tts-focus.md", "tts-kraken.md", "tts-name.md", "tts-verify.md"],
 }
 
 # Legacy bash scripts that were replaced by the Python CLI in v7.0.0.
@@ -391,8 +393,8 @@ def write_settings(settings: dict, path: Path | None = None) -> None:
     os.replace(tmp, path)
 
 
-# Hugging Face Piper voices base URL
-HF_VOICES_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
+# Hugging Face Piper voices, at the commit piper_pins.py was generated from (v1.0.0)
+HF_VOICES_BASE = PIPER_BASE
 
 # Available voice models (curated list of quality English voices)
 # Format: (name, gender, quality, description, path_segment)
@@ -474,12 +476,14 @@ def run_cmd(
     return subprocess.run(cmd, check=check, capture_output=capture, text=True)
 
 
-def download_file(url: str, dest: Path, min_bytes: int = 0) -> None:
+def download_file(url: str, dest: Path, min_bytes: int = 0, sha256: str | None = None) -> None:
     """Download url to dest, or die saying why.
 
     `curl -L` without --fail used to save an HTTP error page as the file, and a 95-byte
     "forbidden" page then went on to be loaded as a 60 MB voice model. Now: fail on HTTP errors,
     require a plausible size, and reject anything that looks like text where a model belongs.
+    With sha256, a file whose digest differs is deleted and refused: a valid certificate does not
+    prove the bytes (the eMudhra CA keys of October 2026 could sign one for any host).
     """
     info(f"Downloading {dest.name}...")
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -493,6 +497,15 @@ def download_file(url: str, dest: Path, min_bytes: int = 0) -> None:
     if problem:
         dest.unlink(missing_ok=True)
         die(f"Download of {dest.name} is not usable: {problem}. Source: {url}")
+    if sha256:
+        got = file_sha256(dest)
+        if got != sha256:
+            dest.unlink(missing_ok=True)
+            die(f"Download of {dest.name} does not match its pinned SHA-256 and was deleted.\n"
+                f"  expected {sha256}\n  got      {got}\n  source   {url}\n"
+                f"Something between you and the server changed the file (a proxy, or a forged "
+                f"certificate). Do not copy the file in by hand; run `claude-tts verify` and retry "
+                f"on another network.")
 
 
 def _download_problem(dest: Path, min_bytes: int) -> str:
@@ -1073,8 +1086,8 @@ def do_install(
             dry(f"  -> {VOICE_FILE}")
         else:
             VOICES_DIR.mkdir(parents=True, exist_ok=True)
-            download_file(VOICE_URL, VOICE_FILE, min_bytes=1_000_000)
-            download_file(VOICE_JSON_URL, VOICE_JSON)
+            download_file(VOICE_URL, VOICE_FILE, min_bytes=1_000_000, sha256=PIPER_SHA256[VOICE_FILE.name])
+            download_file(VOICE_JSON_URL, VOICE_JSON, sha256=PIPER_SHA256[VOICE_JSON.name])
         success(f"Voice model {'will be downloaded' if dry_run else 'downloaded'}")
     else:
         success("Voice model already installed")
@@ -1854,6 +1867,10 @@ def download_voice(voice_name: str, path_segment: str, dry_run: bool = False) ->
     onnx_file = VOICES_DIR / f"{voice_name}.onnx"
     json_file = VOICES_DIR / f"{voice_name}.onnx.json"
 
+    if onnx_file.name not in PIPER_SHA256 or json_file.name not in PIPER_SHA256:
+        error(f"{voice_name} has no pinned SHA-256 in piper_pins.py; refusing an unverified download")
+        return False
+
     if dry_run:
         dry(f"Download {voice_name}.onnx (~60MB)")
         dry(f"Download {voice_name}.onnx.json")
@@ -1862,8 +1879,8 @@ def download_voice(voice_name: str, path_segment: str, dry_run: bool = False) ->
     VOICES_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
-        download_file(onnx_url, onnx_file, min_bytes=1_000_000)
-        download_file(json_url, json_file)
+        download_file(onnx_url, onnx_file, min_bytes=1_000_000, sha256=PIPER_SHA256[onnx_file.name])
+        download_file(json_url, json_file, sha256=PIPER_SHA256[json_file.name])
         return True
     except Exception as e:
         error(f"Failed to download {voice_name}: {e}")

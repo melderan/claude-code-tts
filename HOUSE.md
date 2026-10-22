@@ -113,6 +113,7 @@ just ship -F body.txt fix "subject"   # commit-feature.sh -y, push, release --wa
 | `/tts-unmute` | Unmute this session |
 | `/tts-name [name\|reset]` | Show/set the name this session says for itself on a speaker change: with `queue.speaker_transition` `"chime+announce"` (or `"announce"`), the boop then the line the config's `speaker_lines` rules make for its id (docs/speaker-lines.md; the shipped `rooms` set says "<name> of House <house>, in room <room>", "Friend" until named), else "<name or project> says:"; shows which rule matched and why others were skipped (9.55.0) |
 | `/tts-focus` | Hold every other friend's voice, this session keeps speaking; `claude-tts hold --let <room>` lets another through; bare `claude-tts hold` over a hold only shows it, `--clear` empties the list (9.52.0) |
+| `/tts-verify` | Local check, nothing sent: installed voices against their pinned SHA-256, distrusted CA roots (by fingerprint) in the CA bundles and engine venvs; exit 1 if affected, each line with its fix (SECURITY.md) |
 | `/tts-kraken` | Release the kraken: everyone speaks again (`claude-tts kraken`); `--drop` drops what the hold kept first (by id, one `dropped (kraken)` ledger line each), so a long hold is not replayed on release |
 | `/tts-speed [value]` | Show/set speech speed (0.5-4.0) |
 | `/tts-persona [name]` | Show/set voice persona; `add <name> --voice <model>` and `remove <name>` edit config.json |
@@ -163,6 +164,8 @@ src/claude_code_tts/
   speakerline.py           # What a session says when it takes the floor: speaker_lines rules from config, the shipped "rooms" set
   outputdevice.py          # Which device the Mac plays through, from system_profiler; the daemon's poll thread and the status line's words
   install.py               # Installer (hooks, voices, service)
+  piper_pins.py            # SHA-256 of every Piper voice file at one piper-voices commit; generated, refused on mismatch
+  trust.py                 # `claude-tts verify`: installed voices vs pins, distrusted CA roots by fingerprint, venv certifi
   signature.py             # Voice signatures: tolerant shape of a WAV, compared with tolerances, not by ear
   release.py               # Release: preflight, gate, signed tag with notes, push, verify on GitHub
   sherpa_speak.py          # sherpa-onnx worker, run by its isolated venv's Python
@@ -181,6 +184,7 @@ scripts/
   gate.py                  # `just gate` and the git hooks: lint, mypy, ty, version, tests [, build]
   test-audit.py            # `just test-audit`: per-test mutation audit, which tests would notice a change
   sleep-race-check.py      # gate and `just lint`: a fixed sleep before an assert in a test; wait with tests/loop_passes.py
+  pin-piper-voices.py      # Regenerates piper_pins.py from Hugging Face (LFS sha256, blob id cross-check); run on purpose
   voice-signatures.py      # `just voices-capture|spread|verify`: does the real speech path still sound the same
   build-check.sh           # `just build`: wheel + cold-install proof
   tts-builder.py           # Voice builder TUI (Textual, standalone)
