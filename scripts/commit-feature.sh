@@ -112,6 +112,16 @@ if [[ $YES -eq 0 ]]; then
     fi
 fi
 
+# The files the bump rewrites, as they were: a refused commit (the pre-commit gate) puts them
+# back, so a rerun bumps once, not twice (9.66.1 nearly went out as 9.66.2 on 2026-10-22).
+# The saved copy, not HEAD, so an edit of the person's own in pyproject.toml survives.
+SAVED=$(mktemp -d)
+trap 'rm -rf "$SAVED"' EXIT
+BUMPED=(pyproject.toml src/claude_code_tts/__init__.py)
+for f in "${BUMPED[@]}"; do
+    [[ -f "$f" ]] && mkdir -p "$SAVED/$(dirname "$f")" && cp -p "$f" "$SAVED/$f"
+done
+
 echo -e "${GREEN}Bumping version...${NC}"
 bump-my-version bump "$BUMP" --no-commit --no-tag --allow-dirty
 NEW_VERSION=$(version)
@@ -119,14 +129,20 @@ echo -e "${GREEN}New version:${NC} $NEW_VERSION"
 
 git add -A
 
+rc=0
 if [[ -n "$BODY_FILE" ]]; then
     # git refuses -m with -F, so the subject and body go in one message file
-    MSG_FILE=$(mktemp)
-    trap 'rm -f "$MSG_FILE"' EXIT
-    { printf '%s: %s\n\n' "$PREFIX" "$SUBJECT"; cat "$BODY_FILE"; } > "$MSG_FILE"
-    git commit -F "$MSG_FILE"
+    { printf '%s: %s\n\n' "$PREFIX" "$SUBJECT"; cat "$BODY_FILE"; } > "$SAVED/message"
+    git commit -F "$SAVED/message" || rc=$?
 else
-    git commit -m "$PREFIX: $SUBJECT"
+    git commit -m "$PREFIX: $SUBJECT" || rc=$?
+fi
+if [[ $rc -ne 0 ]]; then
+    for f in "${BUMPED[@]}"; do
+        [[ -f "$SAVED/$f" ]] && cp -p "$SAVED/$f" "$f" && git reset -q -- "$f"
+    done
+    echo -e "${RED}git commit exited $rc; version put back to $CURRENT_VERSION, the rest stays staged${NC}"
+    exit "$rc"
 fi
 
 echo ""

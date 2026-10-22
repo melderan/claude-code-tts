@@ -117,6 +117,26 @@ def test_missing_body_file_refuses_before_bumping(repo, tmp_path):
     assert '"1.2.3"' in (root / "src" / "claude_code_tts" / "__init__.py").read_text()
 
 
+def test_a_refused_commit_puts_the_version_back_and_keeps_the_change(repo):
+    root, _ = repo
+    hook = root / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    pyproject = root / "pyproject.toml"
+    pyproject.write_text("# an edit of the person's own\n")
+    r = run(repo, "-y", "fix", "something")
+    assert r.returncode == 1
+    assert "version put back to 1.2.3" in r.stdout
+    assert '"1.2.3"' in (root / "src" / "claude_code_tts" / "__init__.py").read_text()
+    assert pyproject.read_text() == "# an edit of the person's own\n"
+    assert (root / "change.txt").read_text() == "a change\n"
+    assert git(root, "log", "--format=%s") == "chore: start\n"
+    hook.unlink()
+    r = run(repo, "-y", "fix", "something")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert '"1.2.4"' in (root / "src" / "claude_code_tts" / "__init__.py").read_text()
+
+
 def test_unknown_type_refuses(repo):
     r = run(repo, "-y", "style", "something")
     assert r.returncode == 2
