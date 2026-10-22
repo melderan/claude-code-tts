@@ -41,8 +41,9 @@ class DistrustedRoot:
 
 # Fingerprints read from certifi 2026.7.22 and from Node v24.0.0's node_root_certs.h (two builds
 # of Mozilla's list) and equal in both. certifi 2026.10.18, the release after 2026.7.22, is the
-# first without this root (wheel checked against PyPI's sha256, then by fingerprint); it kept
-# emSign G1, C1 and C3, which did not chain the compromised intermediates.
+# first without this root (wheel checked against PyPI's sha256, then by fingerprint). It dropped
+# all four emSign roots; 2026.10.19 put back G1, C1 and C3, which did not chain the compromised
+# intermediates, and is 2026.7.22 minus G3 exactly.
 DISTRUSTED_ROOTS = (
     DistrustedRoot(
         name="emSign ECC Root CA - G3",
