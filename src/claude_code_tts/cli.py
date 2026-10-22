@@ -39,6 +39,8 @@ from claude_code_tts.config import (
     session_read,
     session_set,
 )
+from claude_code_tts.config import hf_cache_dir as _hf_cache_dir
+from claude_code_tts.config import hf_model_cached as _hf_model_cached
 from claude_code_tts.session import get_session_id
 
 # ---------------------------------------------------------------------------
@@ -1505,32 +1507,10 @@ def _extract_tarbz2(archive: Path, dest_parent: Path) -> Path | None:
         return None
 
 
-def _hf_cache_dir() -> Path:
-    """Where huggingface_hub keeps models: HF_HUB_CACHE, else HF_HOME/hub, else $XDG_CACHE_HOME/huggingface/hub.
-
-    A launchd daemon does not see variables set in a shell rc, so if any of
-    these are set for the shell only, `mlx pull` and the daemon's worker use
-    different caches and the first message downloads again.
-    """
-    if os.environ.get("HF_HUB_CACHE"):
-        return Path(os.environ["HF_HUB_CACHE"]).expanduser()
-    if os.environ.get("HF_HOME"):
-        return Path(os.environ["HF_HOME"]).expanduser() / "hub"
-    if os.environ.get("XDG_CACHE_HOME"):
-        return Path(os.environ["XDG_CACHE_HOME"]).expanduser() / "huggingface" / "hub"
-    return Path.home() / ".cache" / "huggingface" / "hub"
-
-
-def _hf_model_cached(repo: str) -> bool:
-    """True when the Hugging Face cache holds a snapshot of `repo`."""
-    snapshots = _hf_cache_dir() / f"models--{repo.replace('/', '--')}" / "snapshots"
-    return snapshots.is_dir() and any(snapshots.iterdir())
-
-
 def cmd_mlx(args: argparse.Namespace) -> None:
     """Manage the mlx-audio backend: status, curated models, model download."""
     from claude_code_tts.config import MLX_VENV_DIR
-    from claude_code_tts.mlx_catalog import CATALOG, list_ids, resolve_model
+    from claude_code_tts.mlx_catalog import CATALOG, VOICE_REPOS, list_ids, resolve_model
 
     sub = getattr(args, "mlx_command", None) or "status"
     venv_py = MLX_VENV_DIR / "bin" / "python"
@@ -1597,22 +1577,31 @@ def cmd_mlx(args: argparse.Namespace) -> None:
         if not venv_py.is_file():
             print(f"mlx venv not enabled at {MLX_VENV_DIR}; run: claude-tts-install --enable-mlx")
             sys.exit(2)
-        if _hf_model_cached(repo) and not getattr(args, "force", False):
-            print(f"{repo} is already in {_hf_cache_dir()} (use --force to refresh)")
-            return
         chosen = CATALOG.get(model_id)
-        if chosen:
-            print(f"Fetching {repo} ({chosen['size_mb']} MB, {chosen['license_weights']}) into {_hf_cache_dir()}")
-        else:
-            print(f"Fetching {repo} into {_hf_cache_dir()} (not in the curated catalog: check its license yourself)")
-        code = (
-            "import sys; from huggingface_hub import snapshot_download; "
-            f"print(snapshot_download({repo!r}))"
-        )
-        result = subprocess.run([str(venv_py), "-c", code], text=True)
-        if result.returncode != 0:
-            print(f"Download failed (exit {result.returncode})")
-            sys.exit(result.returncode)
+        # The daemon's worker runs offline once the model is cached, so whatever speaking
+        # needs comes down here: the model, and the voices when its engine keeps them apart.
+        voice_repo = VOICE_REPOS.get(chosen["engine"], "") if chosen else ""
+        fetches = [(repo, None)] + ([(voice_repo, ["voices/*.safetensors"])] if voice_repo else [])
+        force = getattr(args, "force", False)
+        todo = [(r, pats) for r, pats in fetches if force or not _hf_model_cached(r)]
+        if not todo:
+            print(f"{' and '.join(r for r, _ in fetches)} already in {_hf_cache_dir()} (use --force to refresh)")
+            return
+        for r, pats in todo:
+            if r != repo:
+                print(f"Fetching the voices of {repo} from {r} (mlx-audio reads them there) into {_hf_cache_dir()}")
+            elif chosen:
+                print(f"Fetching {repo} ({chosen['size_mb']} MB, {chosen['license_weights']}) into {_hf_cache_dir()}")
+            else:
+                print(f"Fetching {repo} into {_hf_cache_dir()} (not in the curated catalog: check its license yourself)")
+            code = (
+                "import sys; from huggingface_hub import snapshot_download; "
+                f"print(snapshot_download({r!r}" + (f", allow_patterns={pats!r}))" if pats else "))")
+            )
+            result = subprocess.run([str(venv_py), "-c", code], text=True)
+            if result.returncode != 0:
+                print(f"Download failed (exit {result.returncode})")
+                sys.exit(result.returncode)
         hint = f" --speaker-mlx {chosen['default_voice']}" if chosen and chosen["default_voice"] else ""
         print(f'Done. Try it: claude-tts speak --voice-mlx {model_id}{hint} "hello there"')
         return

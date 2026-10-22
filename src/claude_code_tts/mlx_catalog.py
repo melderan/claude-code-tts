@@ -59,6 +59,12 @@ KOKORO_VOICES: list[str] = [
     "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang",
 ]
 
+# mlx-audio's Kokoro reads its voice presets from its own repo, not from the model's (mlx-audio
+# 0.5.6, models/kokoro/kokoro.py REPO_ID: the loader builds the model with repo_id None), so a
+# pull fetches that repo's voices too. Apache-2.0, the same 54 voices; read from the Hub API on
+# 2026-10-22. Keyed by engine.
+VOICE_REPOS: dict[str, str] = {"Kokoro": "prince-canuma/Kokoro-82M"}
+
 # Kokoro language codes by voice prefix (misaki): the same letter the voice name starts with.
 KOKORO_LANGS: dict[str, str] = {
     "a": "American English", "b": "British English", "e": "Spanish", "f": "French", "h": "Hindi",

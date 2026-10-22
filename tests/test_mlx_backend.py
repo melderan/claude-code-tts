@@ -103,6 +103,18 @@ class TestMlxRouting:
         assert cmd[0] == str(fake_mlx_venv / "bin" / "python")
         assert cmd[1:] == ["-m", "claude_code_tts.mlx_speak", "--serve", "--model", "mlx-community/Kokoro-82M-bf16"]
 
+    def test_worker_runs_offline_only_once_model_and_voices_are_cached(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path))
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+        worker = audio._MlxWorker("mlx-community/Kokoro-82M-bf16")
+        assert "HF_HUB_OFFLINE" not in worker._env()
+        (tmp_path / "models--mlx-community--Kokoro-82M-bf16" / "snapshots" / "a").mkdir(parents=True)
+        assert "HF_HUB_OFFLINE" not in worker._env(), "Kokoro's voices live in another repo, not cached yet"
+        (tmp_path / "models--prince-canuma--Kokoro-82M" / "snapshots" / "b").mkdir(parents=True)
+        assert worker._env()["HF_HUB_OFFLINE"] == "1"
+        (tmp_path / "models--someone--Other" / "snapshots" / "c").mkdir(parents=True)
+        assert audio._MlxWorker("someone/Other")._env()["HF_HUB_OFFLINE"] == "1"
+
     def test_get_worker_returns_one_object_per_model(self, fake_mlx_venv):
         assert audio._get_mlx_worker("m") is audio._get_mlx_worker("m")
         assert audio._get_mlx_worker("m") is not audio._get_mlx_worker("n")

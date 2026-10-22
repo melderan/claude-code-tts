@@ -100,12 +100,24 @@ class TestMlxCommand:
         with patch("claude_code_tts.cli.subprocess.run") as run:
             run.return_value.returncode = 0
             main(["mlx", "pull", "kokoro"])
-        cmd = run.call_args.args[0]
-        assert cmd[0] == str(venv / "bin" / "python")
-        assert "snapshot_download('mlx-community/Kokoro-82M-bf16')" in cmd[2]
+        model, voices = (c.args[0] for c in run.call_args_list)
+        assert model[0] == str(venv / "bin" / "python")
+        assert "snapshot_download('mlx-community/Kokoro-82M-bf16'))" in model[2]
+        assert "snapshot_download('prince-canuma/Kokoro-82M', allow_patterns=['voices/*.safetensors']))" in voices[2]
         assert "389 MB, apache-2.0" in capsys.readouterr().out
 
-    def test_pull_skips_cached_model(self, tts_home, patched_env, monkeypatch, capsys):  # noqa: F811
+    def test_pull_of_a_model_with_its_own_voices_is_one_download(self, tts_home, patched_env, monkeypatch):  # noqa: F811
+        venv = tts_home / "venvs" / "mlx"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text("")
+        monkeypatch.setattr("claude_code_tts.config.MLX_VENV_DIR", venv)
+        monkeypatch.setenv("HF_HUB_CACHE", str(tts_home / "hf"))
+        with patch("claude_code_tts.cli.subprocess.run") as run:
+            run.return_value.returncode = 0
+            main(["mlx", "pull", "kitten-nano"])
+        assert run.call_count == 1
+
+    def test_pull_skips_cached_model_and_fetches_only_missing_voices(self, tts_home, patched_env, monkeypatch, capsys):  # noqa: F811
         venv = tts_home / "venvs" / "mlx"
         (venv / "bin").mkdir(parents=True)
         (venv / "bin" / "python").write_text("")
@@ -113,6 +125,12 @@ class TestMlxCommand:
         cache = tts_home / "hf"
         (cache / "models--mlx-community--Kokoro-82M-bf16" / "snapshots" / "abc").mkdir(parents=True)
         monkeypatch.setenv("HF_HUB_CACHE", str(cache))
+        with patch("claude_code_tts.cli.subprocess.run") as run:
+            run.return_value.returncode = 0
+            main(["mlx", "pull", "kokoro"])
+        [cmd] = [c.args[0] for c in run.call_args_list]
+        assert "prince-canuma/Kokoro-82M" in cmd[2]
+        (cache / "models--prince-canuma--Kokoro-82M" / "snapshots" / "def").mkdir(parents=True)
         with patch("claude_code_tts.cli.subprocess.run") as run:
             main(["mlx", "pull", "kokoro"])
         run.assert_not_called()

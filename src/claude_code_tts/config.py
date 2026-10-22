@@ -52,6 +52,30 @@ DEFAULT_VOICE = "en_US-hfc_male-medium"
 SHERPA_VENV_DIR = TTS_CONFIG_DIR / "venvs" / "sherpa"
 SHERPA_MODELS_DIR = TTS_CONFIG_DIR / "sherpa-models"
 MLX_VENV_DIR = TTS_CONFIG_DIR / "venvs" / "mlx"
+
+
+def hf_cache_dir() -> Path:
+    """Where huggingface_hub keeps models: HF_HUB_CACHE, else HF_HOME/hub, else $XDG_CACHE_HOME/huggingface/hub.
+
+    A launchd daemon does not see variables set in a shell rc, so if any of
+    these are set for the shell only, `mlx pull` and the daemon's worker use
+    different caches and the first message downloads again.
+    """
+    if os.environ.get("HF_HUB_CACHE"):
+        return Path(os.environ["HF_HUB_CACHE"]).expanduser()
+    if os.environ.get("HF_HOME"):
+        return Path(os.environ["HF_HOME"]).expanduser() / "hub"
+    if os.environ.get("XDG_CACHE_HOME"):
+        return Path(os.environ["XDG_CACHE_HOME"]).expanduser() / "huggingface" / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def hf_model_cached(repo: str) -> bool:
+    """True when the Hugging Face cache holds a snapshot of `repo`."""
+    snapshots = hf_cache_dir() / f"models--{repo.replace('/', '--')}" / "snapshots"
+    return snapshots.is_dir() and any(snapshots.iterdir())
+
+
 PROJECTS_DIR = HOME / ".claude" / "projects"
 # The hook-side log lives next to the daemon log so it survives a sandbox
 # rebuild and is visible from every machine that shares ~/.claude-tts.

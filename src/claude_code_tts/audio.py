@@ -23,6 +23,7 @@ from claude_code_tts.config import (
     TTS_CONFIG_DIR,
     TTSConfig,
     debug,
+    hf_model_cached,
 )
 
 
@@ -114,6 +115,9 @@ class _JsonLineWorker:
         """The argv to start the process, or None (already logged) when it cannot start."""
         raise NotImplementedError
 
+    def _env(self) -> dict[str, str]:
+        return _venv_env()
+
     def _alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
@@ -175,7 +179,7 @@ class _JsonLineWorker:
                 stdout=subprocess.PIPE,
                 stderr=err,
                 text=True,
-                env=_venv_env(),
+                env=self._env(),
             )
         except OSError as e:
             return self._fail_start(None, f"start failed: {e}")
@@ -350,6 +354,26 @@ class _MlxWorker(_JsonLineWorker):
             "--serve",
             "--model", self.model_id,
         ]
+
+    def _env(self) -> dict[str, str]:
+        """Offline once the model and its voices are cached: mlx-audio otherwise asks the Hub at every start.
+
+        Those requests trust the venv's own certifi, which the machine's CA updates never reach
+        (an old one still carried emSign ECC Root CA - G3 in October 2026). `mlx pull` fetches
+        the model and, for Kokoro, the repo its voices are read from; once both are here a
+        voice that was never pulled fails and the spare voice speaks, instead of a quiet download.
+        """
+        from claude_code_tts.mlx_catalog import VOICE_REPOS, entry_for_repo
+
+        env = super()._env()
+        entry = entry_for_repo(self.model_id)
+        repos = [self.model_id] + ([VOICE_REPOS[entry["engine"]]] if entry and entry["engine"] in VOICE_REPOS else [])
+        missing = [r for r in repos if not hf_model_cached(r)]
+        if missing:
+            debug(f"mlx worker: {', '.join(missing)} not cached, so this start may download (claude-tts mlx pull fetches ahead)")
+        else:
+            env["HF_HUB_OFFLINE"] = "1"
+        return env
 
     def generate(self, text: str, *, voice: str, speed: float, lang_code: str, output_path: Path) -> bool:
         resp = self.request({

@@ -34,7 +34,14 @@ keeps stdout for the protocol and points file descriptor 1 at stderr, because mo
 and tracebacks are there.
 
 A model not yet in the cache is downloaded on that first start, which is why `mlx pull` comes
-first: the worker waits up to ten minutes for a ready line. At daemon start, personas with
+first: the worker waits up to ten minutes for a ready line. Once the model is cached the worker
+runs with `HF_HUB_OFFLINE=1`, so it makes no request to the Hub. Without that flag mlx-audio lists
+the model's files on the Hub at every start, and the venv's own certifi decides who to trust for
+that request. For Kokoro, offline also waits for its voices to be cached: mlx-audio reads Kokoro
+voices from `prince-canuma/Kokoro-82M`, not from the model's repository, so `mlx pull kokoro`
+fetches that repository's `voices/*.safetensors` as well. With both cached, a voice that was never
+fetched fails to load and the spare voice speaks; the worker does not download it in the
+background. `debug.log` names any repository that keeps a start online. At daemon start, personas with
 `voice_mlx` are warmed in a background thread; `daemon.log` says `mlx worker(s) ready: ...` when
 they are up. A message for an mlx persona that arrives while its model is still loading does not
 wait: after five seconds it gives up on mlx and that one message falls through to the persona's
