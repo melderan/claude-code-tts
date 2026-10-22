@@ -62,9 +62,10 @@ def test_if_changed_holds_an_unreleased_checkout(
     monkeypatch.setattr(up, "git", lambda *a: "abc123")
     monkeypatch.setattr(up, "version", lambda: "9.30.0")
     monkeypatch.setattr(up.subprocess, "run", lambda *a, **k: pytest.fail("no command may run"))
+    monkeypatch.setenv("UV_OFFLINE", "1")
     assert up.main(["--if-changed"]) == 0
     assert "holding" in capsys.readouterr().out
-    assert "held (HEAD is not tagged v9.30.0)" in (tmp_path / "timeline.log").read_text()
+    assert "uv=offline held (HEAD is not tagged v9.30.0)" in (tmp_path / "timeline.log").read_text()
     assert list(tmp_path.glob("up-*.log")) == []
 
 

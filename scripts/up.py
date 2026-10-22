@@ -250,7 +250,8 @@ def main(argv: list[str] | None = None) -> int:
     started = time.time()
     run = LOGDIR / f"up-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{ref}.log"
     timeline = LOGDIR / "timeline.log"
-    ident = f"up v{ver} {ref} {branch}"
+    # uv= on every line, held and unchanged ones too, so the mode is visible before a deploy.
+    ident = f"up v{ver} {ref} {branch} uv={uv_mode}"
 
     def record(line: str) -> None:
         with timeline.open("a") as f:
@@ -328,7 +329,7 @@ def main(argv: list[str] | None = None) -> int:
     record(
         f"{stamp()} {ident} daemon={daemon} pid={pid} py={tool_python_version()} "
         f"bridge={config_flag(['http', 'enabled'])} mic={config_flag(['mic_aware_pause'])} "
-        f"uv={uv_mode} took={int(time.time() - started)}s run={run.name}"
+        f"took={int(time.time() - started)}s run={run.name}"
     )
     # The shared ledger tells other machines to pull v<ver>: only a release has that tag.
     if daemon == "running" and not_released(ver) is None:
