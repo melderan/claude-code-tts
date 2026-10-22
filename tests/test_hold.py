@@ -15,6 +15,7 @@ import claude_code_tts.daemon as d
 import claude_code_tts.state as st
 from claude_code_tts.mic_watcher import MicWatcher
 from claude_code_tts.state import hold, let_rooms, lets_through, may_play, release, room_tag
+from tests.test_mic_watcher import _logged, _start_tailing
 
 
 class TestRoomKey:
@@ -124,17 +125,16 @@ class TestMicUnderAHandHold:
     def test_a_recording_flags_the_hold_and_its_end_clears_the_flag(self, tmp_path, monkeypatch):
         state = {"paused": True, "paused_by": "user", "let_through": ["tts"]}
         w, log_file = self._watcher(tmp_path, monkeypatch, state)
-        w.start()
+        _start_tailing(w)
         try:
-            time.sleep(0.1)
             with open(log_file, "a") as f:
                 f.write("[DEBUG] TranscribeAction::start called for binding: transcribe\n")
-            time.sleep(0.2)
-            assert state["paused_by"] == "user" and state.get("mic_held") is True
+            assert _wait_for(lambda: state.get("mic_held") is True)
+            assert state["paused_by"] == "user"
             assert not may_play(state, "x--claude-code-tts")
             with open(log_file, "a") as f:
                 f.write("[DEBUG] TranscribeAction::stop called for binding: transcribe\n")
-            time.sleep(0.3)
+            assert _wait_for(lambda: _logged(w, "manual pause active"))
             assert state["paused"] is True and state["paused_by"] == "user", "the hand hold stays"
             assert not state.get("mic_held")
             assert may_play(state, "x--claude-code-tts")

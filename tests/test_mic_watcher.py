@@ -18,6 +18,27 @@ from claude_code_tts.mic_watcher import (
     log_line_age_s,
 )
 
+
+def _wait_for(pred, timeout=5.0) -> bool:
+    """Poll pred until true or timeout. A fixed sleep is a bet on the runner's load (macOS py3.14 ci, 2026-10-22)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return pred()
+
+
+def _logged(w: MicWatcher, words: str) -> bool:
+    return any(words in str(c) for c in w._log.call_args_list)  # type: ignore[attr-defined]
+
+
+def _start_tailing(w: MicWatcher) -> None:
+    """Start the watcher and wait until it has seeked to the log's end; a line written before is skipped."""
+    w.start()
+    assert _wait_for(lambda: _logged(w, "tailing")), "mic watcher never started tailing"
+
+
 # --- Regex tests ---
 
 
@@ -511,36 +532,33 @@ class TestMicWatcherIntegration:
             write_playback_state=write_state,
             resume_delay_ms=50,  # Short delay for tests
         )
-        w.start()
-        time.sleep(0.1)  # Let thread start
+        _start_tailing(w)
+        try:
+            # Simulate recording start
+            with open(log_file, "a") as f:
+                f.write(
+                    "[2026-03-15][10:55:33][handy_app_lib::managers::audio][DEBUG] "
+                    "Recording started for binding transcribe\n"
+                )
+                f.flush()
 
-        # Simulate recording start
-        with open(log_file, "a") as f:
-            f.write(
-                "[2026-03-15][10:55:33][handy_app_lib::managers::audio][DEBUG] "
-                "Recording started for binding transcribe\n"
-            )
-            f.flush()
+            assert _wait_for(lambda: state["paused"] is True)
+            assert state["paused_by"] == "mic"
+            assert w.recording
 
-        time.sleep(0.2)
-        assert state["paused"] is True
-        assert state["paused_by"] == "mic"
-        assert w.recording
+            # Simulate recording stop
+            with open(log_file, "a") as f:
+                f.write(
+                    "[2026-03-15][10:55:52][handy_app_lib::actions][DEBUG] "
+                    "Recording stopped and samples retrieved in 35ms, sample count: 285120\n"
+                )
+                f.flush()
 
-        # Simulate recording stop
-        with open(log_file, "a") as f:
-            f.write(
-                "[2026-03-15][10:55:52][handy_app_lib::actions][DEBUG] "
-                "Recording stopped and samples retrieved in 35ms, sample count: 285120\n"
-            )
-            f.flush()
-
-        time.sleep(0.3)  # > resume_delay_ms (50ms)
-        assert state["paused"] is False
-        assert state["paused_by"] is None
-        assert not w.recording
-
-        w.stop()
+            assert _wait_for(lambda: state["paused"] is False)
+            assert state["paused_by"] is None
+            assert not w.recording
+        finally:
+            w.stop()
 
     def test_manual_pause_survives_recording_cycle(self, tmp_path, monkeypatch):
         log_file = tmp_path / "handy.log"
@@ -562,34 +580,33 @@ class TestMicWatcherIntegration:
             write_playback_state=write_state,
             resume_delay_ms=50,
         )
-        w.start()
-        time.sleep(0.1)
+        _start_tailing(w)
+        try:
+            # Recording start — already paused by user, should stay as user
+            with open(log_file, "a") as f:
+                f.write(
+                    "[2026-03-15][10:55:33][handy_app_lib::managers::audio][DEBUG] "
+                    "Recording started for binding transcribe\n"
+                )
+                f.flush()
 
-        # Recording start — already paused by user, should stay as user
-        with open(log_file, "a") as f:
-            f.write(
-                "[2026-03-15][10:55:33][handy_app_lib::managers::audio][DEBUG] "
-                "Recording started for binding transcribe\n"
-            )
-            f.flush()
+            assert _wait_for(lambda: _logged(w, "under a hand hold"))
+            assert state["paused"] is True
+            assert state["paused_by"] == "user"
 
-        time.sleep(0.2)
-        assert state["paused"] is True
-        assert state["paused_by"] == "user"
+            # Recording stop — should NOT unpause because user paused
+            with open(log_file, "a") as f:
+                f.write(
+                    "[2026-03-15][10:55:52][handy_app_lib::actions][DEBUG] "
+                    "Recording stopped and samples retrieved in 35ms, sample count: 285120\n"
+                )
+                f.flush()
 
-        # Recording stop — should NOT unpause because user paused
-        with open(log_file, "a") as f:
-            f.write(
-                "[2026-03-15][10:55:52][handy_app_lib::actions][DEBUG] "
-                "Recording stopped and samples retrieved in 35ms, sample count: 285120\n"
-            )
-            f.flush()
-
-        time.sleep(0.3)
-        assert state["paused"] is True
-        assert state["paused_by"] == "user"
-
-        w.stop()
+            assert _wait_for(lambda: _logged(w, "manual pause active"))
+            assert state["paused"] is True
+            assert state["paused_by"] == "user"
+        finally:
+            w.stop()
 
 
 
@@ -756,17 +773,18 @@ class TestRecordingThatNeverBegan:
             write_playback_state=write_state,
             resume_delay_ms=50,
         )
-        w.start()
-        time.sleep(0.1)
-        with open(log_file, "a") as f:
-            f.write("[DEBUG] TranscribeAction::start called for binding: transcribe\n")
-        time.sleep(0.2)
-        assert state["paused"] is True and state["paused_by"] == "mic"
-        with open(log_file, "a") as f:
-            f.write("[ERROR] Failed to start recording: no input device\n")
-        time.sleep(0.3)
-        assert state["paused"] is False and state["paused_by"] is None
-        w.stop()
+        _start_tailing(w)
+        try:
+            with open(log_file, "a") as f:
+                f.write("[DEBUG] TranscribeAction::start called for binding: transcribe\n")
+            assert _wait_for(lambda: state["paused"] is True)
+            assert state["paused_by"] == "mic"
+            with open(log_file, "a") as f:
+                f.write("[ERROR] Failed to start recording: no input device\n")
+            assert _wait_for(lambda: state["paused"] is False)
+            assert state["paused_by"] is None
+        finally:
+            w.stop()
 
 
 class TestLogLineAge:
@@ -815,11 +833,10 @@ class TestSavedRecordingEndsTheHold:
         return w, log_file, rec
 
     def _start_recording(self, w, log_file):
-        w.start()
-        time.sleep(0.1)
+        _start_tailing(w)
         with open(log_file, "a") as f:
             f.write("[DEBUG] TranscribeAction::start called for binding: transcribe\n")
-        time.sleep(0.2)
+        assert _wait_for(lambda: w.recording and _logged(w, "paused for recording"))
 
     def test_the_saved_file_releases_the_hold_with_no_stop_line(self, tmp_path, monkeypatch):
         state = {"paused": False, "paused_by": None}
