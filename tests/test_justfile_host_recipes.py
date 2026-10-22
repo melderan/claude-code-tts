@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 JUSTFILE = Path(__file__).parent.parent / "justfile"
-HOST_RECIPES = {"up", "timeline", "release", "voices-capture", "voices-spread", "voices-verify", "playpen"}
+HOST_RECIPES = {"up", "timeline", "release", "ship", "voices-capture", "voices-spread", "voices-verify", "playpen"}
 FORBIDDEN = ("uv run", "uv tool run", "uvx", ".venv")
 
 
@@ -73,6 +73,6 @@ def test_forwarding_recipes_quote_their_arguments():
     text = JUSTFILE.read_text()
     assert re.search(r"^set positional-arguments\s*$", text, re.M), "justfile needs `set positional-arguments`"
     body = recipes()
-    for name in ("release", "up"):
+    for name in ("release", "up", "ship"):
         assert any('"$@"' in ln for ln in body[name]), f"{name} must forward arguments as \"$@\""
         assert not any("{{ARGS}}" in ln for ln in body[name]), f"{name} still pastes {{{{ARGS}}}} into the shell line"

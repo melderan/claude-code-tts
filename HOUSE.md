@@ -86,6 +86,7 @@ just timeline                 # the runs so far, with version and git ref
 just release                # or: claude-tts release
 just release --check        # preflight and gate only; prints the plan
 just release --wait-ci      # right after a push: waits for HEAD's ci run (needs ci-wait on the PATH)
+just ship -F body.txt fix "subject"   # commit-feature.sh -y, push, release --wait-ci; stops at the first failure
 ```
 
 ## Session Model

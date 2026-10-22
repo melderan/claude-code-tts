@@ -108,6 +108,10 @@ hooks:
 release *ARGS:
     PYTHONPATH=src {{HOST_PY}} -m claude_code_tts.cli release "$@"
 
+# Maintainer: commit-feature.sh -y, git push, release --wait-ci in one call; stops at the first failure. `just ship fix "subject"`, -F FILE for the body
+ship *ARGS:
+    @scripts/ship.sh "$@"
+
 # Operator, on the daemon's machine: rebuild from this checkout, deploy hooks, restart, verify; logs in .logs/just/
 up *ARGS:
     @scripts/up.py "$@"
