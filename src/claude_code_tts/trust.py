@@ -36,16 +36,19 @@ class DistrustedRoot:
     name: str
     sha256: str  # of the DER certificate
     why: str
+    certifi_without: str  # the first certifi release that no longer carries it
 
 
 # Fingerprints read from certifi 2026.7.22 and from Node v24.0.0's node_root_certs.h (two builds
-# of Mozilla's list) and equal in both; certifi 2026.10.19 dropped this root and kept emSign G1,
-# C1 and C3, which did not chain the compromised intermediates.
+# of Mozilla's list) and equal in both. certifi 2026.10.18, the release after 2026.7.22, is the
+# first without this root (wheel checked against PyPI's sha256, then by fingerprint); it kept
+# emSign G1, C1 and C3, which did not chain the compromised intermediates.
 DISTRUSTED_ROOTS = (
     DistrustedRoot(
         name="emSign ECC Root CA - G3",
         sha256="86a1ecba089c4a8d3bbe2734c612ba341d813e043cf9e8a862cd5c57a36bbe6b",
         why="eMudhra's eight G3 intermediates had trivially weak keys (reported 2026-10-17)",
+        certifi_without="2026.10.18",
     ),
 )
 
@@ -188,9 +191,11 @@ def check_venvs(venvs: dict[str, Path]) -> list[Check]:
             ver = m.group(1) if m else "unknown version"
             hits = distrusted_in(b.read_bytes())
             if hits:
+                # A floor, not a bare --upgrade: an index that holds back new releases would
+                # otherwise resolve to a certifi that still carries the root and report success.
                 out.extend(Check(
                     "affected", f"venv {label}", f"certifi {ver} still trusts {r.name}",
-                    fix=f"uv pip install --python {venv / 'bin' / 'python'} --upgrade certifi",
+                    fix=f"uv pip install --python {venv / 'bin' / 'python'} --upgrade 'certifi>={r.certifi_without}'",
                 ) for r in hits)
             else:
                 out.append(Check("ok", f"venv {label}", f"certifi {ver}, no distrusted root"))

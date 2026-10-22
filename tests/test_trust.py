@@ -78,10 +78,10 @@ class TestStoresAndVenvs:
         venv = self._venv(tmp_path / "mlx", C3 + G3, "2026.07.22")
         [c] = trust.check_venvs({"mlx": venv})
         assert c.status == "affected" and "2026.07.22" in c.detail
-        assert c.fix == f"uv pip install --python {venv / 'bin' / 'python'} --upgrade certifi"
+        assert c.fix == f"uv pip install --python {venv / 'bin' / 'python'} --upgrade 'certifi>=2026.10.18'"
 
     def test_venv_with_fixed_certifi_is_ok(self, tmp_path):
-        [c] = trust.check_venvs({"mlx": self._venv(tmp_path / "mlx", C3, "2026.10.19")})
+        [c] = trust.check_venvs({"mlx": self._venv(tmp_path / "mlx", C3, "2026.10.18")})
         assert c.status == "ok"
 
     def test_exit_codes(self):

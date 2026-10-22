@@ -54,7 +54,7 @@ the keys had been recoverable for about 17 months, and anyone holding one could 
 for any host. Browsers blocked the intermediates within days, and Chrome removes the root that chains
 them, emSign ECC Root CA - G3 (SHA-256 `86a1ecba089c4a8d3bbe2734c612ba341d813e043cf9e8a862cd5c57a36bbe6b`),
 on 2026-10-27. Related fixes: CVE-2026-111943 (Go `crypto/x509`), CVE-2026-113470 (Firefox), certifi
-2026.10.19.
+2026.10.18 (the first certifi without the root).
 
 What it means here: no misuse is known. Our downloads trust the machine's CA bundle, and an OpenSSL
 bundle (curl on Linux, Homebrew's Python) or an old certifi does not see a browser's block. Voices
@@ -64,6 +64,8 @@ reports:
 - a voice as affected: delete that file and run `claude-tts-install --voice NAME` again.
 - a store as affected: update your CA certificates (`brew upgrade ca-certificates`, or your
   distribution's `ca-certificates` package).
-- a venv as affected: run the `uv pip install ... --upgrade certifi` line it prints.
+- a venv as affected: run the `uv pip install ... --upgrade 'certifi>=2026.10.18'` line it prints. The
+  floor matters: an index that holds back new releases would otherwise install an older certifi that
+  still carries the root, and the install would report success.
 - a macOS keychain note: the root is still in the system keychain; Apple announced its block of the
   intermediates on 2026-10-19, so keep macOS current.
