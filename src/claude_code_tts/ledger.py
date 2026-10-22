@@ -2,14 +2,19 @@
 
 Two files, two writers, and never one file shared across a mount:
 
-- ``~/.claude/voice-ledger/<session>.jsonl`` is written by the hook, in the room whose reply it
-  is, one JSON line per utterance, before the text filter runs. The line carries the id the
-  queue message carries, the hook event, and the reply's own words. It lives beside the
-  transcripts so whatever archives ``~/.claude`` archives it too.
+- ``~/.claude/voice-ledger/<session>.<start>.jsonl`` is written by the hook, in the room whose
+  reply it is, one JSON line per utterance, before the text filter runs. The line carries the id
+  the queue message carries, the hook event, and the reply's own words. It lives beside the
+  transcripts so whatever archives ``~/.claude`` archives it too. ``start`` is the UTC second of
+  this ``~/.claude``'s first ledger write (the mtime of an empty ``.start`` file made then and
+  never written): a rebuilt room keeps its session id and loses ``~/.claude``, and without the
+  stamp it would begin a new, shorter file under the name its archive already holds. Files from
+  before 9.71.0 are ``<session>.jsonl``; they are read with the rest, oldest first.
 - ``~/.claude-tts/ledger/<session>.outcomes.jsonl`` is written by the daemon on the machine it
   runs on: played, cancelled, failed, or dropped with the reason, keyed by the same id.
 
-Nothing in this module deletes or shortens anything. Every write is one appended line. A write
+Nothing in this module deletes or shortens anything. Every write is one appended line (and,
+once per ``~/.claude``, the empty ``.start`` file is created). A write
 that fails returns False for the caller to log, and is never raised, so a full disk or a missing
 directory never costs a word of speech. ``read`` joins a session's lines with the latest outcome
 of each id; a torn line at the tail of either file is skipped and the lines before it stand.
@@ -18,11 +23,15 @@ of each id; a torn line at the tail of either file is skipped and the lines befo
 from __future__ import annotations
 
 import json
+import os
+import re
 import secrets
 import time
 from pathlib import Path
 
 OUTCOMES_SUFFIX = ".outcomes.jsonl"
+START_FILE = ".start"
+_NAME = re.compile(r"(?P<session>.+?)(?:\.(?P<start>\d{8}T\d{6}Z))?\.jsonl")
 
 
 def new_id() -> str:
@@ -57,10 +66,37 @@ def _append(path: Path, entry: dict) -> bool:
         return False
 
 
+def _start(directory: Path) -> str:
+    """This directory's start stamp, made on its first write: the first O_EXCL create wins, so racing hooks agree."""
+    marker = directory / START_FILE
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+    except FileExistsError:
+        pass
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(marker.stat().st_mtime))
+
+
 def record(session_id: str, entry: dict, *, directory: Path | None = None) -> bool:
     """Append one utterance a hook accepted; ``ts`` and ``session`` are added unless the entry has them."""
     row = {"ts": time.time(), "session": session_id, **entry}
-    return _append((directory or ledger_dir()) / f"{_file_name(session_id)}.jsonl", row)
+    d = directory or ledger_dir()
+    try:
+        start = _start(d)
+    except OSError:
+        return False
+    return _append(d / f"{_file_name(session_id)}.{start}.jsonl", row)
+
+
+def _session_files(session_id: str, directory: Path) -> list[Path]:
+    """A session's ledger files, oldest first: the unstamped name from before 9.71.0, then by start stamp."""
+    name = _file_name(session_id)
+    found = []
+    for p in directory.glob(f"{name}*.jsonl") if directory.is_dir() else []:
+        m = _NAME.fullmatch(p.name)
+        if m and m["session"] == name:
+            found.append((m["start"] or "", p))
+    return [p for _, p in sorted(found)]
 
 
 def record_outcome(
@@ -109,7 +145,7 @@ def sessions(directory: Path | None = None) -> list[str]:
     d = directory or ledger_dir()
     if not d.is_dir():
         return []
-    return sorted(p.name[: -len(".jsonl")] for p in d.glob("*.jsonl"))
+    return sorted({m["session"] for p in d.glob("*.jsonl") if (m := _NAME.fullmatch(p.name))})
 
 
 def outcomes(session_id: str, *, directory: Path | None = None) -> list[dict]:
@@ -129,7 +165,7 @@ def read(
     The joined keys are ``outcome``, ``outcome_reason`` (when the daemon gave one) and
     ``outcome_ts``. ``limit`` keeps the newest that many rows; 0 or None keeps them all.
     """
-    rows = _read_lines((directory or ledger_dir()) / f"{_file_name(session_id)}.jsonl")
+    rows = [r for p in _session_files(session_id, directory or ledger_dir()) for r in _read_lines(p)]
     latest: dict[str, dict] = {}
     for o in outcomes(session_id, directory=outcomes_directory):
         if o.get("id"):

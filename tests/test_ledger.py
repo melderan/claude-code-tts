@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
+import re
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -46,7 +48,8 @@ class TestAppendOnly:
         assert len(rows) == 51
         assert rows[0]["id"] == "00" and rows[-1]["id"] == "50"
         assert all(len(r["text"]) == len("utterance 00 " + LONG) for r in rows)
-        assert (home / ".claude" / "voice-ledger" / f"{SESSION}.jsonl").is_file()
+        [f] = (home / ".claude" / "voice-ledger").glob(f"{SESSION}.*.jsonl")
+        assert re.fullmatch(rf"{SESSION}\.\d{{8}}T\d{{6}}Z\.jsonl", f.name)
 
     def test_the_module_has_no_way_to_delete_or_shorten(self):
         src = Path(ledger.__file__).read_text()
@@ -61,13 +64,49 @@ class TestAppendOnly:
 
     def test_a_torn_tail_line_is_skipped_and_the_rows_before_it_stand(self, home):
         ledger.record("s", {"id": "a", "text": "one"})
-        with open(home / ".claude" / "voice-ledger" / "s.jsonl", "a") as f:
+        [path] = (home / ".claude" / "voice-ledger").glob("s.*.jsonl")
+        with open(path, "a") as f:
             f.write('{"id": "b", "text": "cut off')
         assert [r["id"] for r in ledger.read("s")] == ["a"]
 
     def test_session_ids_become_safe_file_names(self, home):
         ledger.record("../evil/..", {"id": "a", "text": "t"})
         assert ledger.sessions() == ["_evil_"]
+
+
+class TestStartStamp:
+    """A rebuilt room keeps its session id and loses ~/.claude; its new rows must not reuse an archived name."""
+
+    def _dir(self, home: Path) -> Path:
+        return home / ".claude" / "voice-ledger"
+
+    def test_every_write_of_one_home_goes_to_one_file_named_by_the_marker(self, home):
+        d = self._dir(home)
+        d.mkdir(parents=True)
+        (d / ".start").touch()
+        os.utime(d / ".start", (1792696595, 1792696595))
+        ledger.record("s", {"id": "a", "text": "one"})
+        ledger.record("s", {"id": "b", "text": "two"})
+        ledger.record("t", {"id": "c", "text": "three"})
+        assert sorted(p.name for p in d.glob("*.jsonl")) == ["s.20261022T191635Z.jsonl", "t.20261022T191635Z.jsonl"]
+
+    def test_a_rebuilt_home_starts_a_new_name_and_reads_join_every_file_oldest_first(self, home):
+        d = self._dir(home)
+        d.mkdir(parents=True)
+        (d / "s.jsonl").write_bytes(b'{"id": "before-9.71", "text": "x"}\n')
+        (d / "s.20261020T000000Z.jsonl").write_bytes(b'{"id": "first-life", "text": "x"}\n')
+        (d / "s2.20261020T000000Z.jsonl").write_bytes(b'{"id": "another-session", "text": "x"}\n')
+        ledger.record("s", {"id": "this-life", "text": "x"})
+        assert [r["id"] for r in ledger.read("s")] == ["before-9.71", "first-life", "this-life"]
+        assert ledger.sessions() == ["s", "s2"]
+        assert (d / "s.jsonl").read_bytes() == b'{"id": "before-9.71", "text": "x"}\n', "an old file is never written"
+
+    def test_the_marker_is_made_once_and_never_written(self, home):
+        ledger.record("s", {"id": "a", "text": "one"})
+        marker = self._dir(home) / ".start"
+        first = marker.stat().st_mtime
+        ledger.record("s", {"id": "b", "text": "two"})
+        assert marker.read_bytes() == b"" and marker.stat().st_mtime == first
 
 
 class TestOutcomesJoin:

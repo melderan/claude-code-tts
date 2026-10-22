@@ -413,6 +413,9 @@ When Claude runs tools (file reads, bash commands, etc.), the transcript contain
   commands/
     tts-*.md                  # 13 slash command definitions
   settings.json               # Hook registration
+  voice-ledger/
+    <session>.<start>.jsonl   # Every reply a hook accepted, in full, append only (claude-tts ledger)
+    .start                    # Empty; its mtime is <start>, this ~/.claude's first ledger write
 
 ~/.claude-tts/
   config.json                 # Main config (personas, queue, mic-aware, etc.)
@@ -426,6 +429,13 @@ When Claude runs tools (file reads, bash commands, etc.), the transcript contain
   *.onnx                      # Piper voice models
   *.onnx.json                 # Voice model configs
 ```
+
+Why the ledger's file name carries a start stamp: a sandbox that is rebuilt keeps its session id
+and loses `~/.claude`. Under a bare `<session>.jsonl` the rebuilt room would start a new, shorter
+file under the same name as the copy a backup already holds, and the backup cannot tell new rows
+from lost ones. With the stamp, each life of `~/.claude` writes its own file, and every file only
+grows. `claude-tts ledger` reads them all, oldest first, together with `<session>.jsonl` files
+from before 9.71.0.
 
 ## Debugging
 
