@@ -790,3 +790,15 @@ def test_queue_route_reads_the_queue_dir(server: Bridge) -> None:
     assert body["rooms"][0]["room"] == "hear" and body["rooms"][0]["held"] is False
     assert call(server, "GET", "/queue?by=persona")[0] == 400
     assert call(server, "GET", "/queue", token=None)[0] == 401
+
+
+def test_a_polled_read_that_answered_is_not_logged_anything_else_is(server: Bridge) -> None:
+    """2026-10-23: 61,598 of 67,299 daemon.log lines were `GET /pause ... 200` from a page's poll."""
+    assert call(server, "GET", "/pause")[0] == 200
+    assert call(server, "GET", "/queue?by=room")[0] == 200
+    assert not [ln for ln in server.logs if ln.startswith("http ")]  # type: ignore[attr-defined]
+    assert call(server, "GET", "/pause", token=None)[0] == 401
+    assert call(server, "POST", "/pause", body={"paused": True})[0] == 200
+    lines = [ln for ln in server.logs if ln.startswith("http ")]  # type: ignore[attr-defined]
+    assert [("GET /pause" in ln and " 401 " in ln, "POST /pause" in ln) for ln in lines] == [
+        (True, False), (False, True)]

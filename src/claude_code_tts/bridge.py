@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 from claude_code_tts import __version__, msgqueue
 from claude_code_tts.config import TTS_CONFIG_DIR, load_raw_config
@@ -473,6 +473,10 @@ class BridgeHTTPServer(ThreadingHTTPServer):
         self.preempt = preempt or (lambda: None)
 
 
+# Reads a page polls; a 200 from one is not logged (BridgeHandler.log_request).
+_POLLED_READS = frozenset({"/pause", "/health", "/jobs", "/queue"})
+
+
 class BridgeHandler(BaseHTTPRequestHandler):
     # Narrowed for the reader: BridgeHTTPServer is the only server this handler is built by.
     server: BridgeHTTPServer  # ty: ignore[invalid-mutable-override]
@@ -482,6 +486,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         self.server.log_fn(f"http {self.address_string()} {format % args}")
+
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        """Every request but a read a page polls that answered 200: those were 91% of the log.
+
+        2026-10-23: 61,598 of 67,299 daemon.log lines were `GET /pause ... 200`, about two a
+        second from a page, and they buried the lines that told the story of a lost reply.
+        """
+        ok = isinstance(code, int) and int(code) == 200
+        if ok and self.command == "GET" and urlsplit(self.path).path in _POLLED_READS:
+            return
+        super().log_request(code, size)
 
     def _origin_allowed(self) -> str | None:
         origin = self.headers.get("Origin")
