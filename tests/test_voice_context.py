@@ -1,5 +1,7 @@
 """Tests for the voice context mutating webhook."""
 
+import pytest
+
 from claude_code_tts.voice_context import (
     _find_transcript_in_message,
     _normalize_for_matching,
@@ -96,3 +98,78 @@ class TestFindTranscriptInMessage:
         msg_norm = _normalize_for_matching(message)
         result = _find_transcript_in_message(transcript, message, msg_norm)
         assert result is not None
+
+
+def _analysis_db(tmp_path, rows):
+    """An analysis DB in the daemon's schema holding (file_name, age_s, transcript, tone) rows."""
+    import time
+
+    from claude_code_tts.handy import _init_db
+    db = tmp_path / "handy_analysis.db"
+    conn = _init_db(db)
+    now = time.time()
+    for name, age, text, tone in rows:
+        conn.execute(
+            "INSERT INTO voice_analysis (file_name, timestamp, transcript, tone_summary, analyzed_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (name, int(now - age), text, tone, now - age),
+        )
+    conn.commit()
+    conn.close()
+    return db
+
+
+SPOKEN = "what the hell is that thing doing in the queue again"
+
+
+class TestEnrichMessage:
+    def test_a_dictated_segment_carries_its_recordings_tone(self, tmp_path):
+        """The transcript and tone come from the analysis DB alone, the file a sandbox can see."""
+        from claude_code_tts.voice_context import enrich_message
+        db = _analysis_db(tmp_path, [("a.wav", 30, SPOKEN, "animated and expressive")])
+        out = enrich_message(f"{SPOKEN}\n\nplease look", max_age_seconds=600, db_path=db)
+        assert out == "[Voice context]\n[Segment 1: animated and expressive]"
+
+    def test_typed_text_and_old_recordings_stay_unmarked(self, tmp_path):
+        from claude_code_tts.voice_context import enrich_message
+        db = _analysis_db(tmp_path, [("old.wav", 900, SPOKEN, "animated and expressive")])
+        assert enrich_message(SPOKEN, max_age_seconds=600, db_path=db) is None
+        db2 = _analysis_db(tmp_path / "b", [("a.wav", 30, SPOKEN, "animated and expressive")])
+        assert enrich_message("a line typed by hand, nothing spoken", max_age_seconds=600, db_path=db2) is None
+
+
+def test_the_hook_reads_the_prompt_field_claude_code_sends(monkeypatch, capsys):
+    """UserPromptSubmit puts the text in top-level "prompt"; reading anything else matches nothing."""
+    import io
+    import json
+
+    import claude_code_tts.handy as handy_mod
+    import claude_code_tts.voice_context as vc
+    from claude_code_tts import cli as cli_mod
+    monkeypatch.setattr(handy_mod, "get_aggregated_tone", lambda **kw: None)
+    monkeypatch.setattr(vc, "_get_recent_transcripts", lambda **kw: [
+        {"file_name": "a.wav", "timestamp": 0, "text": SPOKEN, "tone": "speaking quietly"}])
+    stdin = io.StringIO(json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": SPOKEN}))
+    stdin.isatty = lambda: False  # type: ignore[method-assign]
+    monkeypatch.setattr("sys.stdin", stdin)
+    monkeypatch.setattr("sys.argv", ["claude-tts", "handy", "tone-context"])
+    cli_mod.main()
+    assert capsys.readouterr().out == "[Voice context]\n[Segment 1: speaking quietly]\n"
+
+
+@pytest.mark.parametrize(("cli_body", "out"), [
+    ('echo "[Voice context: JMO is calm]"; exit 0', "[Voice context: JMO is calm]\n"),  # the context joins the prompt
+    ('echo "usage: invalid choice" >&2; exit 2', ""),                                 # a CLI older than the subcommand
+])
+def test_the_shim_passes_the_context_and_never_blocks_the_prompt(tmp_path, cli_body, out):
+    """A UserPromptSubmit hook's stdout is added to the prompt and exit 2 blocks it."""
+    import os
+    import subprocess
+    from pathlib import Path
+    shim = Path(__file__).resolve().parent.parent / "hooks" / "voice-context.sh"
+    fake = tmp_path / "claude-tts"
+    fake.write_text(f"#!/bin/bash\n{cli_body}\n")
+    fake.chmod(0o755)
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}"}
+    r = subprocess.run(["bash", str(shim)], input="{}", capture_output=True, text=True, env=env, timeout=10)
+    assert (r.returncode, r.stdout, r.stderr) == (0, out, "")

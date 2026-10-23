@@ -4324,8 +4324,8 @@ def cmd_handy(args: argparse.Namespace) -> None:
             try:
                 import json as _json
                 hook_data = _json.load(sys.stdin)
-                # UserPromptSubmit hook provides the message in the input
-                message = hook_data.get("input", {}).get("message", "")
+                # UserPromptSubmit carries the typed or dictated text as top-level "prompt"
+                message = hook_data.get("prompt", "") or ""
             except (ValueError, AttributeError):
                 pass
 
@@ -4676,7 +4676,8 @@ def main(argv: list[str] | None = None) -> None:
     hs.add_argument("--age", type=float, default=60.0, help="Max age in seconds (default: 60)")
     hs.set_defaults(func=cmd_handy)
     hs = handy_sub.add_parser("tone-context", help="Output voice tone for hook injection")
-    hs.add_argument("--age", type=float, default=30.0, help="Max age in seconds (default: 30)")
+    hs.add_argument("--age", type=float, default=600.0,
+                    help="Max age in seconds of a recording to match (default: 600)")
     hs.set_defaults(func=cmd_handy)
     handy_sub.add_parser("status", help="Show analyzer status").set_defaults(func=cmd_handy)
     p.set_defaults(func=cmd_handy)

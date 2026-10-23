@@ -6,9 +6,9 @@ and injects per-segment tone metadata. Typed text passes through unmarked.
 
 Flow:
     1. Hook receives raw message text
-    2. Pull recent transcripts from Handy's history.db
+    2. Pull recent transcripts and their tone from the analysis DB
     3. Match each transcript to a position in the message
-    4. Pull tone analysis for each matched recording
+    4. Keep the tone of each matched recording
     5. Output enriched context with per-segment metadata
 """
 
@@ -18,58 +18,41 @@ import sqlite3
 import time
 from pathlib import Path
 
-from claude_code_tts.handy import (
-    ANALYSIS_DB,
-    HANDY_HISTORY_DB,
-)
+from claude_code_tts.handy import ANALYSIS_DB
 
 
 def _get_recent_transcripts(
     max_age_seconds: float = 120.0,
+    db_path: Path = ANALYSIS_DB,
 ) -> list[dict]:
-    """Get recent Handy transcripts with their file names, ordered by timestamp.
+    """Get recent analyzed recordings with their transcripts and tone, oldest first.
 
-    Returns list of {file_name, timestamp, text} dicts.
+    Reads the daemon's analysis DB, not Handy's history.db: the analysis DB
+    lives in ~/.claude-tts, which a sandbox sees through its mount, while
+    Handy's own files exist only on the Mac that runs it.
+
+    Returns list of {file_name, timestamp, text, tone} dicts.
     """
-    if not HANDY_HISTORY_DB.exists():
+    if not db_path.exists():
         return []
     try:
-        conn = sqlite3.connect(str(HANDY_HISTORY_DB))
+        conn = sqlite3.connect(str(db_path))
         cutoff_ts = int(time.time() - max_age_seconds)
         rows = conn.execute(
-            """SELECT file_name, timestamp, transcription_text
-               FROM transcription_history
+            """SELECT file_name, timestamp, transcript, tone_summary
+               FROM voice_analysis
                WHERE timestamp > ?
                ORDER BY timestamp ASC""",
             (cutoff_ts,),
         ).fetchall()
         conn.close()
         return [
-            {"file_name": r[0], "timestamp": r[1], "text": r[2]}
+            {"file_name": r[0], "timestamp": r[1], "text": r[2], "tone": r[3]}
             for r in rows
             if r[2] and r[2].strip()
         ]
     except sqlite3.Error:
         return []
-
-
-def _get_tone_for_file(
-    file_name: str,
-    db_path: Path = ANALYSIS_DB,
-) -> str | None:
-    """Get the tone summary for a specific recording file."""
-    if not db_path.exists():
-        return None
-    try:
-        conn = sqlite3.connect(str(db_path))
-        row = conn.execute(
-            "SELECT tone_summary FROM voice_analysis WHERE file_name = ?",
-            (file_name,),
-        ).fetchone()
-        conn.close()
-        return row[0] if row else None
-    except sqlite3.Error:
-        return None
 
 
 def _normalize_for_matching(text: str) -> str:
@@ -144,7 +127,7 @@ def enrich_message(
         [Segment 1: animated, fast pace (pitch 164Hz, rate 5.3 wps)]
         [Segment 2: quiet, deliberate (pitch 120Hz, rate 2.1 wps)]
     """
-    transcripts = _get_recent_transcripts(max_age_seconds=max_age_seconds)
+    transcripts = _get_recent_transcripts(max_age_seconds=max_age_seconds, db_path=db_path)
     if not transcripts:
         return None
 
@@ -155,8 +138,7 @@ def enrich_message(
     for t in transcripts:
         span = _find_transcript_in_message(t["text"], message, message_norm)
         if span is not None:
-            tone = _get_tone_for_file(t["file_name"], db_path)
-            matched.append((span[0], t, tone))
+            matched.append((span[0], t, t["tone"]))
 
     if not matched:
         return None
