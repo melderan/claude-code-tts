@@ -436,6 +436,7 @@ def _write_playback_state_locked(
             state.pop("paused_since", None)
             state.pop("let_through", None)
             state.pop("mic_held", None)
+            state.pop("mic_held_since", None)
         state["paused"] = paused
     if paused_by is not UNSET:
         state["paused_by"] = paused_by
@@ -446,10 +447,15 @@ def _write_playback_state_locked(
         else:
             state.pop("let_through", None)
     if mic_held is not None:
+        # mic_held_since is when the recording began, as paused_since is for a mic hold: the
+        # daemon's loop may be synthesizing then and only see it seconds later.
         if mic_held:
+            if not state.get("mic_held"):
+                state["mic_held_since"] = time.time()
             state["mic_held"] = True
         else:
             state.pop("mic_held", None)
+            state.pop("mic_held_since", None)
     if current_message is not UNSET:
         state["current_message"] = current_message
     if preempted_message is not UNSET:

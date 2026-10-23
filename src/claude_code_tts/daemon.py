@@ -466,6 +466,24 @@ def hold_notices_due(held_s: float, every_s: float = HOLD_NOTICE_EVERY_S) -> int
     return int(held_s // every_s)
 
 
+def recording_now(state: dict) -> bool:
+    """Whether a recording holds the queue: a mic hold, or the mic under a person's hold."""
+    return bool(state.get("paused")) and (state.get("paused_by") == "mic" or bool(state.get("mic_held")))
+
+
+def mark_recording(recordings: PauseLedger, state: dict) -> None:
+    """Mark recordings from state, a span opened at the recording's own start when state has it."""
+    if not recording_now(state) or recordings.paused:
+        recordings.mark(recording_now(state))
+        return
+    since = state.get("mic_held_since") if state.get("mic_held") else state.get("paused_since")
+    try:
+        start = min(float(since), time.time()) if since is not None else None
+    except (TypeError, ValueError):
+        start = None
+    recordings.mark(True, now=start)
+
+
 def mic_hold_expired(state: dict, held_s: float, max_s: float) -> bool:
     """True when a mic pause has outlived max_s and the loop should release it."""
     return bool(state.get("paused")) and state.get("paused_by") == "mic" and 0 < max_s < held_s
@@ -1397,16 +1415,18 @@ def cleanup_old_messages(
 
 
 def drop_superseded(
-    messages: list[dict], supersedes: msgqueue.Supersedes, ledger: PauseLedger | None = None
+    messages: list[dict], supersedes: msgqueue.Supersedes, ledger: PauseLedger | None = None,
+    recordings: PauseLedger | None = None,
 ) -> list[dict]:
     """messages without what a newer prompt in its session made stale, controls taken.
 
     The loop runs it first on its one scan of the pass, before ageing, trimming and the
     pick, so stale messages never cost another room a trim, and a supersede acts as soon as the
     loop sees it, not in its timestamp turn behind the messages it drops, and never reaches
-    handle_control_message. supersedes remembers the cutoffs for a reply written late.
+    handle_control_message. supersedes remembers the cutoffs for a reply written late;
+    recordings (see recording_now) spares a reply the person was speaking over.
     """
-    kept = supersedes.apply(messages, log=log, ledger=ledger)
+    kept = supersedes.apply(messages, log=log, ledger=ledger, recordings=recordings)
     kept_ids = {id(m) for m in kept}
     for m in messages:
         if id(m) not in kept_ids:
@@ -2003,6 +2023,9 @@ def daemon_loop(lockpick: bool = False) -> None:
     hold_notices = 0  # "Still paused" lines logged for the current hold
     prefetch = Prefetch()
     supersedes = msgqueue.Supersedes(keep_s=float(config["max_age_seconds"]))
+    # Only the spans a recording held the queue: a reply that waited through one is not stale
+    # against the prompt that recording made. Forgotten on restart, as the ledger is.
+    recordings = PauseLedger()
     # The claim of the message this pass dequeued, until it has played (or is held for a
     # replay). The catch-all below gives it back: an exception between the claim and the
     # player would otherwise leave the file to meet its own claim on the next pass and be
@@ -2024,6 +2047,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             preempt_seen = _PREEMPT["asked"]
             was_paused = ledger.paused
             ledger.mark(bool(state.get("paused")))
+            mark_recording(recordings, state)
             letting_through = False
             if state.get("paused"):
                 # Paused holds the queue: nothing expires. A person's hold may let named rooms
@@ -2052,7 +2076,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 # Supersedes act on the whole held queue: a new prompt in a held room makes its
                 # older replies as stale as in any other, and its control would otherwise wait,
                 # counted as waiting, until the release (36 of 56 on 2026-10-20).
-                scanned = drop_superseded(drop_all_requested(get_queue_messages()), supersedes, ledger)
+                scanned = drop_superseded(drop_all_requested(get_queue_messages()), supersedes, ledger, recordings)
                 allowed = [m for m in scanned if _may_play(state, m)]
                 enforce_max_depth(config["max_depth"], None, [m for m in scanned if _trimmed_while_held(state, m)])
                 # A message cut off on deck that the hold lets play (a click a recording paused,
@@ -2071,7 +2095,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 # remembered cutoffs), then ageing, then trimming, then the pick. Stale
                 # messages go first, so an overflow trims a stale reply, not another
                 # room's older one.
-                queued = drop_superseded(drop_all_requested(get_queue_messages()), supersedes, ledger)
+                queued = drop_superseded(drop_all_requested(get_queue_messages()), supersedes, ledger, recordings)
                 cleanup_old_messages(config["max_age_seconds"], ledger, queued)
                 enforce_max_depth(config["max_depth"], ledger, queued)
             JOBS.evict_finished()
@@ -2767,7 +2791,7 @@ def log_stats(lines: Iterable[str]) -> dict:
     count = 0
     first: str | None = None
     last: str | None = None
-    messages = streams = mic_pauses = errors = stale = duplicates = 0
+    messages = streams = mic_pauses = errors = stale = stale_held = spared = duplicates = 0
     pending: datetime | None = None
     gaps: list[float] = []
     kinds: dict[str, int] = {}
@@ -2799,6 +2823,9 @@ def log_stats(lines: Iterable[str]) -> dict:
             mic_pauses += 1
         elif msg.startswith("Dropped stale message "):
             stale += 1
+            stale_held += msg.endswith("under a hold")
+        elif msg.startswith("Kept message ") and "through a recording" in msg:
+            spared += 1
         elif msg.startswith("Duplicate dropped:"):
             duplicates += 1
     gaps.sort()
@@ -2815,6 +2842,8 @@ def log_stats(lines: Iterable[str]) -> dict:
         "mic_pauses": mic_pauses,
         "errors": errors,
         "stale_dropped": stale,
+        "stale_dropped_held": stale_held,
+        "spared_by_recording": spared,
         "duplicates": duplicates,
         "latency": {
             "n": len(gaps),
@@ -2839,7 +2868,8 @@ def format_log_stats(stats: dict, name: str, size_bytes: int) -> str:
         f"{name}: {stats['lines']} lines, {size}{span}",
         f"messages spoken: {stats['messages']}   streamed: {stats['streams']}   "
         f"mic pauses: {stats['mic_pauses']}   errors: {stats['errors']}   "
-        f"stale dropped: {stats.get('stale_dropped', 0)}",
+        f"stale dropped: {stats.get('stale_dropped', 0)} ({stats.get('stale_dropped_held', 0)} under a hold)   "
+        f"kept through a recording: {stats.get('spared_by_recording', 0)}",
         f"duplicates dropped: {stats.get('duplicates', 0)}",
         f"queue to first audio: median {lat['median']:.1f}s  p90 {lat['p90']:.1f}s  "
         f"max {lat['max']:.1f}s  (n={lat['n']})",

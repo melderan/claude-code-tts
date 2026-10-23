@@ -291,6 +291,7 @@ class Supersedes:
         self.keep_s = keep_s
         self._cutoffs: dict[tuple[str, str], tuple[float, str, float]] = {}  # -> (cutoff, project, taken)
         self._unremovable: set[str] = set()
+        self._spared: set[str] = set()  # ids a recording kept, said once, not on every pass
 
     def _take(self, c: dict, log: Log | None, now: float) -> None:
         name = str(c.get("_file", ""))
@@ -333,13 +334,17 @@ class Supersedes:
 
     def apply(
         self, messages: list[dict], log: Log | None = None, now: float | None = None,
-        ledger: PauseLedger | None = None,
+        ledger: PauseLedger | None = None, recordings: PauseLedger | None = None,
     ) -> list[dict]:
         """Take every supersede control in messages, then drop what a cutoff makes stale.
 
         Returns the messages left, in the same order, without the controls. A message is
         dropped when a cutoff applies to it and its hook started before that cutoff:
-        replies and intermediate narration alike. Only queue files are touched, so the
+        replies and intermediate narration alike. Except one the person was recording over:
+        recordings holds the spans a mic held the queue, and a message whose wait overlaps
+        one was never heard, and the prompt is most likely that recording's own (a person
+        whose only input is voice lost every reply that ended while they spoke, 2026-10-23).
+        A typed prompt still drops it. Only queue files are touched, so the
         message playing now (the loop is busy playing it and never calls this meanwhile)
         is never cut, and playback.json is untouched on purpose: a message interrupted by a
         pause resumes after a new prompt, a design call left open; the same holds for one a
@@ -367,14 +372,28 @@ class Supersedes:
             if cutoff is None or when is None or when >= cutoff[0]:
                 kept.append(m)
                 continue
+            recorded = recordings.held_since(when, cutoff[0]) if recordings else 0.0
+            if recorded > 0:
+                kept.append(m)
+                mid = str(m.get("id", "?"))
+                if mid not in self._spared:
+                    self._spared.add(mid)
+                    _say(
+                        log,
+                        f"Kept message {mid} from {m.get('project') or cutoff[1]} past a new prompt in "
+                        f"{m.get('session_id')}: it waited {recorded:.1f}s through a recording, never heard",
+                    )
+                continue
             try:
                 Path(m["_file"]).unlink()
             except OSError:
                 continue  # gone already: aged out or flushed meanwhile
+            held = ledger.held_since(when, cutoff[0]) if ledger else 0.0
             _say(
                 log,
                 f"Dropped stale message {m.get('id', '?')} from {m.get('project') or cutoff[1]}: "
-                f"a new prompt in {m.get('session_id')} came {cutoff[0] - when:.1f}s after its turn ended",
+                f"a new prompt in {m.get('session_id')} came {cutoff[0] - when:.1f}s after its turn ended"
+                + (f", {held:.1f}s of it under a hold" if held > 0 else ""),
             )
         return kept
 

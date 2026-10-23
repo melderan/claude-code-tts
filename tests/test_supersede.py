@@ -481,3 +481,62 @@ def test_a_cutoff_outlives_a_pause_as_the_messages_it_guards_do():
     assert s.cutoff_for(stale) is not None
     s.apply([], now=175.0, ledger=ledger)
     assert s.cutoff_for(stale) is None
+
+
+class TestARecordingSparesTheReplyItHeld:
+    """2026-10-23 12:47:41 and 12:49:23 PDT: a room's reply ended as JMO began to dictate, waited
+    behind his recording, and the prompt that recording made dropped it as stale. With voice his
+    only input, it was never heard. Times below are the log's, from the end of the turn at 100."""
+
+    def _waiting(self, tmp_path) -> dict:
+        f = tmp_path / "reply.json"
+        f.write_text("{}")
+        return {"id": "905c03f2", "session_id": ROOM_A, "project": "jmo", "hook_started": 100.0,
+                "timestamp": 101.0, "_file": f}
+
+    def _prompt_at(self, at: float) -> mq.Supersedes:
+        s = mq.Supersedes()
+        s._cutoffs[(ROOM_A, "")] = (at, "proj", at)
+        return s
+
+    def test_a_reply_that_waited_through_the_recording_survives_its_prompt(self, tmp_path):
+        msg = self._waiting(tmp_path)
+        recordings = mq.PauseLedger()
+        recordings.mark(True, now=104.0)  # he starts talking 4 s after the turn ended
+        s = self._prompt_at(131.8)  # his prompt lands before the watcher sees the recording end
+        said: list[str] = []
+        kept = s.apply([msg], log=lambda m, lv: said.append(m), now=132.0, recordings=recordings)
+        assert kept == [msg] and msg["_file"].exists()
+        assert said == [f"Kept message 905c03f2 from jmo past a new prompt in {ROOM_A}: "
+                        "it waited 27.8s through a recording, never heard"]
+        s.apply([msg], log=lambda m, lv: said.append(m), now=133.0, recordings=recordings)
+        assert len(said) == 1, "said once, not on every pass"
+
+    def test_control_without_the_recording_the_same_reply_is_dropped(self, tmp_path):
+        """The rule this fix leaves alone: a prompt typed while the reply waited drops it."""
+        msg = self._waiting(tmp_path)
+        kept = self._prompt_at(131.8).apply([msg], now=132.0, recordings=mq.PauseLedger())
+        assert kept == [] and not msg["_file"].exists()
+
+    def test_a_recording_over_before_the_turn_ended_spares_nothing(self, tmp_path):
+        msg = self._waiting(tmp_path)
+        recordings = mq.PauseLedger()
+        recordings.mark(True, now=90.0)
+        recordings.mark(False, now=99.0)  # the prompt of the turn before
+        assert self._prompt_at(131.8).apply([msg], now=132.0, recordings=recordings) == []
+
+    def test_a_drop_says_how_much_of_the_wait_a_hold_made(self, tmp_path):
+        """12:44:55: three replies held 20 min by a hold letting nobody through, then dropped."""
+        msg = self._waiting(tmp_path)
+        ledger = mq.PauseLedger()
+        ledger.mark(True, now=50.0)
+        said: list[str] = []
+        self._prompt_at(1299.2).apply([msg], log=lambda m, lv: said.append(m), now=1300.0, ledger=ledger)
+        assert said == [f"Dropped stale message 905c03f2 from jmo: a new prompt in {ROOM_A} came "
+                        "1199.2s after its turn ended, 1199.2s of it under a hold"]
+        stats = log_stats([f"[2026-10-23 12:44:55] [INFO] {said[0]}",
+                           "[2026-10-23 12:49:23] [INFO] Kept message x from jmo past a new prompt in r: "
+                           "it waited 28.0s through a recording, never heard"])
+        assert (stats["stale_dropped"], stats["stale_dropped_held"], stats["spared_by_recording"]) == (1, 1, 1)
+        assert "stale dropped: 1 (1 under a hold)   kept through a recording: 1" in format_log_stats(
+            stats, "daemon.log", 1)

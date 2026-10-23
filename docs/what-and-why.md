@@ -28,6 +28,8 @@ Voice is a conversation, not a broadcast. Both sides can speak and listen. When 
 
 - **Safe to leave running:** The speaking service must be safe to leave running. Upgrades must apply safely while a session is mid-conversation. Pause/resume state persists across service restarts. Graceful handling of unexpected state and external events.
 
+- **Waiting never counts against the listener:** A message held back because the person was speaking, or because they held the queue, has not been heard. No rule that drops messages (an age limit, a depth limit, a new prompt making a reply stale) may count that wait as the person moving on. Someone whose only input is their voice has lost every reply that finished while they dictated their next prompt (2026-10-23). A stale drop says in the log how much of its wait was a hold, and `claude-tts daemon stats` counts those, so the next rule that breaks this shows up as a number.
+
 - **Zero network calls:** No telemetry, no phone-home, no voice data sent elsewhere. Models download once at install time. Everything after that is local.
 
 - **No external dependencies:** Only Python standard library. Speech synthesis is provided by separate programs the system runs as subprocesses.

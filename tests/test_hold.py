@@ -143,8 +143,8 @@ class TestMicUnderAHandHold:
             w.stop()
 
 
-def _enqueue(queue_dir: Path, text: str, session_id: str) -> Path:
-    ts = time.time()
+def _enqueue(queue_dir: Path, text: str, session_id: str, ago: float = 0.0) -> Path:
+    ts = time.time() - ago
     f = queue_dir / f"{ts:.6f}_{abs(hash(text)) % 10**8:08x}.json"
     tmp = f.with_suffix(".tmp")  # whole or not at all: the loop deletes a half-written file
     tmp.write_text(json.dumps({"id": f"{abs(hash(text)) % 10**8:08x}", "session_id": session_id,
@@ -282,6 +282,72 @@ class TestLoopLetsRoomsThrough:
             stop_loop(runner)
             for p in reversed(patches):
                 p.stop()
+
+    @pytest.mark.parametrize("held_by", ["a recording under a hand hold", "a mic hold"])
+    def test_a_reply_that_waited_through_a_recording_speaks_after_the_prompt_it_made(self, tmp_path, held_by):
+        """2026-10-23 12:47:41 and 12:49:23 PDT: Haley's turn ended as JMO began to dictate, her
+        reply waited for the recording, and the prompt the recording made dropped it as stale."""
+        import claude_code_tts.msgqueue as mq
+
+        loop_harness, stop_loop = _ledger_helpers()
+        state_dir, queue_dir, spoken, patches = loop_harness(tmp_path, {})
+        for p in patches:
+            p.start()
+        try:
+            st.write_playback_state(paused=False, paused_by=None, audio_pid=None, current_message=None)
+            if held_by == "a recording under a hand hold":
+                hold(["b"])
+
+            def run():
+                d._shutdown_requested = False
+                d._daemon_mode = True
+                d.daemon_loop()
+
+            runner = threading.Thread(target=run, daemon=True)
+            runner.start()
+            assert _wait_for(lambda: (state_dir / "daemon.heartbeat").exists())
+            assert loop_passes.wait_passes(2), "the loop stopped passing"  # startup clears a mic hold it finds
+            if held_by == "a mic hold":
+                st.write_playback_state(paused=True, paused_by="mic")
+            else:
+                st.write_playback_state(mic_held=True)
+            # Her turn ended 4 s before he began; another message had the speaker meanwhile.
+            reply = _enqueue(queue_dir, "b's verdict", "alice--claude--b", ago=4.0)
+            control = mq.write_supersede_message("alice--claude--b")  # the prompt his dictation made
+            assert control is not None and _wait_for(lambda: not control.exists()), "the control is taken"
+            assert loop_passes.wait_passes(3), "the loop stopped passing"
+            assert reply.exists() and spoken == [], "held while he speaks, and not dropped"
+            if held_by == "a mic hold":
+                st.write_playback_state(paused=False, paused_by=None)
+            else:
+                st.write_playback_state(mic_held=False)
+            assert _wait_for(lambda: "b's verdict" in spoken)
+        finally:
+            stop_loop(runner)
+            for p in reversed(patches):
+                p.stop()
+        log = (state_dir / "daemon.log").read_text()
+        assert "through a recording, never heard" in log and "Dropped stale message" not in log
+
+    def test_a_recording_stamps_when_it_began_and_the_loop_opens_its_span_there(self, tmp_path):
+        """The loop can be synthesizing for seconds when a recording starts; the span is the watcher's."""
+        with patch.object(st, "PLAYBACK_STATE_FILE", tmp_path / "playback.json"):
+            hold(["b"])
+            st.write_playback_state(mic_held=True)
+            began = st.read_playback_state()["mic_held_since"]
+            st.write_playback_state(mic_held=True)
+            assert st.read_playback_state()["mic_held_since"] == began, "a second write keeps the start"
+            state = {**st.read_playback_state(), "mic_held_since": began - 5.0}
+            recordings = d.PauseLedger()
+            d.mark_recording(recordings, state)
+            assert recordings.held_since(began - 6.0, began) == pytest.approx(5.0)
+            st.write_playback_state(mic_held=False)
+            assert "mic_held_since" not in st.read_playback_state()
+            d.mark_recording(recordings, st.read_playback_state())
+            assert not recordings.paused, "the hand hold alone is not a recording"
+            st.write_playback_state(mic_held=True)
+            release()
+            assert "mic_held_since" not in st.read_playback_state()
 
     @pytest.mark.parametrize(
         "state, msg, trimmed",
