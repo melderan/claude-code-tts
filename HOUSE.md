@@ -301,7 +301,7 @@ tool on Python 3.14 when the machine can supply it (Homebrew: `brew install pyth
 back to what uv finds; the timeline line's `py=` field says which one the daemon runs on. `just up` is the operator side: it rebuilds, installs,
 restarts the daemon, verifies the heartbeat, writes the full output of the run to
 `.logs/just/up-<time>-<git ref>.log`, and appends one line (time, version, git ref, branch, daemon,
-bridge and mic state, run file) to `.logs/just/timeline.log`, which `just timeline` prints. The
+the hatchling that built it, bridge and mic state, run file) to `.logs/just/timeline.log`, which `just timeline` prints. The
 directory is gitignored and lives in the checkout, so a sandbox sharing the working tree can read
 what the host is running without asking. `just --list` shows the rest (`PY=3.14 test`,
 `cov`, `e2e`, `fmt`). Install just with `brew install just` or `uv tool install rust-just`.

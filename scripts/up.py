@@ -22,7 +22,8 @@ not reach the daemon; the tag is what "released" means here (see `claude-tts rel
 `just up --offline` (or `UV_OFFLINE=1`, or `"up_offline": true` in ~/.claude-tts/config.json,
 which is how a scheduled run on that machine gets it) builds from uv's cache alone: the build
 backend and its dependencies must already be there, and no package index is asked. An empty
-cache fails the install step and nothing changes. The timeline line says uv=offline or uv=online.
+cache fails the install step and nothing changes. The timeline line says uv=offline or uv=online,
+and a deploy line says which hatchling built it (hatchling=, "-" when uv did not name one).
 """
 
 from __future__ import annotations
@@ -226,6 +227,19 @@ def announce(ver: str) -> str | None:
     return str(path)
 
 
+def build_backend(run: Path) -> str:
+    """The hatchling version the install step's build resolved, from uv's -v output in the
+    run log, or "-" when it is not there. The last install section and its last selection win:
+    a failed first command is followed by the one that built."""
+    try:
+        text = run.read_text(errors="replace")
+    except OSError:
+        return "-"
+    section = re.split(r"^== \S+ install$", text, flags=re.M)[-1].split("\n== ", 1)[0]
+    found = re.findall(r"Selecting: hatchling==(\S+)", section)
+    return found[-1] if found else "-"
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if_changed = "--if-changed" in args
@@ -305,10 +319,12 @@ def main(argv: list[str] | None = None) -> int:
     # --python: the daemon runs on the newest Python we test; a machine that cannot supply it
     # (no such interpreter, downloads forbidden) falls back to whatever uv finds, and the
     # timeline line records which one the tool landed on (py=).
+    # -v: uv names the build backend it selected ("Selecting: hatchling==X"), which the
+    # timeline line carries as hatchling=, so a pin in pyproject can match this machine's cache.
     step(
         "install",
-        ["uv", "tool", "install", ".", "--force", "--build", "--python", PREFERRED_PYTHON],
-        ["uv", "tool", "install", ".", "--force", "--build"],
+        ["uv", "tool", "install", ".", "--force", "--build", "-v", "--python", PREFERRED_PYTHON],
+        ["uv", "tool", "install", ".", "--force", "--build", "-v"],
     )
     # The installer would restart the daemon itself; we do the one restart below instead,
     # so the daemon finishes its current sentence once, not twice.
@@ -327,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
     daemon = daemon_state(ver)
     pid = daemon_pid()
     record(
-        f"{stamp()} {ident} daemon={daemon} pid={pid} py={tool_python_version()} "
+        f"{stamp()} {ident} daemon={daemon} pid={pid} py={tool_python_version()} hatchling={build_backend(run)} "
         f"bridge={config_flag(['http', 'enabled'])} mic={config_flag(['mic_aware_pause'])} "
         f"took={int(time.time() - started)}s run={run.name}"
     )

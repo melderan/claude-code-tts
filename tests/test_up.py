@@ -207,8 +207,47 @@ def test_install_asks_for_the_preferred_python_then_falls_back(monkeypatch: pyte
     src = inspect.getsource(up.main)
     assert '"--python", PREFERRED_PYTHON' in src
     after_pin = src.split('"--python", PREFERRED_PYTHON', 1)[1]
-    assert '["uv", "tool", "install", ".", "--force", "--build"],' in after_pin
+    assert '["uv", "tool", "install", ".", "--force", "--build", "-v"],' in after_pin
     assert up.PREFERRED_PYTHON == "3.14"
+
+
+def test_build_backend_reads_the_install_section_of_the_run_log(tmp_path: Path) -> None:
+    """The successful (last) install command's selection wins; other steps' text is ignored."""
+    run = tmp_path / "up.log"
+    run.write_text(
+        "== 2026-10-23T01:00:00Z install\n"
+        "$ uv tool install . --force --build -v --python 3.14\n"
+        "DEBUG Selecting: hatchling==1.31.0 [compatible] (hatchling-1.31.0-py3-none-any.whl)\n"
+        "(exit 2)\n"
+        "$ uv tool install . --force --build -v\n"
+        "DEBUG Selecting: hatchling==1.32.4 [compatible] (hatchling-1.32.4-py3-none-any.whl)\n"
+        "== 2026-10-23T01:00:05Z hooks\n"
+        "Selecting: hatchling==9.9.9\n"
+    )
+    assert up.build_backend(run) == "1.32.4"
+    run.write_text("== 2026-10-23T01:00:00Z install\nResolved 1 package\n")
+    assert up.build_backend(run) == "-"
+    assert up.build_backend(tmp_path / "missing.log") == "-"
+
+
+def test_the_deploy_line_carries_the_build_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _checkout(monkeypatch, tmp_path, " M src/x.py")
+
+    class Done:
+        returncode = 0
+        stdout = ""
+
+    def run(cmd, **k):
+        if cmd[:3] == ["uv", "tool", "install"]:
+            assert "-v" in cmd
+            k["stdout"].write("DEBUG Selecting: hatchling==1.32.4 [compatible] (x.whl)\n")
+        return Done()
+
+    monkeypatch.setattr(up.subprocess, "run", run)
+    monkeypatch.setattr(up.time, "sleep", lambda s: None)
+    monkeypatch.setattr(up, "daemon_state", lambda ver: "running")
+    assert up.main(["--dirty"]) == 0
+    assert " hatchling=1.32.4 " in (tmp_path / "timeline.log").read_text()
 
 
 def test_tool_python_reads_the_shebang(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
