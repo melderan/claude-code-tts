@@ -37,7 +37,7 @@ When in doubt, ask your friend before commit. A little pre-work goes a long way.
 The gate enforces this before every commit and push: `scripts/private-check.py` scans tracked files,
 staged changes, unpushed commit messages, the lines those commits add, and their tag notes against `.private-words`, a gitignored
 list of patterns (logins, hostnames, home paths, private tool and repo names) that each maintainer
-keeps in their own checkout. Without the file the step says it is skipped, loudly. A hit that is known and accepted
+keeps in their own checkout. Without the file the step says it is skipped, loudly; but once a clone's check has found its list, it sets `claude-tts.privateWords = required` in that clone's git config, and from then on a missing list fails the gate there and in every worktree of it (a worktree reads the main checkout's list). A hit that is known and accepted
 (the product name in the kit's tests, a path in a commit that history keeps) is written to `.private-allow`, also
 gitignored: where, pattern, and who approved it when and why, tab-separated; the gate prints every approved
 lapse by name and its reason, counts them apart from the clean total, and warns about an allow line that

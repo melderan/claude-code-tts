@@ -13,7 +13,10 @@ words that must never appear are themselves private, so each maintainer keeps th
   3. annotated tags pointing at those commits are searched the same way.
 
 Any hit fails the gate with file:line (or the commit) and the matching pattern. With no word list
-the check prints that it is skipped, so a fresh clone is never silently unprotected.
+the check prints that it is skipped, so a fresh clone is never silently unprotected. The first time
+a clone's check finds its list, it sets `claude-tts.privateWords = required` in the clone's git
+config; from then on a missing list fails there and in every worktree of it, since a list that
+was there and is gone is a hole, not a fresh clone.
 
 A hit that is known and accepted is an approved lapse, written to `.private-allow` (gitignored
 too, it quotes the patterns): three tab-separated fields per line, `where`, `pattern`, `reason`.
@@ -44,6 +47,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 WORDS_FILE = ".private-words"
 ALLOW_FILE = ".private-allow"
+# Set in a clone's git config the first time a word list is found there; a clone that had one
+# and lost it (or a worktree of it, which shares the config) fails instead of skipping.
+REQUIRED_KEY = "claude-tts.privateWords"
 SYNC_HEADER = "# --- managed by scripts/private-words-sync.py: non-public repository names; synced "
 STALE_WARN_DAYS = 14
 STALE_FAIL_DAYS = 45
@@ -251,11 +257,22 @@ def main(argv: list[str]) -> int:
     if home != args.repo and not args.words:
         print(f"private-check: a linked worktree; {WORDS_FILE} and {ALLOW_FILE} from the main checkout {home}")
     words = args.words or (home / WORDS_FILE)
+    required = _git(args.repo, "config", "--get", REQUIRED_KEY).strip() == "required"
     if not words.exists():
+        if required:
+            print(
+                f"private-check: no {words.name} in {home}, and this clone has had one ({REQUIRED_KEY} = required"
+                f" in its git config); FAILED: restore the list, or `git config --unset {REQUIRED_KEY}` on purpose",
+                file=sys.stderr,
+            )
+            return 1
         print(
             f"private-check: no {words.name} in {args.repo}; SKIPPED (create it, one pattern per line)"
         )
         return 0
+    if not args.words and not required:
+        subprocess.run(["git", "config", REQUIRED_KEY, "required"], cwd=args.repo, capture_output=True)
+        print(f"private-check: {REQUIRED_KEY} = required set in this clone's git config; a missing list now fails")
     patterns = load_patterns(words)
     allow_path = args.allow or (home / ALLOW_FILE)
     allows: list[Allow] = []

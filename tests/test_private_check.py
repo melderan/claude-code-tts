@@ -84,6 +84,29 @@ class TestFiles:
         assert pc.main(["--repo", str(path)]) == 0
         assert "SKIPPED" in capsys.readouterr().out
 
+    def test_a_clone_that_had_a_list_fails_when_it_is_gone_and_so_do_its_worktrees(
+        self, repo, tmp_path_factory, capsys
+    ):
+        # 2026-10-24, a sibling's blunt line on the worktree fix: skipping when the list is missing
+        # is the same hole one step later.
+        path, _ = repo
+        (path / ".private-words").write_text("secret-host\n")
+        assert pc.main(["--repo", str(path)]) == 0
+        assert "= required set" in capsys.readouterr().out
+        assert pc.main(["--repo", str(path)]) == 0
+        assert "= required set" not in capsys.readouterr().out, "set once"
+        tree = tmp_path_factory.mktemp("wt") / "tree"
+        git(path, "worktree", "add", "-q", "-b", "side", str(tree))
+        (path / ".private-words").unlink()
+        assert pc.main(["--repo", str(path)]) == 1
+        assert "FAILED" in capsys.readouterr().err
+        assert pc.main(["--repo", str(tree)]) == 1
+
+    def test_an_explicit_list_never_arms_the_clone(self, repo):
+        path, words = repo
+        assert pc.main(["--repo", str(path), "--words", str(words)]) == 0
+        assert pc.main(["--repo", str(path)]) == 0
+
     def test_a_linked_worktree_reads_the_main_checkouts_list(self, repo, tmp_path_factory, capsys):
         # 2026-10-24: a worktree has none of the main checkout's untracked files; its push skipped
         # the check and a private name reached the public main.
