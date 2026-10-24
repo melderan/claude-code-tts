@@ -20,7 +20,7 @@ from claude_code_tts.state import may_play
 SINCE = 1_800_000_000.0
 
 PLAYS = [
-    ("alice--claude--relok8sable", "PR #2058 merged after the second review, the cell builds from main."),
+    ("alice--claude--cells", "PR #2058 merged after the second review, the cell builds from main."),
     ("alice--claude--sandboxes", "The stage cluster is blocked on the IAM role, nothing can start a sandbox."),
     ("alice--claude--jmo", "Card D271 needs your answer before the demo, it picks the region."),
 ]
@@ -46,7 +46,7 @@ def ledger_of(n: int, plays: list[tuple[str, str]]) -> list[dict]:
         if i in at:
             msgs.append(_msg(i, *at[i]))
         else:
-            msgs.append(_msg(i, "alice--claude--house-claude", FIRST_DOWNS[i % len(FIRST_DOWNS)]))
+            msgs.append(_msg(i, "alice--claude--notes", FIRST_DOWNS[i % len(FIRST_DOWNS)]))
     return msgs
 
 
@@ -83,7 +83,7 @@ def test_fifty_replies_three_plays_the_reel_names_the_three_and_no_first_down(tm
     msgs = ledger_of(50, PLAYS)
     w = window_with(tmp_path, msgs)
     mind = Mind(
-        "Relok8sable merged PR #2058, the cell builds from main. Sandboxes is blocked on the IAM role. "
+        "Cells merged PR #2058, the cell builds from main. Sandboxes is blocked on the IAM role. "
         "The jmo room says card D271 needs your answer."
     )
     words, path, how = reel.build(w, {**CFG, "mind_url": MIND_URL}, now=SINCE + 7300, mind=mind, directory=tmp_path)
@@ -112,11 +112,11 @@ def test_the_same_fifty_with_no_mind_speak_the_rooms_own_words(tmp_path: Path) -
 
 def test_control_zero_plays_says_nothing_needs_him_and_asks_no_mind(tmp_path: Path) -> None:
     w = window_with(tmp_path, ledger_of(50, []))
-    mind = Mind("Relok8sable merged PR #1.")
+    mind = Mind("Cells merged PR #1.")
     words, _, how = reel.build(w, {**CFG, "mind_url": MIND_URL}, now=SINCE + 7300, mind=mind, directory=tmp_path)
     assert mind.prompts == []
     assert how == "none needed"
-    assert words == "Too long, didn't listen. 50 replies went unheard from house-claude. Nothing happened that needs you."
+    assert words == "Too long, didn't listen. 50 replies went unheard from notes. Nothing happened that needs you."
 
 
 def test_a_mind_that_does_not_answer_falls_back_to_the_rooms_words_and_says_so(tmp_path: Path) -> None:
@@ -134,13 +134,13 @@ def test_a_mind_that_does_not_answer_falls_back_to_the_rooms_words_and_says_so(t
 def test_a_shipped_claim_the_rooms_never_made_is_dropped_not_reworded() -> None:
     # 10-24: the mind said docker/sandboxes#7503 was merged while the room said it was open.
     cands = [{"session": "a--claude--sandboxes", "play": "PR #7503 is blocked on review, still open."},
-             {"session": "a--claude--relok8sable", "play": "PR #2058 merged."}]
+             {"session": "a--claude--cells", "play": "PR #2058 merged."}]
     kept, dropped = reel.ground(
-        "Sandboxes merged PR #7503. Relok8sable merged PR #2058. Geordi released v9.99.0. "
+        "Sandboxes merged PR #7503. Cells merged PR #2058. Geordi released v9.99.0. "
         "Sandboxes is blocked on review of PR #7503.",
         cands,
     )
-    assert kept == ["Relok8sable merged PR #2058.", "Sandboxes is blocked on review of PR #7503."]
+    assert kept == ["Cells merged PR #2058.", "Sandboxes is blocked on review of PR #7503."]
     assert dropped == ["Sandboxes merged PR #7503.", "Geordi released v9.99.0."]
 
 
@@ -386,15 +386,15 @@ def test_the_loop_notes_every_reply_a_hold_keeps_and_what_it_cost(tmp_path: Path
 
 def test_negation_another_number_bare_numbers_and_unnumbered_shipped_claims_are_dropped() -> None:
     cands = [{"session": "a--claude--sandboxes", "play": "PR #7503 is not merged yet."},
-             {"session": "a--claude--relok8sable", "play": "PR #2058 merged; #2059 still failing on lint."}]
+             {"session": "a--claude--cells", "play": "PR #2058 merged; #2059 still failing on lint."}]
     kept, dropped = reel.ground(
-        "Sandboxes merged PR #7503. Relok8sable merged #2059. Relok8sable merged 2060. "
-        "PRs 2061 and 2062 merged. Geordi released the kit. Relok8sable merged #2058. "
+        "Sandboxes merged PR #7503. Cells merged #2059. Cells merged 2060. "
+        "PRs 2061 and 2062 merged. Geordi released the kit. Cells merged #2058. "
         "PR #7503 is not merged yet.",
         cands,
     )
-    assert kept == ["Relok8sable merged #2058.", "PR #7503 is not merged yet."]
-    assert dropped == ["Sandboxes merged PR #7503.", "Relok8sable merged #2059.", "Relok8sable merged 2060.",
+    assert kept == ["Cells merged #2058.", "PR #7503 is not merged yet."]
+    assert dropped == ["Sandboxes merged PR #7503.", "Cells merged #2059.", "Cells merged 2060.",
                        "PRs 2061 and 2062 merged.", "Geordi released the kit."]
 
 
@@ -439,7 +439,7 @@ def test_an_http_protocol_error_is_a_mind_that_did_not_answer(tmp_path: Path) ->
 @pytest.mark.parametrize("url, ok", [
     (MIND_URL, True), ("http://localhost:8642/v1/chat/completions", True), ("http://[::1]:8642/x", True),
     ("https://example.com/v1/chat/completions", False), ("file:///etc/passwd", False),
-    ("http://host.docker.internal:8642/x", False), ("http://127.0.0.1.example.com/x", False),
+    ("http://10.0.0.2:8642/x", False), ("http://127.0.0.1.example.com/x", False),
 ])
 def test_the_mind_is_asked_only_on_this_machine(url: str, ok: bool) -> None:
     assert reel.local_url(url) is ok
@@ -479,7 +479,7 @@ def test_one_dropped_play_is_told_at_the_release_however_short_the_hold(tmp_path
     w.note_outcome(msg, "dropped", "kraken")
     d.state = {"paused": False}
     words = w.tick(SINCE + 300)
-    assert "1 reply went unheard from relok8sable" in words and "#2058" in words
+    assert "1 reply went unheard from cells" in words and "#2058" in words
 
 
 def test_a_let_through_rooms_stale_reply_is_not_the_holds_cost(tmp_path: Path) -> None:

@@ -84,6 +84,19 @@ class TestFiles:
         assert pc.main(["--repo", str(path)]) == 0
         assert "SKIPPED" in capsys.readouterr().out
 
+    def test_a_linked_worktree_reads_the_main_checkouts_list(self, repo, tmp_path_factory, capsys):
+        # 2026-10-24: a worktree has none of the main checkout's untracked files; its push skipped
+        # the check and a private name reached the public main.
+        path, _ = repo
+        (path / ".private-words").write_text("secret-host\n")
+        tree = tmp_path_factory.mktemp("wt") / "tree"
+        git(path, "worktree", "add", "-q", "-b", "side", str(tree))
+        (tree / "notes.txt").write_text("talks to secret-host\n")
+        git(tree, "add", "-A")
+        assert pc.main(["--repo", str(tree)]) == 1
+        out = capsys.readouterr()
+        assert "from the main checkout" in out.out and "notes.txt:1" in out.err
+
 
 class TestMessages:
     def test_unpushed_commit_message_hit_fails(self, repo, capsys):

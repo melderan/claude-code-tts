@@ -220,6 +220,25 @@ def scan_unpushed(repo: Path, patterns: list[re.Pattern[str]]) -> list[str]:
     return hits
 
 
+def lists_home(repo: Path) -> Path:
+    """Where the gitignored lists live: the checkout itself, else the main checkout of a linked worktree.
+
+    A worktree shares the main checkout's .git but not its untracked files, so it has no word list
+    of its own; read from it, the check skipped and a private repo name reached the public main
+    (9.74.0, 2026-10-24). A worktree with its own list keeps it.
+    """
+    if (repo / WORDS_FILE).exists():
+        return repo
+    r = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=repo, capture_output=True, text=True
+    )
+    common = Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
+    if common is None or common.name != ".git":
+        return repo
+    main_checkout = common.parent
+    return main_checkout if (main_checkout / WORDS_FILE).exists() else repo
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -228,14 +247,17 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--words", type=Path, default=None)
     parser.add_argument("--allow", type=Path, default=None, help=f"approved lapses (default {ALLOW_FILE})")
     args = parser.parse_args(argv)
-    words = args.words or (args.repo / WORDS_FILE)
+    home = lists_home(args.repo)
+    if home != args.repo and not args.words:
+        print(f"private-check: a linked worktree; {WORDS_FILE} and {ALLOW_FILE} from the main checkout {home}")
+    words = args.words or (home / WORDS_FILE)
     if not words.exists():
         print(
             f"private-check: no {words.name} in {args.repo}; SKIPPED (create it, one pattern per line)"
         )
         return 0
     patterns = load_patterns(words)
-    allow_path = args.allow or (args.repo / ALLOW_FILE)
+    allow_path = args.allow or (home / ALLOW_FILE)
     allows: list[Allow] = []
     if allow_path.exists():
         allows, errors = load_allows(allow_path)
