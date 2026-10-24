@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from claude_code_tts import __version__, msgqueue
+from claude_code_tts import __version__, msgqueue, reel
 from claude_code_tts.config import TTS_CONFIG_DIR, load_raw_config
 from claude_code_tts.state import (
     click_read_through_hold,
@@ -602,7 +602,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._send_json(
                 200,
                 pause_view(
-                    self.server.read_playback_state(), self.server.mic_hold_max_s(), self.server.read_output_device()
+                    self.server.read_playback_state(), self.server.mic_hold_max_s(), self.server.read_output_device(),
+                    reel.read_status(),
                 ),
             )
         elif path == "/queue":
@@ -780,13 +781,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self._send_json(200, view)
 
 
-def pause_view(state: dict, mic_hold_max_s: float = 0.0, output_device: dict | None = None) -> dict:
+def pause_view(
+    state: dict, mic_hold_max_s: float = 0.0, output_device: dict | None = None, reel_status: dict | None = None
+) -> dict:
     """The hold as a page sees it: the flag, who set it and since when, whether audio is out.
 
     `held_until` is the moment the daemon lets a mic hold go on its own (the hold's
     start plus mic_pause_max_s) so a page can grey its Resume button while a
     recording holds the floor and show how long that can last; a person's hold has
     no bound, so it is null there. Both times are RFC 3339 in UTC, null when not held.
+    `held_for_s` is the hold's age. `unheard`, `hold_cost` and `reel_ready` are what a
+    person's hold has kept from them so far (reel.py's status, only while it is the same
+    hold): the replies not played, what was dropped by name (trimmed, stale, expired,
+    dropped), and whether a TLDL reel is due; `reel_last_at` is when the last one was made.
     """
     current = state.get("current_message") or {}
     paused = bool(state.get("paused", False))
@@ -796,6 +803,9 @@ def pause_view(state: dict, mic_hold_max_s: float = 0.0, output_device: dict | N
     held_until = None
     if since is not None and state.get("paused_by") == "mic" and mic_hold_max_s > 0:
         held_until = _rfc3339(since + mic_hold_max_s)
+    rs = reel_status or {}
+    same_hold = since is not None and isinstance(rs.get("held_since"), (int, float)) and abs(rs["held_since"] - since) < 1
+    last = rs.get("reel_last_at") if same_hold else None
     return {
         "paused": paused,
         "paused_by": state.get("paused_by") if paused else None,
@@ -806,6 +816,11 @@ def pause_view(state: dict, mic_hold_max_s: float = 0.0, output_device: dict | N
         "speaking": bool(state.get("audio_pid")),
         "current": {k: current[k] for k in ("id", "source", "project") if current.get(k)},
         "output_device": _output_device_view(output_device),
+        "held_for_s": round(time.time() - since) if since is not None else None,
+        "unheard": int(rs.get("unheard") or 0) if same_hold else 0,
+        "hold_cost": dict(rs.get("hold_cost") or {}) if same_hold else {},
+        "reel_ready": bool(rs.get("reel_ready")) if same_hold else False,
+        "reel_last_at": _rfc3339(float(last)) if isinstance(last, (int, float)) else None,
     }
 
 

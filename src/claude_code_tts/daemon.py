@@ -59,6 +59,7 @@ from claude_code_tts.level import normalize as normalize_level
 from claude_code_tts.mic_watcher import MicWatcher
 from claude_code_tts.msgqueue import NOW_LANE, PauseLedger, next_speakable, play_order, text_of
 from claude_code_tts.outputdevice import OutputDeviceWatch
+from claude_code_tts.reel import ReelWatch
 from claude_code_tts.state import (
     UNSET,
     acquire_lock,
@@ -196,6 +197,10 @@ _SPEAKING: dict[str, Any] = {"session": "", "lane": "", "queued_at": None}
 # lands during that scan keeps asked ahead: counters, not a flag, because the bridge thread
 # and the loop thread both touch them with no lock.
 _PREEMPT: dict[str, int] = {"asked": 0, "settled": 0}
+
+# The TLDL reel's watch (reel.py), set by daemon_loop: the loop notes what a person's hold
+# keeps and every outcome it writes; the watch's own thread makes the reel.
+_REEL: ReelWatch | None = None
 
 
 def request_preempt() -> None:
@@ -1395,6 +1400,11 @@ def _outcome(msg: dict, outcome: str, reason: str = "", **extra: object) -> None
     session_id, msg_id = str(msg.get("session_id") or ""), msg.get("id")
     if not session_id or not msg_id:
         return
+    if _REEL is not None:
+        try:
+            _REEL.note_outcome(msg, outcome, reason)
+        except Exception as e:  # noqa: BLE001  the reel never costs the ledger its line
+            log(f"TLDL reel could not note {msg_id} ({outcome}): {e}", "WARN")
     if not voice_ledger.record_outcome(session_id, str(msg_id), outcome, reason, extra=dict(extra)):
         log(f"Voice ledger write failed for {msg_id} ({outcome})", "WARN")
 
@@ -1975,6 +1985,19 @@ def daemon_loop(lockpick: bool = False) -> None:
         output_watch = None
         write_output_device(None)  # a file an earlier daemon left on another machine says nothing here
 
+    # The TLDL reel (D269): what a person's hold keeps, as a minute of highlights.
+    global _REEL
+    reel_watch = ReelWatch(
+        log_fn=log,
+        read_state=read_playback_state,
+        may_play=lambda s, session: may_play(s, session),
+        load_config=load_raw_config,
+        enqueue=msgqueue.write_message,
+        queued=get_queue_messages,
+    )
+    _REEL = reel_watch
+    reel_watch.start()
+
     # Start Handy voice analyzer if recordings directory exists
     handy_analyzer: AnalyzerThread | None = None
     if raw_config.get("handy_analyzer", True):
@@ -2078,6 +2101,11 @@ def daemon_loop(lockpick: bool = False) -> None:
                 # counted as waiting, until the release (36 of 56 on 2026-10-20).
                 scanned = drop_superseded(drop_all_requested(get_queue_messages()), supersedes, ledger, recordings)
                 allowed = [m for m in scanned if _may_play(state, m)]
+                if _REEL is not None:
+                    try:
+                        _REEL.note_held(state, [m for m in scanned if not _may_play(state, m)])
+                    except Exception as e:  # noqa: BLE001  the reel never stops the trim below
+                        log(f"TLDL reel could not note the held queue: {e}", "WARN")
                 enforce_max_depth(config["max_depth"], None, [m for m in scanned if _trimmed_while_held(state, m)])
                 # A message cut off on deck that the hold lets play (a click a recording paused,
                 # a room let through) resumes with nothing queued; else it waits for a release.
@@ -2533,6 +2561,7 @@ def daemon_loop(lockpick: bool = False) -> None:
         mic_watcher.stop()
     if output_watch:
         output_watch.stop()
+    reel_watch.stop()
     if handy_analyzer:
         handy_analyzer.stop()
     if bridge:

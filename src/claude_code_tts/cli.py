@@ -114,6 +114,14 @@ def cmd_status(args: argparse.Namespace) -> None:
         from claude_code_tts.outputdevice import describe
 
         print(f"Output:   {describe(device)}")
+    from claude_code_tts.reel import describe_hold, read_status
+    from claude_code_tts.state import read_playback_state
+
+    status, since = read_status(), read_playback_state().get("paused_since")
+    same_hold = isinstance(since, (int, float)) and abs(float(status.get("held_since") or 0) - since) < 1
+    hold = describe_hold(status) if same_hold else ""
+    if hold:
+        print(f"Hold:     {hold}")
 
 
 def _flatten_config(data: dict, prefix: str = "") -> dict[str, object]:
@@ -1832,6 +1840,7 @@ def cmd_kraken(args: argparse.Namespace) -> None:
     and the next daemon takes it before anything older plays.
     """
     from claude_code_tts import msgqueue
+    from claude_code_tts.reel import REEL_SESSION
     from claude_code_tts.state import (
         daemon_release,
         is_daemon_running,
@@ -1841,7 +1850,10 @@ def cmd_kraken(args: argparse.Namespace) -> None:
     )
 
     if getattr(args, "drop", False):
-        speech = [m for m in msgqueue.scan() if m.get("type") != "control"]
+        # A TLDL reel waiting in the queue is the summary of what the drop throws away; it stays.
+        speech = [
+            m for m in msgqueue.scan() if m.get("type") != "control" and m.get("session_id") != REEL_SESSION
+        ]
         ids = [str(m.get("id") or "") for m in speech if m.get("id")]
         running, _pid = is_daemon_running()
         daemon_version = daemon_release()

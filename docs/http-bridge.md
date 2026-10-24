@@ -206,6 +206,19 @@ wants only its own reading to stop uses `/stop`. A person's hold can let named r
   profiler answers nothing leaves the last device standing with its own stamp, so `checked_at`
   is the freshness. `null` on a daemon that is not on macOS. A page shows a person whether the
   headphones are the output without a shell. Added additively in 9.49.0.
+- `held_for_s` is the hold's age in seconds (`null` when not paused). `unheard`, `hold_cost`,
+  `reel_ready` and `reel_last_at` are what a person's hold has kept from them, from the TLDL
+  reel's status (`src/claude_code_tts/reel.py`, `~/.claude-tts/reel/status.json`), and only
+  while it is the same hold: `unheard` is the replies the hold kept that have not played;
+  `hold_cost` is what it dropped, by name (`trimmed` by max_depth, `stale` after a newer prompt,
+  `expired`, `dropped` by `kraken --drop`); `reel_ready` is `true` when a reel is due: 50
+  unheard since the last reel (stale ones not counted), or two hours since the hold began or
+  the last reel, and never within an hour of the last one, so `unheard` can be past 50 while
+  `reel_ready` is `false`; `reel_last_at` is when the last reel was made, RFC 3339 UTC, else
+  `null`. A reel is the session `tldl`: a hold whose `let_through` names `tldl` lets it play,
+  any other hold keeps it; at Resume one reel tells what the hold dropped when that holds a play
+  or is ten replies or more. Outside a person's hold these read `0`, `{}`, `false`, `null`.
+  Added additively in 9.74.0.
 
 - `paused_by` is `user` for a person (hotkey, CLI, or this route) and `mic` for the mic watcher;
   `null` when not paused.

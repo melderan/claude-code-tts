@@ -1533,6 +1533,19 @@ DEFAULT_CONFIG = {
         "prefetch_next": True,  # synthesize the next message while the current one plays
         "normalize_dbfs": -16,  # speech level every WAV is brought to, so engines match; null disables
     },
+    # The TLDL reel (reel.py): a minute of highlights of what a person's hold kept from them.
+    "reel": {
+        "enabled": True,
+        "every_unheard": 50,  # a reel is due at this many unheard replies ...
+        "after_s": 7200,  # ... or this long into the hold, whichever comes first
+        "min_gap_s": 3600,  # at most one reel this often
+        "max_words": 150,  # about 60 seconds spoken
+        "max_candidates": 120,  # the newest candidate plays one reel reads
+        "mind_url": "",  # a local OpenAI-shaped chat endpoint that cuts the plays; "" = the rooms' own words
+        "mind_model": "",
+        "mind_timeout_s": 120,
+        "persona": "",  # "" = active_persona
+    },
     "sounds": {
         "enabled": False,
         "volume": 0.5,
