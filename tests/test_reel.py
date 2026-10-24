@@ -341,13 +341,17 @@ def test_the_current_hold_and_other_files_are_never_touched(tmp_path: Path) -> N
     assert sorted(p.name for p in tmp_path.iterdir()) == ["hold-1800000000.jsonl", "notes.txt", "status.json"]
 
 
-def test_a_reels_words_go_keep_days_after_they_were_written(tmp_path: Path) -> None:
+def test_a_reels_words_are_never_deleted(tmp_path: Path) -> None:
+    # Nothing else records what a reel told the person; a record stays until it no longer matters,
+    # and a timer is not that judgment.
     w = window_with(tmp_path, ledger_of(50, PLAYS))
     _, path, _ = reel.build(w, CFG, now=SINCE + 600, directory=tmp_path)
     assert path is not None
     os.utime(path, (SINCE + 600, SINCE + 600))
-    assert reel.prune(tmp_path, 7, SINCE + 600 + 6 * DAY, current=SINCE) == [] and path.exists()
-    assert reel.prune(tmp_path, 7, SINCE + 600 + 7 * DAY + 1, current=SINCE) == [f"deleted {path.name}, heard 7 days ago"]
+    w.mark_released(SINCE + 700)
+    hold = tmp_path / f"hold-{SINCE:.0f}.jsonl"
+    assert reel.prune(tmp_path, 7, SINCE + 365 * DAY) == [f"deleted {hold.name}, heard 364 days ago"]
+    assert path.exists()
 
 
 def test_the_watch_looks_for_old_files_once_an_hour(tmp_path: Path) -> None:

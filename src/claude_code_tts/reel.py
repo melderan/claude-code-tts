@@ -29,11 +29,11 @@ Files, all under ``~/.claude-tts/reel/``, appended or written whole:
   The directory is shared with every sandbox that mounts it, so full replies are not kept here;
   they are in each room's own voice ledger, which nothing deletes from.
 - ``<UTC stamp>.txt``: the words of each reel, written before they are spoken.
-
-A hold file is kept until its hold ends and then ``keep_days`` more, then deleted; a reel's words
-are kept ``keep_days`` after they were written. A hold file the daemon never saw end (it was
-down at the release) is closed when it is found, and its days start then.
 - ``status.json``: the hold as the daemon last saw it, for ``claude-tts status`` and the bridge.
+
+A hold file is kept until its hold ends and then ``keep_days`` more, then deleted. A hold file
+the daemon never saw end (it was down at the release) is closed when it is found, and its days
+start then. A reel's words are never deleted: nothing else records what a reel told the person.
 """
 
 from __future__ import annotations
@@ -77,7 +77,6 @@ DEFAULTS: dict = {
 # How often the watch looks for files past keep_days.
 PRUNE_EVERY_S = 3600.0
 HOLD_FILE = re.compile(r"hold-(\d+)\.jsonl")
-REEL_FILE = re.compile(r"\d{8}T\d{6}Z\.txt")
 
 # The outcome reasons a hold's cost is counted in, by the name a reader sees.
 COST_NAMES = {"depth": "trimmed", "superseded": "stale", "expired": "expired", "kraken": "dropped"}
@@ -510,7 +509,7 @@ def build(
 
 
 def prune(directory: Path, keep_days: float, now: float, current: float | None = None) -> list[str]:
-    """Delete the hold files heard more than keep_days ago and reels written that long ago.
+    """Delete the hold files heard more than keep_days ago; a reel's words are never deleted.
 
     The current hold's file is never touched. A hold file with no release line belongs to a
     hold the daemon never saw end; it is closed now, so its keep_days start from today.
@@ -525,23 +524,17 @@ def prune(directory: Path, keep_days: float, now: float, current: float | None =
     for name in names:
         path = directory / name
         m = HOLD_FILE.fullmatch(name)
-        if m:
-            since = float(m.group(1))
-            if current is not None and f"{since:.0f}" == f"{current:.0f}":
-                continue
-            window = HoldWindow(since, directory)
-            if not window.released:
-                window.mark_released(now)
-                done.append(f"closed {name}, a hold that ended while the daemon was away")
-                continue
-            heard = window.released_at
-        elif REEL_FILE.fullmatch(name):
-            try:
-                heard = path.stat().st_mtime
-            except OSError:
-                continue
-        else:
+        if not m:
             continue
+        since = float(m.group(1))
+        if current is not None and f"{since:.0f}" == f"{current:.0f}":
+            continue
+        window = HoldWindow(since, directory)
+        if not window.released:
+            window.mark_released(now)
+            done.append(f"closed {name}, a hold that ended while the daemon was away")
+            continue
+        heard = window.released_at
         if heard is not None and now - heard > keep_s:
             try:
                 path.unlink()
