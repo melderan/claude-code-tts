@@ -747,6 +747,57 @@ class TestWatchLoopIsALoop:
         assert calls["n"] == 3
 
 
+class TestRotationKeepsEveryLine:
+    """Handy rotates its log several times a day; a dictation that began in the new file
+    before the watcher noticed the rotation used to be skipped, and a reply played over it
+    (2026-10-23, 16:29 PDT)."""
+
+    def _watcher(self, state: dict) -> MicWatcher:
+        return MicWatcher(
+            log_fn=MagicMock(),
+            read_playback_state=lambda: dict(state),
+            write_playback_state=lambda **kw: state.update(kw),
+            resume_delay_ms=50,
+        )
+
+    def test_a_start_line_already_in_the_new_file_pauses(self, tmp_path, monkeypatch):
+        log_file = tmp_path / "handy.log"
+        log_file.write_text("[DEBUG] older chatter\n")
+        monkeypatch.setattr(mw, "HANDY_LOG", log_file)
+        state = {"paused": False, "paused_by": None}
+        w = self._watcher(state)
+        _start_tailing(w)
+        try:
+            # The new file appears whole, start line in it, before the rotation check runs.
+            fresh = tmp_path / "handy.log.new"
+            fresh.write_text(
+                "[2026-10-23][16:29:05][handy_app_lib::managers::audio][DEBUG] "
+                "Recording started for binding transcribe\n"
+            )
+            log_file.rename(tmp_path / "handy.log.1")
+            fresh.rename(log_file)
+            assert _wait_for(lambda: _logged(w, "from the top of the new file"))
+            assert _wait_for(lambda: state["paused"] is True)
+            assert state["paused_by"] == "mic"
+        finally:
+            w.stop()
+
+    def test_a_reopen_of_the_same_file_does_not_replay_it(self, tmp_path, monkeypatch):
+        log_file = tmp_path / "handy.log"
+        log_file.write_text("")
+        monkeypatch.setattr(mw, "HANDY_LOG", log_file)
+        state = {"paused": False, "paused_by": None}
+        w = self._watcher(state)
+        with open(log_file, "a") as f:
+            f.write("[DEBUG] Recording started for binding transcribe\n")
+        with open(log_file) as f:
+            w._place(f)
+            assert w._read_line(f) == ""
+        with open(log_file) as f:
+            assert w._place(f) == "from where reading stopped"
+            assert w._read_line(f) == ""
+
+
 class TestRecordingThatNeverBegan:
     """Handy logs "start called" and returns early when the microphone or model is missing.
 

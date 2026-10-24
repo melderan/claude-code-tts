@@ -188,6 +188,10 @@ class MicWatcher:
         self._recordings_dir = recordings_dir
         self._files_at_start: set[str] = set()  # Handy's recordings when the hold began
         self._last_dir_check = 0.0
+        # The file being tailed (inode) and how far into it the last line read ended; None
+        # until the first open of this run.
+        self._tail_inode: int | None = None
+        self._tail_pos = 0
         # Lines read from the log. Counted as each is read, so a count past line N says line N
         # was handled; a stop line skipped for no open recording logs nothing else to wait on.
         self.lines_read = 0
@@ -428,44 +432,79 @@ class MicWatcher:
             pass
         return False
 
+    def _place(self, f: IO[Any]) -> str:
+        """Put a fresh open of the log where reading should go on; return where, for the log line.
+
+        The first open of a run goes to the end: those lines came before the daemon looked, and
+        _initial_mic_event already read them. A reopen of the same file continues where the last
+        line read ended. A new file (Handy rotated its log) or a truncated one is read from the
+        top, since every line in it came after the last one read: through 9.73.3 a rotation
+        seeked to its end, and on 2026-10-23 a dictation that began in the two seconds before
+        the rotation was noticed went unseen, so a reply played over the speaker.
+        """
+        st = os.fstat(f.fileno())
+        if self._tail_inode is None:
+            f.seek(0, os.SEEK_END)
+            where = "from its end"
+        elif st.st_ino == self._tail_inode and st.st_size >= self._tail_pos:
+            f.seek(self._tail_pos)
+            where = "from where reading stopped"
+        else:
+            where = "from the top of the new file"
+        self._tail_inode = st.st_ino
+        self._tail_pos = f.tell()
+        return where
+
+    def _read_line(self, f: IO[Any]) -> str:
+        line = f.readline()
+        if line:
+            self._tail_pos = f.tell()
+        return line
+
+    def _handle_line(self, line: str) -> None:
+        self.lines_read += 1
+        line = line.strip()
+        if not line:
+            return
+
+        if _RE_RECORDING_START.search(line):
+            self._begin_recording()
+            self._pause_for_mic()
+
+        elif _RE_RECORDING_STOP.search(line):
+            if not self._recording:
+                # Handy logs several stop-side lines per recording;
+                # the first one already resumed us.
+                return
+            self._recording = False
+            # Wait for transcription + paste before resuming
+            self._stop_event.wait(self._resume_delay)
+            if not self._stop_event.is_set():
+                self._resume_after_mic()
+
     def _watch_once(self) -> None:
         """Tail the Handy log file until it rotates, errors, or a stop is requested."""
         self._last_rotation_check = time.monotonic()
 
         try:
-            # Open and seek to end — we only care about new events
             with open(HANDY_LOG) as f:
-                f.seek(0, os.SEEK_END)
-                self._log(f"Mic watcher: tailing {HANDY_LOG}")
+                where = self._place(f)
+                self._log(f"Mic watcher: tailing {HANDY_LOG} {where}")
 
                 while not self._stop_event.is_set():
-                    line = f.readline()
+                    line = self._read_line(f)
                     if not line:
                         if self._check_rotation(f):
+                            # A line written to the old file after the last read and before
+                            # the rename is still in it; read it before moving on.
+                            while not self._stop_event.is_set() and (line := self._read_line(f)):
+                                self._handle_line(line)
                             break  # Will restart in outer loop
                         self._poll_saved_recording()
                         self._stop_event.wait(0.05)
                         continue
 
-                    self.lines_read += 1
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    if _RE_RECORDING_START.search(line):
-                        self._begin_recording()
-                        self._pause_for_mic()
-
-                    elif _RE_RECORDING_STOP.search(line):
-                        if not self._recording:
-                            # Handy logs several stop-side lines per recording;
-                            # the first one already resumed us.
-                            continue
-                        self._recording = False
-                        # Wait for transcription + paste before resuming
-                        self._stop_event.wait(self._resume_delay)
-                        if not self._stop_event.is_set():
-                            self._resume_after_mic()
+                    self._handle_line(line)
 
         except Exception as e:
             self._log(f"Mic watcher error: {e}", "ERROR")
