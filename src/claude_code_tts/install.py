@@ -1545,6 +1545,7 @@ DEFAULT_CONFIG = {
         "mind_model": "",
         "mind_timeout_s": 120,
         "persona": "",  # "" = active_persona
+        "keep_days": 7,  # a hold file is deleted this long after its hold ends, a reel's words this long after they were written
     },
     "sounds": {
         "enabled": False,

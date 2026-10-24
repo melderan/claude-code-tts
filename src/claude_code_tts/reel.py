@@ -22,13 +22,17 @@ that fails is dropped, never reworded (2 of 7 PR claims were wrong in the first 
 With no mind, a mind that does not answer, or nothing of its that holds up, the reel speaks the
 rooms' own first sentences.
 
-Files, all under ``~/.claude-tts/reel/``, appended or written whole, never deleted:
+Files, all under ``~/.claude-tts/reel/``, appended or written whole:
 
 - ``hold-<since>.jsonl``: one line per reply the hold kept (id, session, time, and for a
   candidate its first sentence; a first down keeps no words), one per outcome, one per reel.
   The directory is shared with every sandbox that mounts it, so full replies are not kept here;
-  they are in each room's own voice ledger.
+  they are in each room's own voice ledger, which nothing deletes from.
 - ``<UTC stamp>.txt``: the words of each reel, written before they are spoken.
+
+A hold file is kept until its hold ends and then ``keep_days`` more, then deleted; a reel's words
+are kept ``keep_days`` after they were written. A hold file the daemon never saw end (it was
+down at the release) is closed when it is found, and its days start then.
 - ``status.json``: the hold as the daemon last saw it, for ``claude-tts status`` and the bridge.
 """
 
@@ -68,7 +72,12 @@ DEFAULTS: dict = {
     "mind_model": "",
     "mind_timeout_s": 120,
     "persona": "",
+    "keep_days": 7,
 }
+# How often the watch looks for files past keep_days.
+PRUNE_EVERY_S = 3600.0
+HOLD_FILE = re.compile(r"hold-(\d+)\.jsonl")
+REEL_FILE = re.compile(r"\d{8}T\d{6}Z\.txt")
 
 # The outcome reasons a hold's cost is counted in, by the name a reader sees.
 COST_NAMES = {"depth": "trimmed", "superseded": "stale", "expired": "expired", "kraken": "dropped"}
@@ -134,6 +143,7 @@ class HoldWindow:
         self.outcomes: dict[str, str] = {}
         self.reels: list[dict] = []
         self.released = False
+        self.released_at: float | None = None
         self._load()
 
     def _load(self) -> None:
@@ -163,6 +173,9 @@ class HoldWindow:
             self.reels.append(r)
         elif kind == "released":
             self.released = True
+            at = r.get("at")
+            if isinstance(at, (int, float)) and not isinstance(at, bool):
+                self.released_at = float(at)
 
     def _append(self, r: dict) -> None:
         self._apply(r)
@@ -206,10 +219,10 @@ class HoldWindow:
                 return
             self._append({"kind": "outcome", "id": msg_id, "outcome": name, "at": time.time()})
 
-    def mark_released(self) -> None:
+    def mark_released(self, now: float | None = None) -> None:
         with self._lock:
             if not self.released:
-                self._append({"kind": "released", "at": time.time()})
+                self._append({"kind": "released", "at": now or time.time()})
 
     def unheard(self) -> list[dict]:
         """Every noted reply that has not played, oldest first."""
@@ -496,6 +509,49 @@ def build(
     return words, path, how
 
 
+def prune(directory: Path, keep_days: float, now: float, current: float | None = None) -> list[str]:
+    """Delete the hold files heard more than keep_days ago and reels written that long ago.
+
+    The current hold's file is never touched. A hold file with no release line belongs to a
+    hold the daemon never saw end; it is closed now, so its keep_days start from today.
+    Returns one line per file closed or deleted, for the log.
+    """
+    keep_s = float(keep_days) * 86400
+    done: list[str] = []
+    try:
+        names = sorted(p.name for p in directory.iterdir())
+    except OSError:
+        return done
+    for name in names:
+        path = directory / name
+        m = HOLD_FILE.fullmatch(name)
+        if m:
+            since = float(m.group(1))
+            if current is not None and f"{since:.0f}" == f"{current:.0f}":
+                continue
+            window = HoldWindow(since, directory)
+            if not window.released:
+                window.mark_released(now)
+                done.append(f"closed {name}, a hold that ended while the daemon was away")
+                continue
+            heard = window.released_at
+        elif REEL_FILE.fullmatch(name):
+            try:
+                heard = path.stat().st_mtime
+            except OSError:
+                continue
+        else:
+            continue
+        if heard is not None and now - heard > keep_s:
+            try:
+                path.unlink()
+            except OSError as e:
+                done.append(f"could not delete {name}: {e}")
+                continue
+            done.append(f"deleted {name}, heard {int((now - heard) // 86400)} days ago")
+    return done
+
+
 def local_url(url: str) -> bool:
     """Whether the mind's URL is http(s) on this machine; replies are never posted anywhere else.
 
@@ -587,6 +643,7 @@ class ReelWatch:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.window: HoldWindow | None = None
+        self._pruned_at: float | None = None
 
     @staticmethod
     def _person_hold(state: dict) -> float | None:
@@ -644,7 +701,11 @@ class ReelWatch:
         if old is not None:
             if cfg["enabled"] and release_due(old):
                 spoken = self._make(old, cfg, raw, now, dropped_only=True)
-            old.mark_released()
+            old.mark_released(now)
+        if self._pruned_at is None or now - self._pruned_at >= PRUNE_EVERY_S:
+            self._pruned_at = now
+            for line in prune(self._dir, float(cfg["keep_days"]), now, since):
+                self._log(f"TLDL reel files: {line}", "INFO")
         write_status(window, cfg, now, self._dir / STATUS_FILE.name)
         if (
             not spoken

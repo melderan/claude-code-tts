@@ -8,6 +8,7 @@ control, 0 plays, makes a reel that says nothing happened that needs him.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -294,6 +295,72 @@ def test_disabled_makes_no_reel(tmp_path: Path) -> None:
     w = d.watch(tmp_path)
     w.note_held(d.state, ledger_of(50, PLAYS))
     assert w.tick(SINCE + 600) == "" and d.queue == []
+
+
+# --- how long the files stay -----------------------------------------------------------------
+
+DAY = 86400.0
+
+
+def test_a_hold_file_stays_until_heard_then_keep_days_then_goes(tmp_path: Path) -> None:
+    d = Daemon({"paused": True, "paused_by": "user", "paused_since": SINCE, "let_through": []})
+    w = d.watch(tmp_path)
+    w.note_held(d.state, ledger_of(5, PLAYS[:1]))
+    hold = tmp_path / f"hold-{SINCE:.0f}.jsonl"
+    w.tick(SINCE + 8 * DAY)
+    assert hold.exists(), "the hold is still on, eight days in: not heard yet"
+    assert not reel.HoldWindow(SINCE, tmp_path).released, "the live hold is never closed by the prune"
+
+    d.state = {"paused": False}
+    released = SINCE + 8 * DAY + 3600
+    w.tick(released)
+    w._pruned_at = None
+    w.tick(released + 7 * DAY - 60)
+    assert hold.exists(), "heard under seven days ago"
+    w._pruned_at = None
+    w.tick(released + 7 * DAY + 60)
+    assert not hold.exists()
+    assert any(f"deleted {hold.name}, heard 7 days ago" in line for line in d.logs)
+
+
+def test_a_hold_that_ended_while_the_daemon_was_away_is_closed_and_kept_its_days(tmp_path: Path) -> None:
+    window_with(tmp_path, ledger_of(5, PLAYS[:1]))
+    hold = tmp_path / f"hold-{SINCE:.0f}.jsonl"
+    found = SINCE + 30 * DAY
+    assert reel.prune(tmp_path, 7, found) == [f"closed {hold.name}, a hold that ended while the daemon was away"]
+    assert reel.HoldWindow(SINCE, tmp_path).released_at == found
+    assert reel.prune(tmp_path, 7, found + 6 * DAY) == [] and hold.exists()
+    assert reel.prune(tmp_path, 7, found + 8 * DAY) == [f"deleted {hold.name}, heard 8 days ago"]
+
+
+def test_the_current_hold_and_other_files_are_never_touched(tmp_path: Path) -> None:
+    window_with(tmp_path, ledger_of(5, PLAYS[:1]))
+    (tmp_path / "status.json").write_text("{}")
+    (tmp_path / "notes.txt").write_text("not ours")
+    assert reel.prune(tmp_path, 7, SINCE + 90 * DAY, current=SINCE) == []
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["hold-1800000000.jsonl", "notes.txt", "status.json"]
+
+
+def test_a_reels_words_go_keep_days_after_they_were_written(tmp_path: Path) -> None:
+    w = window_with(tmp_path, ledger_of(50, PLAYS))
+    _, path, _ = reel.build(w, CFG, now=SINCE + 600, directory=tmp_path)
+    assert path is not None
+    os.utime(path, (SINCE + 600, SINCE + 600))
+    assert reel.prune(tmp_path, 7, SINCE + 600 + 6 * DAY, current=SINCE) == [] and path.exists()
+    assert reel.prune(tmp_path, 7, SINCE + 600 + 7 * DAY + 1, current=SINCE) == [f"deleted {path.name}, heard 7 days ago"]
+
+
+def test_the_watch_looks_for_old_files_once_an_hour(tmp_path: Path) -> None:
+    window_with(tmp_path, ledger_of(5, PLAYS[:1]))
+    d = Daemon({"paused": False})
+    w = d.watch(tmp_path)
+    w.tick(SINCE + 60)
+    assert len(d.logs) == 1 and "closed" in d.logs[0]
+    (tmp_path / "hold-1700000000.jsonl").write_text("")
+    w.tick(SINCE + 60 + reel.PRUNE_EVERY_S - 1)
+    assert len(d.logs) == 1
+    w.tick(SINCE + 60 + reel.PRUNE_EVERY_S)
+    assert len(d.logs) == 2 and "hold-1700000000.jsonl" in d.logs[1]
 
 
 # --- readers ---------------------------------------------------------------------------------
