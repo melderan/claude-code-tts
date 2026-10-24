@@ -124,9 +124,52 @@ def write_message(fields: dict) -> tuple[Path, dict]:
     ensure_dir()
     queue_file = QUEUE_DIR / f"{msg['timestamp']:.6f}_{msg['id']}.json"
     tmp_file = queue_file.with_suffix(".tmp")
-    tmp_file.write_text(json.dumps(msg))
-    tmp_file.rename(queue_file)
+    try:
+        tmp_file.write_text(json.dumps(msg))
+        tmp_file.rename(queue_file)
+    except BaseException:
+        tmp_file.unlink(missing_ok=True)
+        raise
     return queue_file, msg
+
+
+# Older than this, a ".tmp" is not a write in progress: its writer died between the create and
+# the rename (a hook killed at session end leaves an empty one).
+ORPHAN_TMP_AGE_S = 3600.0
+
+
+def sweep_orphan_temps(log: Log | None = None, now: float | None = None, min_age_s: float = ORPHAN_TMP_AGE_S) -> int:
+    """Settle the ".tmp" files a dead writer left; returns how many.
+
+    One that holds a whole message is renamed to its ".json", so it plays or ages out with a
+    ledger line like any other. One that is empty or half written carries nothing a reader
+    could use (the full reply is in the room's voice ledger) and is deleted. Each gets a WARN.
+    """
+    now = now or time.time()
+    settled = 0
+    for f in QUEUE_DIR.glob("*.tmp") if QUEUE_DIR.exists() else []:
+        try:
+            if now - f.stat().st_mtime < min_age_s:
+                continue
+            body = f.read_text("utf-8", errors="replace")
+        except OSError:
+            continue  # renamed or removed under us: its writer finished after all
+        try:
+            msg = json.loads(body)
+        except ValueError:
+            msg = None
+        try:
+            if isinstance(msg, dict) and msg.get("id"):
+                f.rename(f.with_suffix(".json"))
+                what = "left unrenamed by a writer that died; renamed so it is settled"
+            else:
+                f.unlink()
+                what = f"left {len(body)} bytes long by a writer that died; deleted"
+        except OSError:
+            continue  # its writer finished after all
+        _say(log, f"Queue file {f.name} was {what}", "WARN")
+        settled += 1
+    return settled
 
 
 def write_control_message(

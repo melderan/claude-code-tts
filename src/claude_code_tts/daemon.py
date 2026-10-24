@@ -2061,6 +2061,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                 log("daemon.pid was missing (a status check elsewhere removed it); written again", "WARN")
             if time.monotonic() - last_reap >= WORKER_REAP_EVERY_S:
                 last_reap = time.monotonic()
+                msgqueue.sweep_orphan_temps(log)
                 idle_s = float(config.get("worker_idle_unload_s", 1800))
                 for name in reap_idle_workers(idle_s):
                     log(

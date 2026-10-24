@@ -9,6 +9,7 @@ module and nowhere else carries a copy, so a patch aimed at the old home fails l
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -141,6 +142,41 @@ def test_cleanup_deletes_json_that_is_not_an_object_and_says_so(
     said: list[str] = []
     assert mq.cleanup_old_messages(300, log=lambda m, level: said.append(level)) == 1
     assert not bad.exists() and ok.exists() and said == ["WARN"]
+
+
+def test_a_failed_write_leaves_no_temp_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A write that failed after the create left an empty ".tmp" in the queue for days (10-20)."""
+    monkeypatch.setattr(mq, "QUEUE_DIR", tmp_path)
+
+    def full_disk(self: Path, *_a: object, **_k: object) -> int:
+        self.touch()
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "write_text", full_disk)
+    with pytest.raises(OSError):
+        mq.write_message({"session_id": "s", "text": "hi"})
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_dead_writers_temp_files_are_settled_and_a_live_one_is_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(mq, "QUEUE_DIR", tmp_path)
+    old = time.time() - 2 * mq.ORPHAN_TMP_AGE_S
+    whole = {"id": "a1", "timestamp": old, "session_id": "s", "text": "a whole reply"}
+    (tmp_path / f"{old:.6f}_a1.tmp").write_text(json.dumps(whole))
+    (tmp_path / f"{old:.6f}_b2.tmp").write_text("")
+    (tmp_path / f"{old:.6f}_c3.tmp").write_text('{"id": "c3", "te')
+    for f in tmp_path.iterdir():
+        os.utime(f, (old, old))
+    (tmp_path / "9.0_live.tmp").write_text("")
+    said: list[tuple[str, str]] = []
+    assert mq.sweep_orphan_temps(lambda msg, level: said.append((level, msg))) == 3
+    assert mq.sweep_orphan_temps(lambda msg, level: said.append((level, msg))) == 0
+    assert sorted(f.name for f in tmp_path.iterdir()) == [f"{old:.6f}_a1.json", "9.0_live.tmp"]
+    assert json.loads((tmp_path / f"{old:.6f}_a1.json").read_text()) == whole
+    assert [lvl for lvl, _ in said] == ["WARN"] * 3
+    assert any("0 bytes long" in msg for _, msg in said)
 
 
 @pytest.mark.parametrize("text", [5, None, ["a"], {"a": 1}])
