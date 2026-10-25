@@ -219,6 +219,47 @@ class TestLoopLetsRoomsThrough:
                 p.stop()
         assert "letting b through" in (state_dir / "daemon.log").read_text()
 
+    def test_a_restart_keeps_the_hold_and_who_it_lets_through(self, tmp_path):
+        """An upgrade mid-hold: the new daemon starts on a person's hold that lets one room through.
+
+        The hold itself must stand (paused, by whom, since when, the let-through list), not only
+        the queue it holds: a start that dropped it would play every room's held speech at once.
+        """
+        loop_harness, stop_loop = _ledger_helpers()
+
+        state_dir, queue_dir, spoken, patches = loop_harness(tmp_path, {})
+        for p in patches:
+            p.start()
+        runner = None
+        try:
+            st.write_playback_state(paused=True, paused_by="user", let_through=["b"], audio_pid=None, current_message=None)
+            began = time.time() - 600
+            raw = json.loads((state_dir / "playback.json").read_text())
+            raw["paused_since"] = began
+            (state_dir / "playback.json").write_text(json.dumps(raw))
+            # Older than max_age (300 s) by the clock, younger than the hold: only the hold keeps it.
+            held = _enqueue(queue_dir, "a waits", "alice--claude--a", ago=400)
+            _enqueue(queue_dir, "b speaks", "alice--claude--b")
+
+            def run():
+                d._shutdown_requested = False
+                d._daemon_mode = True
+                d.daemon_loop()
+
+            runner = threading.Thread(target=run, daemon=True)
+            runner.start()
+            assert _wait_for(lambda: "b speaks" in spoken), "the let-through room must play after the start"
+            assert loop_passes.wait_passes(3), "the loop stopped passing"
+            assert spoken == ["b speaks"] and held.exists(), "a's message must still be held"
+            state = st.read_playback_state()
+            assert (state.get("paused"), state.get("paused_by"), state.get("let_through")) == (True, "user", ["b"])
+            assert state.get("paused_since") == began
+        finally:
+            if runner is not None:
+                stop_loop(runner)
+            for p in reversed(patches):
+                p.stop()
+
     def test_a_hold_keeps_the_newest_max_depth_of_what_it_holds(self, tmp_path):
         """2026-10-19: a four-hour focus held 731 messages under max_depth 20; the count only grew."""
         loop_harness, stop_loop = _ledger_helpers()
