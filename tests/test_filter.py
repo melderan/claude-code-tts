@@ -61,8 +61,8 @@ class TestFencedBlocksAreSkipped:
         assert result.endswith("Done.")
 
     def test_longer_fence_closes_only_on_an_equal_or_longer_fence(self):
-        text = "A.\n````\n```\nnested()\n```\n````\nB."
-        assert filter_text(text) == "A. B."
+        text = "Before.\n````\n```\nnested()\n```\n````\nAfter."
+        assert filter_text(text) == "Before. After."
 
 
 class TestLongInlineCode:
@@ -300,6 +300,33 @@ class TestUrlsInParentheses:
 
     def test_bracketed_url(self):
         assert filter_text("The docs [https://example.com/a/b] explain it.") == "The docs explain it."
+
+
+class TestOptionLetters:
+    """A choice's letters each get a beat, and the picked one says so (2026-10-25)."""
+
+    def test_every_written_form_becomes_option_and_a_full_stop(self):
+        text = "Pick one:\n- A. Ship it\nB) Wait a day\n**C.** Revert\n**D**: Ask again\n### E. Drop it"
+        assert filter_text(text) == (
+            "Pick one: - Option A. Ship it. Option B. Wait a day. Option C. Revert. "
+            "Option D. Ask again. Option E. Drop it."
+        )
+
+    def test_the_picked_line_says_selected(self):
+        text = "- A. Lift it now.\n- B. Builds only. This is my pick.\n- C. Keep it ★\n- D. Wait (Recommended)"
+        assert filter_text(text) == (
+            "- Option A. Lift it now. - Option B, selected. Builds only. This is my pick. "
+            "- Option C, selected. Keep it. - Option D, selected. Wait (Recommended)."
+        )
+
+    def test_prose_with_a_and_i_is_untouched(self):
+        """The planted control: a lone "A" or "I" that is a word, not a label."""
+        for text in ("A fix is ready.", "I think a fix is ready.", "- A small script checks the issue.",
+                     "I. Introduction", "A\nB", "Plan B. is fine"):
+            assert filter_text(text) == " ".join(text.split())
+
+    def test_documents_get_it_too(self):
+        assert "Option B, selected. Wait." in filter_document("- **B.** Wait ⭐")
 
 
 class TestMarkdown:

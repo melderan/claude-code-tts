@@ -385,6 +385,42 @@ def _speak_refs(text: str) -> str:
     return _HASH_REF.sub(_hash, text)
 
 
+# A line that opens with a lone option letter: "A.", "- B)", "**C.**", "**D**:", "### E.".
+# A to H only: "I." is a pronoun or a roman numeral far more often than a sixth option.
+_OPTION_LINE = re.compile(
+    r"^(?P<lead>[ \t]*(?:[-*+][ \t]+)?(?:#{1,6}[ \t]+)?)"
+    r"(?P<open>\*\*|__)?(?P<letter>[A-H])(?P<close>\*\*|__)?(?P<punct>[.):])?(?:\*\*|__)?"
+    r"(?=[ \t]|$)(?P<rest>.*)$",
+    re.MULTILINE,
+)
+# What marks the option a friend picked: their words, a star, or the (Recommended) tag.
+_OPTION_PICKED = re.compile(r"\bmy pick\b|\(recommended\)|[★⭐]", re.IGNORECASE)
+
+
+def _speak_option_letters(text: str) -> str:
+    """Option lines as "Option B, selected." with a full stop after the letter.
+
+    JMO, 2026-10-25: the letters of a choice came out fast ("B, C, D") and nothing said which
+    one was picked. The sentence break after "Option B" gives each letter its own beat, and the
+    line's own end gets a full stop when it has none, so the next option does not run into it.
+    A letter counts only with its own punctuation or in bold; "A fix is ready" and "I think
+    so" are prose and stay as they are.
+    """
+
+    def _line(m: re.Match) -> str:
+        if not m.group("punct") and not (m.group("open") and m.group("close")):
+            return m.group(0)
+        rest = m.group("rest").strip()
+        picked = ", selected" if _OPTION_PICKED.search(rest) else ""
+        # The star has said its piece; ⭐ is outside the emoji range stripped later and would be read by name.
+        rest = re.sub(r"[ \t]*[★⭐]", "", rest).strip()
+        if rest and rest.rstrip("*_ ")[-1:] not in ".!?:;":
+            rest += "."
+        return f"{m.group('lead')}Option {m.group('letter')}{picked}. {rest}".rstrip()
+
+    return _OPTION_LINE.sub(_line, text)
+
+
 def _filter_markdown(text: str, *, drop_long_code: bool = False) -> str:
     """Shared markdown cleanup used by both filter modes.
 
@@ -398,6 +434,8 @@ def _filter_markdown(text: str, *, drop_long_code: bool = False) -> str:
     # and let the code under it be spoken.
     text = _remove_fences(text)
     text = _summarize_tables(text)
+    # Option letters while their bold, their star and their list marker are still there.
+    text = _speak_option_letters(text)
     # PR and issue numbers while a GitHub link still says which kind it is.
     text = _speak_refs(text)
     # Links and images before long spans: a link whose text is code would otherwise lose
