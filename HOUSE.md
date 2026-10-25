@@ -125,7 +125,7 @@ just ship -F body.txt fix "subject"   # commit-feature.sh -y, push, release --wa
 | `/tts-intermediate [on\|off]` | Toggle intermediate narration (between tool calls) |
 | `/tts-discover` | Auto-suggest persona based on repo context |
 | `/tts-personas` | Sibling-Claude voice picker guide (who do you want to be?) |
-| `/tts-voices` | Every provider's voices: installed, available, who uses them, how to hear one |
+| `/tts-voices` | Every provider's voices: installed, available, who uses them, how to hear one; `--clashes` lists the personas that sound the same (same engine and speaker, speed aside, Kokoro presets compared across swift-kokoro and mlx), exit 1 when there is one (9.76.0) |
 | `/tts-release` | Push a release and upgrade local installation |
 
 ## Standalone Tools

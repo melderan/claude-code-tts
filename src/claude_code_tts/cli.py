@@ -999,6 +999,9 @@ def cmd_voices(args: argparse.Namespace) -> None:
     choose from which providers? One answer, in one place.
     """
 
+    if args.clashes:
+        sys.exit(_print_voice_clashes())
+
     from claude_code_tts.config import MLX_VENV_DIR
     from claude_code_tts.install import AVAILABLE_VOICES
     from claude_code_tts.mlx_catalog import CATALOG
@@ -1085,18 +1088,13 @@ def cmd_voices(args: argparse.Namespace) -> None:
     sids = set(project_personas)
     if TTS_SESSIONS_DIR.is_dir():
         sids.update(sf.stem for sf in TTS_SESSIONS_DIR.glob("*.json"))
+    swift_kokoro = bool(shutil.which("swift-kokoro"))
     rows: list[tuple[str, str, str, str]] = []
     for sid in sorted(sids):
         data = session_read(sid)
         persona = data.get("persona") or project_personas.get(sid) or active
         source = "session" if data.get("persona") else ("project" if project_personas.get(sid) else "default")
-        pc = personas.get(persona, {})
-        voice = (
-            f"mlx {pc['voice_mlx'].rsplit('/', 1)[-1]} {pc.get('speaker_mlx', '')}".strip() if pc.get("voice_mlx")
-            else f"kokoro {pc['voice_kokoro']}" if pc.get("voice_kokoro")
-            else f"sherpa {pc['voice_sherpa']}" if pc.get("voice_sherpa")
-            else str(pc.get("voice", "?"))
-        )
+        voice = _voice_identity(personas[persona], swift_kokoro) if persona in personas else "? (no such persona)"
         rows.append((sid, persona, source, voice))
     if not rows:
         print("  none yet")
@@ -1117,6 +1115,81 @@ def cmd_voices(args: argparse.Namespace) -> None:
 
     print()
     print("Notes on how they sound: docs/voice-notes.md in the repo.")
+
+    shared = sum(len(names) for names in _voice_clashes(personas, swift_kokoro).values())
+    if shared:
+        print()
+        print(f"{shared} personas sound the same as another persona: claude-tts voices --clashes")
+
+
+def _voice_identity(persona: dict, swift_kokoro: bool) -> str:
+    """What a persona sounds like on this machine, as one key; two personas with one key are one voice.
+
+    The engine order is tts_speak's: swift-kokoro only when it is installed, then mlx, sherpa,
+    Piper. Kokoro is one model (Kokoro-82M) whichever engine runs it, so a preset compares the
+    same under swift-kokoro and under mlx-audio. Speed is left out on purpose: the same voice
+    faster is still the voice a listener mistakes for the other friend. A pitch filter changes
+    the sound, so it is part of the key.
+    """
+    blend = persona.get("voice_kokoro_blend") or ""
+    kokoro = persona.get("voice_kokoro") or ""
+    mlx = persona.get("voice_mlx") or ""
+    speaker_mlx = persona.get("speaker_mlx") or ""
+    sherpa = persona.get("voice_sherpa") or ""
+    if swift_kokoro and blend:
+        key = f"kokoro blend {blend}"
+    elif swift_kokoro and kokoro:
+        key = f"kokoro {kokoro}"
+    elif mlx and speaker_mlx and "kokoro" in mlx.lower():
+        key = f"kokoro {speaker_mlx}"
+    elif mlx:
+        key = f"mlx {mlx} {speaker_mlx}".rstrip()
+    elif sherpa:
+        speaker = int(persona.get("speaker_sherpa", -1))
+        key = f"sherpa {sherpa} speaker {speaker}" if speaker >= 0 else f"sherpa {sherpa}"
+    else:
+        voice, speaker = persona.get("voice", "en_US-hfc_male-medium"), int(persona.get("speaker_piper", -1))
+        key = f"piper {voice} speaker {speaker}" if speaker >= 0 else f"piper {voice}"
+    pitch = persona.get("pitch_filter") or ""
+    return f"{key} pitch {pitch}" if pitch else key
+
+
+def _voice_clashes(personas: dict, swift_kokoro: bool) -> dict[str, list[str]]:
+    """Voice key to the personas that share it, only where two or more do."""
+    groups: dict[str, list[str]] = {}
+    for name in sorted(personas):
+        groups.setdefault(_voice_identity(personas[name], swift_kokoro), []).append(name)
+    return {key: names for key, names in groups.items() if len(names) > 1}
+
+
+def _print_voice_clashes() -> int:
+    """Print every voice two or more personas share, and which sessions speak as each.
+
+    Exit 1 when there is at least one, 0 when every persona sounds like itself. It changes
+    nothing: which friend keeps a voice is a person's call, made by ear.
+    """
+    from claude_code_tts.config import VOICE_CARDS_DIR
+
+    config = load_raw_config()
+    clashes = _voice_clashes(config.get("personas", {}), bool(shutil.which("swift-kokoro")))
+    speaking: dict[str, list[str]] = {}
+    for card in sorted(VOICE_CARDS_DIR.glob("*.json")) if VOICE_CARDS_DIR.is_dir() else []:
+        try:
+            data = json.loads(card.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get("persona"):
+            speaking.setdefault(str(data["persona"]), []).append(card.stem)
+    if not clashes:
+        print("No two personas share a voice.")
+        return 0
+    print(f"{len(clashes)} voice(s) shared by more than one persona; sessions from the voice cards in {VOICE_CARDS_DIR}")
+    for key, names in clashes.items():
+        print(f"  {key}")
+        for name in names:
+            who = speaking.get(name, [])
+            print(f"    {name}: {', '.join(who) if who else 'no session speaks as it'}")
+    return 1
 
 
 def cmd_personas(args: argparse.Namespace) -> None:
@@ -4418,6 +4491,8 @@ def main(argv: list[str] | None = None) -> None:
 
     # --- voices ---
     p = subparsers.add_parser("voices", help="Every provider's voices: installed, available, who uses them, how to hear one")
+    p.add_argument("--clashes", action="store_true",
+                   help="Only the voices two or more personas share (same engine and speaker), with the sessions on each; exit 1 when there is one")
     p.set_defaults(func=cmd_voices)
 
     # --- unmute ---

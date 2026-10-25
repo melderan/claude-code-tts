@@ -544,15 +544,92 @@ class TestVoices:
         with patch("shutil.which", return_value=None), patch("claude_code_tts.cli._hf_model_cached", return_value=False):
             main(["voices"])
         out = capsys.readouterr().out
-        assert "claude-prime (default) -> en_US-hfc_male-medium  SAME VOICE as 2 other sessions" in out
-        assert "claude-prime (session) -> en_US-hfc_male-medium  SAME VOICE as 2 other sessions" in out
-        assert "solo (project) -> en_GB-alan-medium\n" in out    # unique: no clash tag
+        assert "claude-prime (default) -> piper en_US-hfc_male-medium  SAME VOICE as 2 other sessions" in out
+        assert "claude-prime (session) -> piper en_US-hfc_male-medium  SAME VOICE as 2 other sessions" in out
+        assert "solo (project) -> piper en_GB-alan-medium\n" in out    # unique: no clash tag
         assert "CLAUDE_TTS_SESSION=<session id above> claude-tts persona <name> --project" in out
 
     def test_slash_command_is_installed(self):
         from claude_code_tts.install import MANIFEST
         assert "tts-voices.md" in MANIFEST["commands"]
         assert (Path(__file__).parent.parent / "commands" / "tts-voices.md").is_file()
+
+
+class TestVoiceClashes:
+    """`claude-tts voices --clashes`: two personas that would sound the same, found from config alone.
+
+    Voices built from a description can come out too alike, and that takes a listener to judge.
+    Same engine and same speaker is the case that needs no audio to call.
+    """
+
+    @staticmethod
+    def _run(tts_home, monkeypatch, personas, cards=None, swift_kokoro=False):
+        cfg_path = tts_home / ".claude-tts" / "config.json"
+        cfg = json.loads(cfg_path.read_text())
+        cfg["personas"] = personas
+        cfg_path.write_text(json.dumps(cfg))
+        cards_dir = tts_home / ".claude-tts" / "voice.d"
+        cards_dir.mkdir()
+        for sid, persona in (cards or {}).items():
+            (cards_dir / f"{sid}.json").write_text(json.dumps({"schema": 1, "session": sid, "persona": persona}))
+        monkeypatch.setattr(config_mod, "VOICE_CARDS_DIR", cards_dir)
+        with patch("shutil.which", return_value="/usr/bin/swift-kokoro" if swift_kokoro else None):
+            with pytest.raises(SystemExit) as exc:
+                main(["voices", "--clashes"])
+        return exc.value.code
+
+    def test_same_kokoro_preset_is_one_voice_whatever_the_speed(self, tts_home, patched_env, capsys, monkeypatch):
+        kokoro = "mlx-community/Kokoro-82M-bf16"
+        code = self._run(tts_home, monkeypatch, {
+            "older": {"voice_mlx": kokoro, "speaker_mlx": "bm_george", "lang_mlx": "b", "speed": 1.8},
+            "newer": {"voice_mlx": kokoro, "speaker_mlx": "bm_george", "lang_mlx": "b", "speed": 2.0},
+            "other": {"voice_mlx": kokoro, "speaker_mlx": "am_michael", "speed": 1.8},
+        }, cards={"alice--claude--forge": "newer"})
+        out = capsys.readouterr().out
+        assert code == 1
+        assert "  kokoro bm_george\n    newer: alice--claude--forge\n    older: no session speaks as it\n" in out
+        assert "other" not in out
+
+    def test_a_preset_clashes_across_swift_kokoro_and_mlx(self, tts_home, patched_env, capsys, monkeypatch):
+        personas = {
+            "mlx-emma": {"voice_mlx": "mlx-community/Kokoro-82M-bf16", "speaker_mlx": "bf_emma"},
+            "emma": {"voice_kokoro": "bf_emma"},
+        }
+        assert self._run(tts_home, monkeypatch, personas, swift_kokoro=True) == 1
+        assert "  kokoro bf_emma\n    emma: no session speaks as it\n    mlx-emma:" in capsys.readouterr().out
+
+    def test_without_swift_kokoro_a_persona_sounds_like_what_plays(self, tts_home, patched_env, capsys, monkeypatch):
+        """tts_speak skips voice_kokoro when swift-kokoro is absent: emma falls to Piper, mlx-emma to mlx."""
+        personas = {
+            "mlx-emma": {"voice_kokoro": "bf_emma", "voice_mlx": "mlx-community/Kokoro-82M-bf16", "speaker_mlx": "bf_emma"},
+            "emma": {"voice_kokoro": "bf_emma", "voice": "en_GB-alan-medium"},
+        }
+        assert self._run(tts_home, monkeypatch, personas) == 0
+        assert "No two personas share a voice." in capsys.readouterr().out
+
+    def test_a_speaker_or_a_pitch_filter_makes_another_voice(self, tts_home, patched_env, capsys, monkeypatch):
+        lib = "en_US-libritts_r-medium"
+        code = self._run(tts_home, monkeypatch, {
+            "s1": {"voice": lib, "speaker_piper": 1},
+            "s2": {"voice": lib, "speaker_piper": 2},
+            "s2-low": {"voice": lib, "speaker_piper": 2, "pitch_filter": "asetrate=19000"},
+            "s2-again": {"voice": lib, "speaker_piper": 2, "speed": 3.0},
+        })
+        out = capsys.readouterr().out
+        assert code == 1
+        assert f"  piper {lib} speaker 2\n    s2: no session speaks as it\n    s2-again:" in out
+        assert "s1" not in out and "s2-low" not in out
+
+    def test_plain_voices_points_at_the_clashes(self, tts_home, patched_env, capsys, tmp_path, monkeypatch):
+        cfg_path = tts_home / ".claude-tts" / "config.json"
+        cfg = json.loads(cfg_path.read_text())
+        cfg["personas"]["prime-twin"] = dict(cfg["personas"]["claude-prime"], speed=3.0)
+        cfg_path.write_text(json.dumps(cfg))
+        for name in ("VOICES_DIR", "SHERPA_MODELS_DIR", "MLX_VENV_DIR"):
+            monkeypatch.setattr(config_mod, name, tmp_path / "none")
+        with patch("shutil.which", return_value=None), patch("claude_code_tts.cli._hf_model_cached", return_value=False):
+            main(["voices"])
+        assert "2 personas sound the same as another persona: claude-tts voices --clashes" in capsys.readouterr().out
 
 
 class TestInheritSessionSettings:
