@@ -225,6 +225,8 @@ JOBS = JobRegistry()
 # CLAUDE_TTS_SESSION has; words of letters, digits and _, joined by single dashes, so
 # nothing in it can name a path.
 SESSION_RE = re.compile(r"\w+(?:-\w+)*(?:--\w+(?:-\w+)*){1,4}", re.ASCII)
+# A request's own speed: the range `claude-tts speed` accepts for a persona.
+SPEED_MIN, SPEED_MAX = 0.5, 4.0
 
 
 def write_bridge_message(
@@ -238,6 +240,7 @@ def write_bridge_message(
     lane: str = "",
     session: str = "",
     name: str = "",
+    speed: float | None = None,
 ) -> dict:
     """Write a queue file the way a hook does, tagged with its source.
 
@@ -247,7 +250,8 @@ def write_bridge_message(
     takes that room's place, so it says "<name> of House <house>, in room <room>" and a
     hold's --let names it like any room. lane "background" lets every other message go
     first, and lane "now" goes before everything (see msgqueue.play_order); the caller
-    tells the daemon a now block is waiting.
+    tells the daemon a now block is waiting. speed, when given, replaces the persona's for
+    this message only; the persona's speed_method still says how it is applied.
     """
     project = f"{source}:{label}" if label else source
     fields = {
@@ -255,7 +259,7 @@ def write_bridge_message(
         "project": project,
         "text": text,
         "persona": persona,
-        "speed": persona_config.get("speed", 2.0),
+        "speed": persona_config.get("speed", 2.0) if speed is None else speed,
         "speed_method": persona_config.get("speed_method", "playback"),
         "source": source,
         "want_marks": bool(want_marks),
@@ -664,6 +668,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if len(name) > 64:
             self._send_json(400, {"error": "name is 64 characters at most"})
             return
+        speed = body.get("speed")
+        if speed is not None and (
+            isinstance(speed, bool) or not isinstance(speed, (int, float)) or not SPEED_MIN <= speed <= SPEED_MAX
+        ):
+            self._send_json(400, {"error": f"speed is a number from {SPEED_MIN} to {SPEED_MAX}", "speed": speed})
+            return
         msg = write_bridge_message(
             text,
             persona=persona,
@@ -674,6 +684,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             lane=lane,
             session=session,
             name=name,
+            speed=None if speed is None else float(speed),
         )
         if lane == msgqueue.NOW_LANE and may_play(
             self.server.read_playback_state(), str(msg.get("session_id", "")), lane, msg.get("timestamp")

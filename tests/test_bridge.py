@@ -252,6 +252,26 @@ def test_speak_refuses_a_long_name(server: Bridge) -> None:
     assert call(server, "POST", "/speak", {"text": "x", "session": "a--b--c", "name": "n" * 65})[0] == 400
 
 
+def test_speak_speed_replaces_the_personas_for_one_block(server: Bridge, tts_home: Path) -> None:
+    """A page's own speed control: the block carries it, the next block without it does not."""
+    queue = tts_home / "queue"
+    assert call(server, "POST", "/speak", {"text": "fast", "speed": 2.5})[0] == 202
+    (fast,) = [json.loads(f.read_text()) for f in queue.glob("*.json")]
+    assert fast["speed"] == 2.5
+    for f in queue.glob("*.json"):
+        f.unlink()
+    assert call(server, "POST", "/speak", {"text": "as before"})[0] == 202
+    (plain,) = [json.loads(f.read_text()) for f in queue.glob("*.json")]
+    assert plain["persona"] == "claude-connery" and plain["speed"] == 1.8
+
+
+@pytest.mark.parametrize("speed", [0.4, 4.1, -1, "2", True, [2]])
+def test_speak_refuses_a_speed_out_of_range_and_queues_nothing(server: Bridge, tts_home: Path, speed: object) -> None:
+    status, body, _ = call(server, "POST", "/speak", {"text": "x", "speed": speed})
+    assert status == 400 and body["speed"] == speed
+    assert not list((tts_home / "queue").glob("*.json"))
+
+
 def test_speak_validation(server: Bridge) -> None:
     assert call(server, "POST", "/speak", {"text": ""})[0] == 400
     assert call(server, "POST", "/speak", {"text": "x", "persona": "nope"})[0] == 400

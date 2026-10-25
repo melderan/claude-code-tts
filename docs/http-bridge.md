@@ -91,6 +91,11 @@ separate "daemon down" answer because the bridge lives inside the daemon.
   it through. `name` is 64 characters at most. `source` still keys `/jobs`
   and `/stop`.
 - `want_marks` asks for timing. Costs one synthesis per sentence instead of one per block.
+- `speed` is optional: a number from 0.5 to 4.0 (anything else: `400`) that replaces the
+  persona's speed for this block only, for a page with its own speed control. The persona's
+  `speed_method` still decides how it is applied: `"playback"` synthesises at 1.0 and the player
+  plays faster, `"length_scale"` (and sherpa) synthesise at that speed. Marks are in listening
+  time at the speed used. Omitted: the persona's speed, as before (9.78.0).
 - `lane` is optional. `"background"` lets every message without it go first: a page reading a
   long document block by block sets it on every block, so a session's one-liner arriving
   mid-read is spoken at the next block boundary instead of behind every queued block. Within a
