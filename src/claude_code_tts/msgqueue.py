@@ -536,7 +536,8 @@ class PauseLedger:
     message's age before the max_age check, and a message that waited through a
     pause is exempt from depth trimming until it plays (while the pause lasts, the
     daemon keeps only the newest max_depth of what it holds). The ledger lives in
-    memory: a daemon restart forgets it and wall-clock age applies again.
+    memory; a daemon that starts while paused opens it at the state file's
+    paused_since (daemon_loop), so a restart mid-hold does not age the held queue.
     """
 
     def __init__(self) -> None:
