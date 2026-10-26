@@ -35,7 +35,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from claude_code_tts import __version__, msgqueue, reel
-from claude_code_tts.config import TTS_CONFIG_DIR, load_raw_config
+from claude_code_tts.config import TTS_CONFIG_DIR, load_raw_config, session_read
 from claude_code_tts.state import (
     click_read_through_hold,
     may_play,
@@ -227,6 +227,22 @@ JOBS = JobRegistry()
 SESSION_RE = re.compile(r"\w+(?:-\w+)*(?:--\w+(?:-\w+)*){1,4}", re.ASCII)
 # A request's own speed: the range `claude-tts speed` accepts for a persona.
 SPEED_MIN, SPEED_MAX = 0.5, 4.0
+
+
+def room_persona(config: dict, session: str) -> str:
+    """The persona a request with none speaks in: the room's own, as a hook would pick it.
+
+    The session file's persona, else project_personas for the session, else active_persona,
+    the order load_config uses for a hook. A room's choice that names no persona in the
+    config is passed over rather than refused: the room cannot fix the config, and its
+    speech should still reach the queue.
+    """
+    personas = config.get("personas", {})
+    if session:
+        for candidate in (session_read(session).get("persona"), config.get("project_personas", {}).get(session)):
+            if candidate and candidate in personas:
+                return str(candidate)
+    return str(config.get("active_persona", "claude-prime"))
 
 
 def write_bridge_message(
@@ -643,9 +659,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not text:
             self._send_json(400, {"error": "text is required"})
             return
+        session = str(body.get("session") or "")
+        if session and not SESSION_RE.fullmatch(session):
+            self._send_json(400, {"error": "session must be owner--house--room in letters, digits, _ . -"})
+            return
         config = load_raw_config()
         personas = config.get("personas", {})
-        persona = str(body.get("persona") or config.get("active_persona", "claude-prime"))
+        persona = str(body.get("persona") or room_persona(config, session))
         if persona not in personas:
             self._send_json(400, {"error": "unknown persona", "persona": persona})
             return
@@ -659,10 +679,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
         lane = str(body.get("lane") or "")
         if lane not in ("", msgqueue.BACKGROUND_LANE, msgqueue.NOW_LANE):
             self._send_json(400, {"error": "lane must be omitted, \"background\" or \"now\"", "lane": lane})
-            return
-        session = str(body.get("session") or "")
-        if session and not SESSION_RE.fullmatch(session):
-            self._send_json(400, {"error": "session must be owner--house--room in letters, digits, _ . -"})
             return
         name = str(body.get("name") or "").strip()
         if len(name) > 64:

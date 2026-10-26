@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import claude_code_tts.bridge as bridge_mod
+import claude_code_tts.config as config_mod
 import claude_code_tts.msgqueue as mq
 from claude_code_tts.bridge import (
     JOBS,
@@ -43,6 +44,7 @@ def tts_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(bridge_mod, "TTS_CONFIG_DIR", cfg_dir)
     monkeypatch.setattr(mq, "QUEUE_DIR", queue)
     monkeypatch.setattr(bridge_mod, "TOKEN_FILE", cfg_dir / "http-token")
+    monkeypatch.setattr(config_mod, "TTS_SESSIONS_DIR", cfg_dir / "sessions.d")
     config = {
         "active_persona": "claude-connery",
         "personas": {
@@ -239,6 +241,49 @@ def test_speak_for_a_room_announces_the_room(server: Bridge, tts_home: Path) -> 
     assert msg["session_id"] == "sbx--gpt--house-gpt"
     assert msg["source"] == "codex-tts"
     assert speak_line(msg, ["rooms"]).line == "Aster of House gpt, in room house-gpt"
+
+
+@pytest.fixture
+def room_voices(tts_home: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Two rooms with voices of their own: one from project_personas, one from its session file."""
+    config = bridge_mod.load_raw_config()
+    for name in ("gpt-gateway-sarah", "house-aster"):
+        config["personas"][name] = {"speed": 1.6, "speed_method": "playback", "max_chars": 60}
+    config["project_personas"] = {
+        "acme--gpt--gateway": "gpt-gateway-sarah",
+        "sbx--gpt--house-gpt": "gpt-gateway-sarah",
+        "acme--gpt--forge": "retired-persona",
+    }
+    (tts_home / "sessions.d").mkdir()
+    (tts_home / "sessions.d" / "sbx--gpt--house-gpt.json").write_text(json.dumps({"persona": "house-aster"}))
+    return config
+
+
+@pytest.mark.parametrize(
+    ("session", "persona"),
+    [
+        ("acme--gpt--gateway", "gpt-gateway-sarah"),
+        ("sbx--gpt--house-gpt", "house-aster"),
+        ("acme--gpt--forge", "claude-connery"),
+        ("acme--gpt--unnamed", "claude-connery"),
+    ],
+)
+def test_speak_for_a_room_without_a_persona_uses_the_rooms_own(
+    server: Bridge, tts_home: Path, room_voices: dict, session: str, persona: str
+) -> None:
+    """A room's client that sends no persona speaks in its own voice: session file, then
+    project_personas, then active_persona; a choice naming no persona in the config is passed over."""
+    status, _, _ = call(server, "POST", "/speak", {"text": "Hi.", "source": "codex-tts", "session": session})
+    assert status == 202
+    msg = json.loads(next((tts_home / "queue").glob("*.json")).read_text())
+    assert msg["persona"] == persona
+    assert msg["speed"] == room_voices["personas"][persona]["speed"]
+
+
+def test_speak_persona_in_the_request_wins_over_the_rooms(server: Bridge, tts_home: Path, room_voices: dict) -> None:
+    body = {"text": "Hi.", "session": "sbx--gpt--house-gpt", "persona": "claude-connery"}
+    assert call(server, "POST", "/speak", body)[0] == 202
+    assert json.loads(next((tts_home / "queue").glob("*.json")).read_text())["persona"] == "claude-connery"
 
 
 @pytest.mark.parametrize(

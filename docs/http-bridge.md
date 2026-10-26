@@ -78,7 +78,10 @@ separate "daemon down" answer because the bridge lives inside the daemon.
 ```
 
 - `text` is required. Longer than the persona's `max_chars`: `413`.
-- `persona` is optional and falls back to the active persona. Unknown: `400`.
+- `persona` is optional. Omitted with a `session`, it is that room's own, as a hook picks it:
+  the session file's persona, else `project_personas[session]`, else the active persona; a
+  room's choice that names no configured persona is passed over (9.79.0). Omitted without a
+  `session`: the active persona. Named and unknown: `400`.
 - `source` is a short label for who is speaking. It becomes the speaker key
   (`session_id` "browser", `project` "<source>:<label>"), so the daemon's speaker-change chime
   fires when a room and the page interleave, exactly as it does between two rooms. Default
