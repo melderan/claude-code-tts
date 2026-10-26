@@ -13,6 +13,7 @@ not just WHAT they said. "JMO said this, and he was animated."
 from __future__ import annotations
 
 import math
+import os
 import re
 import shutil
 import sqlite3
@@ -870,15 +871,30 @@ def save_speech_wav(
 
     history_dir.mkdir(parents=True, exist_ok=True)
 
-    # Name: timestamp_session.wav
+    # Name: timestamp_session.wav. Two saves in one millisecond would share a
+    # name, the second copy would overwrite the first, and trimming the older
+    # row would delete the file the newer row still owns; so the name is
+    # reserved with an exclusive create and takes a -N suffix on a collision.
     ts = time.time()
     safe_session = session_id.replace("/", "_")[:40] if session_id else "unknown"
-    hist_name = f"tts-{ts:.3f}-{safe_session}.wav"
-    hist_path = history_dir / hist_name
+    stem = f"tts-{ts:.3f}-{safe_session}"
+    for n in range(100):
+        hist_name = f"{stem}.wav" if n == 0 else f"{stem}-{n}.wav"
+        hist_path = history_dir / hist_name
+        try:
+            os.close(os.open(hist_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+            break
+        except FileExistsError:
+            continue
+        except OSError:
+            return None
+    else:
+        return None
 
     try:
         shutil.copy2(wav_path, hist_path)
     except OSError:
+        hist_path.unlink(missing_ok=True)
         return None
 
     # Get duration
@@ -902,7 +918,7 @@ def save_speech_wav(
 
         # Enforce limit: delete oldest beyond threshold
         rows = conn.execute(
-            "SELECT id, file_name FROM speech_history ORDER BY created_at DESC"
+            "SELECT id, file_name FROM speech_history ORDER BY created_at DESC, id DESC"
         ).fetchall()
         if len(rows) > history_limit:
             for row_id, old_name in rows[history_limit:]:
@@ -928,7 +944,7 @@ def get_speech_history(
         rows = conn.execute(
             """SELECT file_name, created_at, session_id, project, persona,
                       text, speed, tone, duration_seconds
-               FROM speech_history ORDER BY created_at DESC LIMIT ?""",
+               FROM speech_history ORDER BY created_at DESC, id DESC LIMIT ?""",
             (limit,),
         ).fetchall()
         return [

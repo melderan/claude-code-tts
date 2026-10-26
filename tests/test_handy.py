@@ -383,6 +383,25 @@ class TestSpeechHistory:
         wav_files = list(hist_dir.glob("*.wav"))
         assert len(wav_files) == 3
 
+    def test_saves_in_one_millisecond_keep_their_own_files(self, tmp_path, monkeypatch):
+        """Saves that share a timestamp get distinct files; the trim deletes only its own."""
+        hist_dir = tmp_path / "history"
+        db = tmp_path / "analysis.db"
+        monkeypatch.setattr("claude_code_tts.handy.time.time", lambda: 1792973193.452)
+
+        for i in range(5):
+            wav = tmp_path / f"test_{i}.wav"
+            make_sine_wav(wav, duration=0.2)
+            save_speech_wav(
+                wav, text=f"msg {i}", history_limit=3,
+                history_dir=hist_dir, db_path=db,
+            )
+
+        history = get_speech_history(limit=10, db_path=db)
+        assert [h["text"] for h in history] == ["msg 4", "msg 3", "msg 2"]
+        on_disk = sorted(p.name for p in hist_dir.glob("*.wav"))
+        assert on_disk == sorted(h["file_name"] for h in history)
+
     def test_missing_wav_returns_none(self, tmp_path):
         result = save_speech_wav(
             tmp_path / "nonexistent.wav",
