@@ -43,6 +43,9 @@ process it ran under; `<host>` is the machine's short host name with the same da
   when it has none (added in 9.51.0 under schema 1, so an older reader sees one extra key).
 - `persona`: the persona name after the whole chain (session file, then `project_personas`,
   then the global default).
+- `placeholder`: `true` when that persona carries `"placeholder": true` in config.json: a voice
+  given so the room can be told apart, not one its friend chose. `false` for anything else
+  (added in 9.80.0 under schema 1).
 - `backend`: which engine the persona asks for, in the order the player chooses them:
   `kokoro` when a Kokoro voice or blend is set, else `mlx`, else `sherpa`, else `piper`. It
   says what is configured, not what played: a machine without swift-kokoro falls through at

@@ -141,6 +141,8 @@ class TTSConfig:
     pitch_filter: str = ""  # ffmpeg -af filter applied after synthesis (e.g. for pitch shift)
     max_chars: int = 10000
     active_persona: str = "claude-prime"
+    # The persona says "placeholder": true: a voice given so the room is told apart, not yet chosen.
+    placeholder: bool = False
     session_id: str = ""
     project_name: str = ""
     # The name this session gave itself (`claude-tts name`), spoken when it takes the floor.
@@ -275,6 +277,7 @@ def voice_card(cfg: TTSConfig) -> dict:
         "session": cfg.session_id,
         "name": cfg.name,
         "persona": cfg.active_persona,
+        "placeholder": cfg.placeholder,
         "backend": backend,
         "voice": voice,
         "speed": cfg.speed,
@@ -430,6 +433,7 @@ def load_config(session_id: str | None = None) -> TTSConfig:
         cfg.speaker_mlx = persona.get("speaker_mlx", "")
         cfg.lang_mlx = persona.get("lang_mlx", "")
         cfg.pitch_filter = persona.get("pitch_filter", "")
+        cfg.placeholder = persona.get("placeholder") is True
 
     # Step 3: Determine mute state
     # Priority: session-level > global mute > default_muted for new sessions

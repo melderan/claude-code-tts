@@ -54,6 +54,7 @@ class TestFields:
             "session": "-Users-dev-room",
             "name": "",
             "persona": "room-heart",
+            "placeholder": False,
             "backend": "mlx",
             "voice": "mlx-community/Kokoro-82M-bf16:af_heart",
             "speed": 1.6,
@@ -89,6 +90,16 @@ class TestFields:
         cfg = load_config("-Users-dev-e")
         assert cfg.speaker_piper == 12
         assert (_card("-Users-dev-e")["backend"], _card("-Users-dev-e")["voice"]) == ("piper", "en_GB-vctk-medium:12")
+
+    @pytest.mark.parametrize(("flag", "shown"), [(True, True), (False, False), ("yes", False), (None, False)])
+    def test_a_placeholder_persona_says_so_on_the_card(self, tts_home, flag, shown):
+        """Only a literal true marks a voice the room has not chosen; anything else is a choice."""
+        persona = {"voice_mlx": "mlx-community/Kokoro-82M-bf16", "speaker_mlx": "af_sky"}
+        if flag is not None:
+            persona["placeholder"] = flag
+        _config(tts_home, {"canary-sky": persona}, {"acme--claude--canary": "canary-sky"})
+        load_config("acme--claude--canary")
+        assert _card("acme--claude--canary")["placeholder"] is shown
 
     def test_the_session_file_overrides_show_in_the_card(self, tts_home):
         _config(tts_home, {"claude-prime": {"voice": "en_US-amy-medium", "speed": 2.0}})
