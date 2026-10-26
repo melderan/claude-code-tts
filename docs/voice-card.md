@@ -78,3 +78,27 @@ Change a voice with `/tts-persona` or `/tts-speed`, and the card follows.
 It carries no text, no transcript, no queue state. Who is speaking right now and how far
 behind the queue is live in the daemon's `playback.json` and the bridge's `GET /queue`
 (docs/http-bridge.md); the card is the quiet half, what this session would sound like.
+
+## Every room at once: `claude-tts voices --rooms`
+
+A page that lists every room's voice (one row per room, with a choice beside it) can shell
+out once instead of reading every card: `claude-tts voices --rooms` prints a TSV, header
+first, one row per session in project_personas, sessions.d or voice.d, sorted by session. It
+resolves each the way a hook does, from config and the session files, and writes nothing (no
+card either). Exit 0.
+
+```
+session	kind	name	persona	from	voice	placeholder	shares
+```
+
+- `session`: the id. `kind`: `room` for an owner--house--room id, `directory` for an older
+  directory-keyed one.
+- `name`: the session's spoken name; `persona`: after the chain; `from`: `session`,
+  `project` or `default`, which link of the chain gave it.
+- `voice`: what it sounds like on this machine, the key `--clashes` compares (`kokoro af_sky`,
+  `piper en_GB-alan-medium`, `? (no such persona)`).
+- `placeholder`: `true` or `false`, as on the card.
+- `shares`: the other sessions with the same `voice`, comma-separated.
+
+An empty field is `-`; a tab or newline inside one becomes a space. The columns are a
+contract: one is only ever added at the end, never renamed, removed or moved (9.81.0).

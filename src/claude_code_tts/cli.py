@@ -1001,6 +1001,8 @@ def cmd_voices(args: argparse.Namespace) -> None:
 
     if args.clashes:
         sys.exit(_print_voice_clashes())
+    if args.rooms:
+        sys.exit(_print_rooms_table())
 
     from claude_code_tts.config import MLX_VENV_DIR
     from claude_code_tts.install import AVAILABLE_VOICES
@@ -1083,19 +1085,8 @@ def cmd_voices(args: argparse.Namespace) -> None:
     # --- Who sounds like whom ---
     print()
     print("Sessions and their voices (persona from the session, else the project, else active_persona):")
-    project_personas = config.get("project_personas", {})
-    active = config.get("active_persona", "claude-prime")
-    sids = set(project_personas)
-    if TTS_SESSIONS_DIR.is_dir():
-        sids.update(sf.stem for sf in TTS_SESSIONS_DIR.glob("*.json"))
     swift_kokoro = bool(shutil.which("swift-kokoro"))
-    rows: list[tuple[str, str, str, str]] = []
-    for sid in sorted(sids):
-        data = session_read(sid)
-        persona = data.get("persona") or project_personas.get(sid) or active
-        source = "session" if data.get("persona") else ("project" if project_personas.get(sid) else "default")
-        voice = _voice_identity(personas[persona], swift_kokoro) if persona in personas else "? (no such persona)"
-        rows.append((sid, persona, source, voice))
+    rows = [(r["session"], r["persona"], r["from"], r["voice"]) for r in _session_voices(config, swift_kokoro)]
     if not rows:
         print("  none yet")
     by_voice: dict[str, list[str]] = {}
@@ -1120,6 +1111,62 @@ def cmd_voices(args: argparse.Namespace) -> None:
     if shared:
         print()
         print(f"{shared} personas sound the same as another persona: claude-tts voices --clashes")
+
+
+def _session_voices(config: dict, swift_kokoro: bool, extra: set[str] | None = None) -> list[dict[str, str]]:
+    """Each session's resolved voice, in session order, without writing anything.
+
+    The sessions are project_personas, sessions.d and `extra`; the persona is the session
+    file's, else project_personas', else active_persona, the order load_config uses.
+    """
+    personas = config.get("personas", {})
+    project_personas = config.get("project_personas", {})
+    active = config.get("active_persona", "claude-prime")
+    sids = set(project_personas) | (extra or set())
+    if TTS_SESSIONS_DIR.is_dir():
+        sids.update(sf.stem for sf in TTS_SESSIONS_DIR.glob("*.json"))
+    rows = []
+    for sid in sorted(sids):
+        data = session_read(sid)
+        persona = data.get("persona") or project_personas.get(sid) or active
+        source = "session" if data.get("persona") else ("project" if project_personas.get(sid) else "default")
+        known = persona in personas
+        rows.append({
+            "session": sid,
+            "name": str(data.get("name") or "").strip(),
+            "persona": persona,
+            "from": source,
+            "voice": _voice_identity(personas[persona], swift_kokoro) if known else "? (no such persona)",
+            "placeholder": "true" if known and personas[persona].get("placeholder") is True else "false",
+        })
+    return rows
+
+
+# `claude-tts voices --rooms`: a reader (hear's Voices view) parses these by name, so a column
+# is only ever added at the end; docs/voice-card.md is the contract.
+ROOMS_COLUMNS = ("session", "kind", "name", "persona", "from", "voice", "placeholder", "shares")
+
+
+def _print_rooms_table() -> int:
+    """One TSV row per session the daemon knows, with its resolved voice. Read-only."""
+    from claude_code_tts.config import VOICE_CARDS_DIR
+
+    config = load_raw_config()
+    cards = {c.stem for c in VOICE_CARDS_DIR.glob("*.json")} if VOICE_CARDS_DIR.is_dir() else set()
+    rows = _session_voices(config, bool(shutil.which("swift-kokoro")), cards)
+    by_voice: dict[str, list[str]] = {}
+    for r in rows:
+        by_voice.setdefault(r["voice"], []).append(r["session"])
+    print("\t".join(ROOMS_COLUMNS))
+    for r in rows:
+        shares = [s for s in by_voice[r["voice"]] if s != r["session"]]
+        fields = {
+            **r,
+            "kind": "room" if "--" in r["session"] else "directory",
+            "shares": ",".join(shares),
+        }
+        print("\t".join(re.sub(r"[\t\r\n]", " ", fields[c]) or "-" for c in ROOMS_COLUMNS))
+    return 0
 
 
 def _voice_identity(persona: dict, swift_kokoro: bool) -> str:
@@ -4493,6 +4540,8 @@ def main(argv: list[str] | None = None) -> None:
     p = subparsers.add_parser("voices", help="Every provider's voices: installed, available, who uses them, how to hear one")
     p.add_argument("--clashes", action="store_true",
                    help="Only the voices two or more personas share (same engine and speaker), with the sessions on each; exit 1 when there is one")
+    p.add_argument("--rooms", action="store_true",
+                   help="One TSV row per session: session, kind, name, persona, from, voice, placeholder, shares; read-only, columns stable (docs/voice-card.md)")
     p.set_defaults(func=cmd_voices)
 
     # --- unmute ---

@@ -632,6 +632,39 @@ class TestVoiceClashes:
         assert "2 personas sound the same as another persona: claude-tts voices --clashes" in capsys.readouterr().out
 
 
+class TestVoicesRooms:
+    """`claude-tts voices --rooms`: the TSV a page reads to show each room's voice; read-only."""
+
+    def test_one_row_per_session_with_stable_columns(self, tts_home, patched_env, capsys, monkeypatch):
+        kokoro = "mlx-community/Kokoro-82M-bf16"
+        tts = tts_home / ".claude-tts"
+        cfg = json.loads((tts / "config.json").read_text())
+        cfg["personas"]["canary-sky"] = {"voice_mlx": kokoro, "speaker_mlx": "af_sky", "placeholder": True}
+        cfg["personas"]["fox"] = {"voice_mlx": kokoro, "speaker_mlx": "am_michael"}
+        cfg["project_personas"] = {"acme--claude--canary": "canary-sky", "acme--gpt--gone": "retired"}
+        (tts / "config.json").write_text(json.dumps(cfg))
+        (tts / "sessions.d" / "acme--claude--fox.json").write_text(json.dumps({"persona": "fox", "name": "Fox\tMcCloud"}))
+        cards = tts / "voice.d"
+        cards.mkdir()
+        (cards / "acme--gpt--quiet.json").write_text("{}")
+        (cards / "-Users-dev-old.json").write_text("{}")
+        monkeypatch.setattr(config_mod, "VOICE_CARDS_DIR", cards)
+        before = sorted(p.name for p in tts.rglob("*"))
+        with patch("shutil.which", return_value=None), pytest.raises(SystemExit) as exc:
+            main(["voices", "--rooms"])
+        assert exc.value.code == 0
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0] == "session\tkind\tname\tpersona\tfrom\tvoice\tplaceholder\tshares"
+        assert lines[1:] == [
+            "-Users-dev-old\tdirectory\t-\tclaude-prime\tdefault\tpiper en_US-hfc_male-medium\tfalse\tacme--gpt--quiet",
+            "acme--claude--canary\troom\t-\tcanary-sky\tproject\tkokoro af_sky\ttrue\t-",
+            "acme--claude--fox\troom\tFox McCloud\tfox\tsession\tkokoro am_michael\tfalse\t-",
+            "acme--gpt--gone\troom\t-\tretired\tproject\t? (no such persona)\tfalse\t-",
+            "acme--gpt--quiet\troom\t-\tclaude-prime\tdefault\tpiper en_US-hfc_male-medium\tfalse\t-Users-dev-old",
+        ]
+        assert sorted(p.name for p in tts.rglob("*")) == before
+
+
 class TestInheritSessionSettings:
     """A session id from CLAUDE_TTS_SESSION inherits its directory's settings once (JMO 2026-09-30:
     'oh no your voice isn't right' after every rebuilt room came up as claude-prime)."""
