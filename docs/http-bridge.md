@@ -242,6 +242,15 @@ wants only its own reading to stop uses `/stop`. A person's hold can let named r
   rooms awake.
 - `mic_held` is true while a recording runs under a person's hold: the rooms let through wait
   for it too, and speak again when Handy stops.
+- `meeting` is the call that holds every voice, beside whatever `paused` says: `{"apps":
+  ["us.zoom.xos"], "since": "2026-10-27T15:00:02Z"}`, the apps that have the microphone (bundle
+  ids, else `name[pid]`) and when the call took it, RFC 3339 UTC; `null` when there is none.
+  While it is set nothing plays, not even a room let through, except a now block clicked after
+  the call began (`since`): that is the person choosing to be heard in the call. `POST /pause`
+  does not end it; the daemon's meeting watch does, once the microphone has been free for
+  `meeting_release_after_s` (10 s). macOS 14.2 or later; off by default, `"meeting_hold": true`
+  in config.json turns it on, and `meeting_ignore` lists apps that do not count (Handy by
+  default). With the hold off it is always `null`. Added additively in 9.82.0.
 - `speaking` is true while a player process is running.
 - `current` is the message on deck, playing or held; empty between messages.
 

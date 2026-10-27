@@ -396,6 +396,7 @@ def write_playback_state(
     mic_held: bool | None = None,
     preempted_message: dict | None | object = UNSET,
     stop_read: str | None | object = UNSET,
+    meeting: list[str] | None | object = UNSET,
 ) -> None:
     """Update playback state atomically.
 
@@ -407,10 +408,13 @@ def write_playback_state(
     block cut off, kept here (not in current_message, which the now block takes)
     until the now blocks have played and it resumes. stop_read is the job id of a read
     a person asked to stop from outside the daemon (stop_read()); the daemon clears it.
+    meeting is the apps that have the microphone during a call (meeting.py), a hold of its
+    own beside paused: a release leaves it, and only the meeting watch ends it.
     """
     with _PLAYBACK_STATE_LOCK:
         _write_playback_state_locked(
-            audio_pid, paused, paused_by, current_message, let_through, mic_held, preempted_message, stop_read
+            audio_pid, paused, paused_by, current_message, let_through, mic_held, preempted_message, stop_read,
+            meeting,
         )
 
 
@@ -423,6 +427,7 @@ def _write_playback_state_locked(
     mic_held: bool | None = None,
     preempted_message: dict | None | object = UNSET,
     stop_read: str | None | object = UNSET,
+    meeting: list[str] | None | object = UNSET,
 ) -> None:
     state = read_playback_state()
     if audio_pid is not UNSET:
@@ -468,6 +473,15 @@ def _write_playback_state_locked(
             state["stop_read"] = stop_read
         else:
             state.pop("stop_read", None)
+    if meeting is not UNSET:
+        apps = [str(a) for a in meeting] if isinstance(meeting, list) else []
+        if apps:
+            # since is when the call took the microphone, kept while the apps change.
+            before = state.get("meeting")
+            since = before.get("since") if isinstance(before, dict) else None
+            state["meeting"] = {"apps": apps, "since": since if isinstance(since, (int, float)) else time.time()}
+        else:
+            state.pop("meeting", None)
     state["updated_at"] = time.time()
     atomic_write_json(PLAYBACK_STATE_FILE, state)
 
@@ -486,6 +500,22 @@ def set_paused(paused: bool, by: str = "user") -> dict:
     else:
         write_playback_state(paused=False, paused_by=None)
     return read_playback_state()
+
+
+def set_meeting(apps: list[str] | None) -> None:
+    """Hold every voice while these apps have the microphone; None or [] ends the meeting hold."""
+    write_playback_state(meeting=list(apps or []))
+
+
+def in_meeting(state: dict) -> bool:
+    """Whether a call holds every voice (meeting.py): nothing plays, whatever else the state says."""
+    meeting = state.get("meeting")
+    return isinstance(meeting, dict) and bool(meeting.get("apps"))
+
+
+def held(state: dict) -> bool:
+    """Whether anything holds the queue: a pause of any kind, or a meeting."""
+    return bool(state.get("paused")) or in_meeting(state)
 
 
 # --- The selective hold (JMO 2026-10-02): hold everyone, let named rooms through ---
@@ -528,8 +558,13 @@ def may_play(state: dict, session_id: str, lane: str = "", queued_at: object = N
     (mic_held): nobody, the person is speaking. A person's hold: the rooms let through, and
     a "now" block queued after the hold began (a click is the person asking; JMO, D112 B).
     A hold that began after the click holds it, and the pause hotkey pressed during a read
-    that plays through stops that read (click_read_through_hold, stop_read).
+    that plays through stops that read (click_read_through_hold, stop_read). A meeting:
+    nobody, not even a room let through, since a recorder in the call takes the system audio
+    as well as the microphone; only a now block clicked after the call began, which is the
+    person choosing to be heard in it.
     """
+    if in_meeting(state):
+        return lane == NOW_LANE and _queued_after(state["meeting"].get("since"), queued_at)
     if not state.get("paused"):
         return True
     if state.get("paused_by") != "user" or state.get("mic_held"):
@@ -540,7 +575,10 @@ def may_play(state: dict, session_id: str, lane: str = "", queued_at: object = N
 
 
 def _queued_after_hold(state: dict, queued_at: object) -> bool:
-    since = state.get("paused_since")
+    return _queued_after(state.get("paused_since"), queued_at)
+
+
+def _queued_after(since: object, queued_at: object) -> bool:
     return (
         isinstance(since, (int, float))
         and isinstance(queued_at, (int, float))

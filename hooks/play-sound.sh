@@ -17,7 +17,17 @@ if [[ -z "$EVENT" ]]; then
 fi
 
 CONFIG_FILE="$HOME/.claude-tts/config.json"
+PLAYBACK_FILE="$HOME/.claude-tts/playback.json"
 SOUNDS_DIR="$HOME/.claude-tts/sounds"
+
+# A call has the microphone (the daemon's meeting hold): no sound either, since a recorder in
+# the call takes the system audio. Only a positive count of apps holds; an unreadable file does not.
+if [[ -f "$PLAYBACK_FILE" ]]; then
+    MEETING_APPS=$(jq -r '(.meeting.apps // []) | length' "$PLAYBACK_FILE" 2>/dev/null || true)
+    if [[ "$MEETING_APPS" =~ ^[1-9] ]]; then
+        exit 0
+    fi
+fi
 REPO_SOUNDS_DIR="$(dirname "$0")/../sounds"
 
 # Check if sounds are enabled

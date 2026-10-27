@@ -93,6 +93,11 @@ def cmd_status(args: argparse.Namespace) -> None:
         recording = ", recording" if pb.get("mic_held") else ""
         pause_detail = f"true (by {paused_by}{recording})"
     print(f"Paused:   {pause_detail}")
+    from claude_code_tts.meeting import describe as describe_meeting
+
+    meeting = describe_meeting(pb.get("meeting"))
+    if meeting:
+        print(f"Meeting:  {meeting}; every voice waits for it")
     if pause_state == "true" and pb.get("let_through"):
         print(f"Letting through: {', '.join(str(r) for r in pb['let_through'])}")
     if audio_pid and audio_pid != "None":
@@ -122,6 +127,20 @@ def cmd_status(args: argparse.Namespace) -> None:
     hold = describe_hold(status) if same_hold else ""
     if hold:
         print(f"Hold:     {hold}")
+
+
+def cmd_meeting(args: argparse.Namespace) -> None:
+    """What the meeting watch would see: one line per poll, against config's meeting_ignore.
+
+    Reads Core Audio only, holds nothing and writes nothing, so it runs the same whether
+    meeting_hold is on or off. Exit 1 when a poll could not see the microphone.
+    """
+    from claude_code_tts.meeting import DEFAULT_IGNORE, probe_lines
+
+    raw = load_raw_config()
+    ignore = raw.get("meeting_ignore", list(DEFAULT_IGNORE))
+    print(f"Meeting hold: {'on' if raw.get('meeting_hold', False) else 'off'}; ignoring {', '.join(map(str, ignore)) or 'nothing'}")
+    sys.exit(probe_lines(args.seconds, args.every, [str(a) for a in ignore]))
 
 
 def _flatten_config(data: dict, prefix: str = "") -> dict[str, object]:
@@ -1900,8 +1919,11 @@ def cmd_pause(args: argparse.Namespace) -> None:
         print("Stopped the read that played through the hold; still held")
     elif state.get("paused", False):
         set_paused(False)
-        _notify("Playback resumed")
-        print("Resumed")
+        from claude_code_tts.meeting import describe as describe_meeting
+
+        meeting = describe_meeting(state.get("meeting"))
+        _notify("Playback resumed, after the meeting" if meeting else "Playback resumed")
+        print(f"Resumed; the meeting still holds every voice ({meeting})" if meeting else "Resumed")
     else:
         set_paused(True, "user")
         _notify("Playback paused")
@@ -4522,6 +4544,14 @@ def main(argv: list[str] | None = None) -> None:
     # --- status ---
     p = subparsers.add_parser("status", help="Show TTS status for this session")
     p.set_defaults(func=cmd_status)
+
+    # --- meeting ---
+    p = subparsers.add_parser(
+        "meeting", help="Which apps have the microphone and whether the meeting hold would hold for them; reads only"
+    )
+    p.add_argument("--seconds", type=float, default=0.0, help="keep polling this long (default: one poll)")
+    p.add_argument("--every", type=float, default=2.0, help="seconds between polls (default 2, the daemon's)")
+    p.set_defaults(func=cmd_meeting)
 
     # --- config ---
     p = subparsers.add_parser("config", help="Every stored config key next to the shipped default; CHANGED marks the ones that differ")

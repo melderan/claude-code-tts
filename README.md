@@ -168,6 +168,21 @@ clock. The daemon reads the key per message, so flipping it needs no restart. Th
 
 Currently supports [Handy](https://handy.computer) on macOS. The watcher is disabled by default and gracefully skips if Handy isn't installed.
 
+### Meeting hold
+
+While another app has the Mac's microphone open (a Zoom or Meet call, a note taker recording
+one), no voice plays: a recorder that takes the system audio would put every reply into the
+call's recording. The daemon asks Core Audio every 2 s which apps are capturing input (macOS
+14.2 or later; no permission prompt), holds everything while one is, including rooms a hold
+lets through, browser reads and sound effects, and plays what waited once the microphone has
+been free for 10 s. A read you click on a page during the call still plays: that one is yours. `claude-tts status` prints a `Meeting:` line while it holds. A Resume does not end it.
+
+Off for now, until it has been measured through real calls: `"meeting_hold": true` in
+`config.json` turns it on (macOS only). `"meeting_ignore"` lists bundle ids that do not count
+(default `["com.pais.handy"]`, since Handy has its own hold), and `"meeting_release_after_s"`
+sets the wait after the call. To see what the watch would see, on or off:
+`claude-tts meeting --seconds 30` prints one line per poll (it reads only).
+
 ## Multi-Session Mode
 
 Running multiple Claude Code sessions? Use queue mode so they don't talk over each other:

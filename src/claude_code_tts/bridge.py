@@ -38,6 +38,7 @@ from claude_code_tts import __version__, msgqueue, reel
 from claude_code_tts.config import TTS_CONFIG_DIR, load_raw_config, session_read
 from claude_code_tts.state import (
     click_read_through_hold,
+    in_meeting,
     may_play,
     room_tag,
     stop_read,
@@ -821,8 +822,18 @@ def pause_view(
     person's hold has kept from them so far (reel.py's status, only while it is the same
     hold): the replies not played, what was dropped by name (trimmed, stale, expired,
     dropped), and whether a TLDL reel is due; `reel_last_at` is when the last one was made.
+    `meeting` is the call holding every voice beside any pause (meeting.py): the apps with
+    the microphone and since when, null when there is none; a Resume does not end it.
     """
     current = state.get("current_message") or {}
+    meeting = state.get("meeting")
+    meeting_view = None
+    if in_meeting(state) and isinstance(meeting, dict):
+        began = meeting.get("since")
+        meeting_view = {
+            "apps": [str(a) for a in meeting["apps"]],
+            "since": _rfc3339(float(began)) if isinstance(began, (int, float)) and not isinstance(began, bool) else None,
+        }
     paused = bool(state.get("paused", False))
     since = state.get("paused_since") if paused else None
     if not isinstance(since, (int, float)) or isinstance(since, bool):
@@ -848,6 +859,7 @@ def pause_view(
         "hold_cost": dict(rs.get("hold_cost") or {}) if same_hold else {},
         "reel_ready": bool(rs.get("reel_ready")) if same_hold else False,
         "reel_last_at": _rfc3339(float(last)) if isinstance(last, (int, float)) else None,
+        "meeting": meeting_view,
     }
 
 

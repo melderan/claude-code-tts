@@ -56,6 +56,7 @@ from claude_code_tts.config import (
 from claude_code_tts.filter import pronounce
 from claude_code_tts.handy import AnalyzerThread, save_speech_wav
 from claude_code_tts.level import normalize as normalize_level
+from claude_code_tts.meeting import DEFAULT_IGNORE, MeetingWatch
 from claude_code_tts.mic_watcher import MicWatcher
 from claude_code_tts.msgqueue import NOW_LANE, PauseLedger, next_speakable, play_order, text_of
 from claude_code_tts.outputdevice import OutputDeviceWatch
@@ -69,7 +70,9 @@ from claude_code_tts.state import (
     ensure_pid_file,
     get_interrupted_message,
     heartbeat_age,
+    held,
     hold,
+    in_meeting,
     is_daemon_running,
     lets_through,
     may_play,
@@ -77,6 +80,7 @@ from claude_code_tts.state import (
     read_output_device,
     read_playback_state,
     release_lock,
+    set_meeting,
     set_paused,
     take_respawn_marker,
     write_heartbeat,
@@ -434,6 +438,13 @@ MIC_PAUSE_MAX_S = 1800.0
 # While the queue is held, say so this often: who holds it, for how long, how much waits.
 # A hold nobody can see is how 2026-09-30 14:54 to 16:58 went by with 60 messages waiting.
 HOLD_NOTICE_EVERY_S = 60.0
+
+
+def held_by(state: dict) -> str:
+    """Who holds the queue, for the log: "meeting" over any pause, else paused_by ("user" when unset)."""
+    if in_meeting(state):
+        return "meeting" + (f" over a hold by {state.get('paused_by') or 'user'}" if state.get("paused") else "")
+    return str(state.get("paused_by") or "user")
 
 
 def let_through_note(state: dict) -> str:
@@ -1292,7 +1303,7 @@ def speak_announcement(text: str, persona: str = "claude-prime") -> None:
     hour, so "Voice daemon online" through the speakers at night is exactly what the hold was
     set to prevent. The hold itself is left as it is.
     """
-    if read_playback_state().get("paused"):
+    if held(read_playback_state()):
         log(f"Held, so not spoken: {text}")
         return
     audio_file = AUDIO_TMP_DIR / "tts_daemon_announce.wav"
@@ -1985,6 +1996,30 @@ def daemon_loop(lockpick: bool = False) -> None:
         output_watch = None
         write_output_device(None)  # a file an earlier daemon left on another machine says nothing here
 
+    # The meeting hold (meeting.py): while a call app has the microphone, no voice plays. macOS
+    # only, and off until a real call has been measured (`claude-tts meeting --seconds N` prints
+    # what the probe sees); "meeting_hold": true in config.json turns it on. The default lives
+    # here, not in DEFAULT_CONFIG, so turning it on later reaches every install. A hold the
+    # previous daemon left stands until this watch sees the microphone free.
+    carried_meeting = read_playback_state().get("meeting")
+    carried_apps = carried_meeting.get("apps") if isinstance(carried_meeting, dict) else None
+    meeting_watch: MeetingWatch | None = None
+    if raw_config.get("meeting_hold", False):
+        meeting_watch = MeetingWatch(
+            log_fn=log,
+            write_meeting=set_meeting,
+            ignore=lambda: [str(a) for a in load_raw_config().get("meeting_ignore", list(DEFAULT_IGNORE))],
+            release_after_s=float(raw_config.get("meeting_release_after_s", 10.0)),
+            carried=[str(a) for a in carried_apps] if isinstance(carried_apps, list) else None,
+        )
+        if not meeting_watch.start():
+            meeting_watch = None
+    else:
+        log("Meeting hold off (set meeting_hold: true in config.json to hold every voice during a call)")
+    if meeting_watch is None and carried_apps:
+        set_meeting(None)
+        log("Released the previous daemon's meeting hold: no meeting watch here to end it")
+
     # The TLDL reel (D269): what a person's hold keeps, as a minute of highlights.
     global _REEL
     reel_watch = ReelWatch(
@@ -2070,22 +2105,22 @@ def daemon_loop(lockpick: bool = False) -> None:
             state = read_playback_state()
             preempt_seen = _PREEMPT["asked"]
             was_paused = ledger.paused
-            ledger.mark(bool(state.get("paused")))
+            ledger.mark(held(state))
             mark_recording(recordings, state)
             letting_through = False
-            if state.get("paused"):
+            if held(state):
                 # Paused holds the queue: nothing expires. A person's hold may let named rooms
                 # through (JMO 2026-10-02); their messages are the only ones picked, everyone
                 # else's wait where they are, the newest max_depth of them: a four-hour focus
                 # held 731 on 2026-10-19, and a count that only grows says nothing.
                 if not was_paused:
                     hold_notices = 0
-                    log(f"Paused by {state.get('paused_by') or 'user'}; holding the queue{let_through_note(state)}")
+                    log(f"Paused by {held_by(state)}; holding the queue{let_through_note(state)}")
                 due = hold_notices_due(ledger.open_for(), HOLD_NOTICE_EVERY_S)
                 if due > hold_notices:
                     hold_notices = due
                     log(
-                        f"Still paused by {state.get('paused_by') or 'user'} for "
+                        f"Still paused by {held_by(state)} for "
                         f"{ledger.open_for():.0f}s, {len(get_queue_messages())} message(s) waiting"
                         f"{let_through_note(state)}"
                     )
@@ -2562,6 +2597,8 @@ def daemon_loop(lockpick: bool = False) -> None:
         mic_watcher.stop()
     if output_watch:
         output_watch.stop()
+    if meeting_watch:
+        meeting_watch.stop()  # the hold stays in playback.json for the next daemon's watch
     reel_watch.stop()
     if handy_analyzer:
         handy_analyzer.stop()
