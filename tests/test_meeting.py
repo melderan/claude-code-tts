@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -13,6 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import claude_code_tts.daemon as d
+import claude_code_tts.meeting as meeting
 import claude_code_tts.state as st
 from claude_code_tts.bridge import pause_view
 from claude_code_tts.meeting import MeetingWatch, describe
@@ -359,3 +361,20 @@ class TestLoop:
             if runner is not None:
                 stop(runner)
         assert "Released the previous daemon's meeting hold" in (state_dir / "daemon.log").read_text()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the real Core Audio calls; CI's macos-latest job runs them")
+class TestRealCoreAudio:
+    """The selectors were checked against published bindings only; here macOS answers them."""
+
+    def test_the_probe_gets_an_answer_from_core_audio(self) -> None:
+        assert meeting.apps_using_input() is not None, meeting.last_error()
+
+    def test_every_process_answers_the_input_and_pid_selectors(self) -> None:
+        ca = meeting._CoreAudio()
+        procs = ca.processes()
+        if not procs:
+            pytest.skip("Core Audio lists no process on this machine, so piri and ppid cannot be asked")
+        for obj in procs:
+            assert ca.u32(obj, meeting._PROCESS_IS_RUNNING_INPUT) in (0, 1)
+            assert ca.pid(obj) > 0
