@@ -595,8 +595,14 @@ def describe_hold(status: dict, now: float | None = None) -> str:
         return ""
     age_min = max(0, int(((now or time.time()) - since) // 60))
     age = f"{age_min // 60}h {age_min % 60}m" if age_min >= 60 else f"{age_min}m"
-    cost = ", ".join(f"{k} {v}" for k, v in (status.get("hold_cost") or {}).items() if v)
-    out = f"{age}, {int(status.get('unheard') or 0)} unheard" + (f" ({cost})" if cost else "")
+    counts = {k: int(v) for k, v in (status.get("hold_cost") or {}).items() if isinstance(v, int) and v}
+    cost = ", ".join(f"{k} {v}" for k, v in counts.items())
+    # unheard counts every reply the hold kept that never played, the dropped ones too; said
+    # alone it read as a backlog that only grows (698 on 2026-10-28, 24 of them in the queue).
+    dropped = sum(counts.values())
+    out = f"{age}, {int(status.get('unheard') or 0)} unheard" + (
+        f", {dropped} of them already dropped ({cost})" if dropped else ""
+    )
     return out + (", TLDL reel ready" if status.get("reel_ready") else "")
 
 

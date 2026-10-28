@@ -230,6 +230,13 @@ wants only its own reading to stop uses `/stop`. A person's hold can let named r
 
 - `paused_by` is `user` for a person (hotkey, CLI, or this route) and `mic` for the mic watcher;
   `null` when not paused.
+- `paused_from` is who wrote a person's pause, in words: the command (`claude-tts pause`,
+  `claude-tts hold --clear`, `bridge POST /pause`), for a CLI its pid and the processes above it
+  (a hotkey app, a shell under an agent), the host, the session and the UTC time, for example
+  `claude-tts pause, pid 4242 under bash < claude, on mac, at 19:52:07Z`. `null` for a mic hold,
+  when not paused, or for a pause written by a claude-tts older than 9.83.0, which named nothing.
+  A person's pause is never lifted by the end of a recording, so when one nobody remembers
+  sticks, this is the field that says where it came from. Added additively in 9.83.0.
 - `held_since` is when the hold began and `held_until` is when the daemon lets a mic hold go by
   itself (`held_since` plus `mic_pause_max_s`), both RFC 3339 in UTC. A person's hold has no
   bound, so `held_until` is `null` there; both are `null` when not paused. A page that must not

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import IO, Any
 
 from claude_code_tts.handy import HANDY_RECORDINGS_DIR, recording_saved_at
+from claude_code_tts.state import describe_pause_source
 
 # Handy log location (macOS). Handy writes here through tauri-plugin-log,
 # filtered to the level in its own settings (Settings > Debug > Log Level).
@@ -410,7 +411,11 @@ class MicWatcher:
             # Manual pause — don't override; the rooms let through may speak again.
             if state.get("mic_held"):
                 self._write_state(mic_held=False)
-            self._log("Mic watcher: recording done, but manual pause active — staying paused")
+            words = describe_pause_source(state.get("paused_from"))
+            self._log(
+                "Mic watcher: recording done, but manual pause active — staying paused"
+                + (f"; that pause is from {words}" if words else "; that pause names no writer")
+            )
             return
 
         self._write_state(paused=False, paused_by=None)

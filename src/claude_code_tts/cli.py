@@ -88,18 +88,28 @@ def cmd_status(args: argparse.Namespace) -> None:
 
     print(f"Session:  {sid}")
     print(f"Muted:    {str(cfg.muted).lower()} ({mute_source})")
-    pause_detail = pause_state
-    if pause_state == "true" and paused_by:
-        recording = ", recording" if pb.get("mic_held") else ""
-        pause_detail = f"true (by {paused_by}{recording})"
-    print(f"Paused:   {pause_detail}")
     from claude_code_tts.meeting import describe as describe_meeting
+    from claude_code_tts.state import describe_pause_source, lets_through
 
     meeting = describe_meeting(pb.get("meeting"))
+    let = [str(r) for r in (pb.get("let_through") or [])] if pause_state == "true" else []
+    pause_detail = pause_state
+    if paused_by == "user" and let and not pb.get("mic_held") and not meeting and lets_through(sid, let):
+        # A focus hold that lets this room speak is not a pause for this room (Haley, 2026-10-28:
+        # "Paused: true" while JMO heard the jmo room speak was a false line).
+        pause_detail = "false (a hold lets this room through)"
+    elif pause_state == "true" and paused_by:
+        recording = ", recording" if pb.get("mic_held") else ""
+        held = "; a hold, this room is not let through" if let and not recording else ""
+        pause_detail = f"true (by {paused_by}{recording}{held})"
+    print(f"Paused:   {pause_detail}")
+    source = describe_pause_source(pb.get("paused_from")) if pause_state == "true" and paused_by == "user" else ""
+    if source:
+        print(f"Set by:   {source}")
     if meeting:
         print(f"Meeting:  {meeting}; every voice waits for it")
-    if pause_state == "true" and pb.get("let_through"):
-        print(f"Letting through: {', '.join(str(r) for r in pb['let_through'])}")
+    if let:
+        print(f"Letting through: {', '.join(let)}")
     if audio_pid and audio_pid != "None":
         try:
             os.kill(int(audio_pid), 0)
@@ -125,6 +135,8 @@ def cmd_status(args: argparse.Namespace) -> None:
     status, since = read_status(), read_playback_state().get("paused_since")
     same_hold = isinstance(since, (int, float)) and abs(float(status.get("held_since") or 0) - since) < 1
     hold = describe_hold(status) if same_hold else ""
+    if hold and let:
+        hold = f"only {', '.join(let)} {'speaks' if len(let) == 1 else 'speak'}; {hold}"
     if hold:
         print(f"Hold:     {hold}")
 
@@ -1906,6 +1918,7 @@ def cmd_pause(args: argparse.Namespace) -> None:
     """
     from claude_code_tts.state import (
         click_read_through_hold,
+        pause_source,
         read_playback_state,
         set_paused,
         stop_read,
@@ -1917,6 +1930,18 @@ def cmd_pause(args: argparse.Namespace) -> None:
         stop_read(read)
         _notify("Read stopped, still held")
         print("Stopped the read that played through the hold; still held")
+    elif state.get("paused", False) and state.get("paused_by") == "user" and state.get("let_through"):
+        # A focus hold is not a pause to toggle off: through 9.82.1 a press here released it and
+        # every room played while JMO talked to two friends (Haley, 2026-10-28, twice). The
+        # hold stays; the release is the kraken's, said by name.
+        rooms = ", ".join(str(r) for r in state["let_through"])
+        _notify("A hold is set; claude-tts kraken releases it")
+        print(
+            f"A hold is set, letting {rooms} through; nothing changed. "
+            "claude-tts kraken releases everyone, claude-tts hold --clear holds everyone.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     elif state.get("paused", False):
         set_paused(False)
         from claude_code_tts.meeting import describe as describe_meeting
@@ -1925,7 +1950,7 @@ def cmd_pause(args: argparse.Namespace) -> None:
         _notify("Playback resumed, after the meeting" if meeting else "Playback resumed")
         print(f"Resumed; the meeting still holds every voice ({meeting})" if meeting else "Resumed")
     else:
-        set_paused(True, "user")
+        set_paused(True, "user", pause_source("claude-tts pause"))
         _notify("Playback paused")
         print("Paused")
 
@@ -1940,7 +1965,7 @@ def cmd_hold(args: argparse.Namespace) -> None:
     second; `--clear` empties the list first, and with `--let` leaves only the rooms named.
     The rooms not on the list queue behind the scenes until `claude-tts kraken`.
     """
-    from claude_code_tts.state import hold, let_rooms, read_playback_state, room_tag
+    from claude_code_tts.state import hold, let_rooms, pause_source, read_playback_state, room_tag
 
     rooms = list(args.let or [])
     if args.me:
@@ -1948,13 +1973,13 @@ def cmd_hold(args: argparse.Namespace) -> None:
     before = read_playback_state()
     held_by_person = bool(before.get("paused") and before.get("paused_by") == "user")
     if args.clear:
-        state = hold(rooms)
+        state = hold(rooms, pause_source("claude-tts hold --clear"))
     elif rooms:
-        state = let_rooms(rooms)
+        state = let_rooms(rooms, pause_source("claude-tts hold --let"))
     elif held_by_person:
         state = before
     else:
-        state = hold([])
+        state = hold([], pause_source("claude-tts hold"))
     letting = state.get("let_through") or []
     names = ", ".join(room_tag(r) if r == get_session_id(for_write=True) else r for r in letting)
     if state is before:

@@ -469,7 +469,7 @@ def test_pause_get_reports_the_hold(server: Bridge) -> None:
     assert body == {"paused": False, "paused_by": None, "held_since": None, "held_until": None,
                     "let_through": [], "mic_held": False, "speaking": False, "current": {},
                     "output_device": None, "held_for_s": None, "unheard": 0, "hold_cost": {},
-                    "reel_ready": False, "reel_last_at": None, "meeting": None}
+                    "reel_ready": False, "reel_last_at": None, "meeting": None, "paused_from": None}
     server.fake.state.update(  # type: ignore[attr-defined]
         paused=True,
         paused_by="mic",
@@ -492,6 +492,10 @@ def test_pause_get_a_persons_hold_has_a_start_and_no_bound(server: Bridge) -> No
     status, body, _ = call(server, "GET", "/pause")
     assert status == 200
     assert body["held_since"] == "2027-01-15T08:00:00Z" and body["held_until"] is None
+    assert body["paused_from"] is None  # a writer from before 9.83.0 named nothing
+    server.fake.state["paused_from"] = {"what": "claude-tts pause", "pid": 42, "host": "mac"}  # type: ignore[attr-defined]
+    _, body, _ = call(server, "GET", "/pause")
+    assert body["paused_from"] == "claude-tts pause, pid 42, on mac"
     # a hold recorded by a daemon from before paused_since existed: held, times unknown
     server.fake.state.pop("paused_since")  # type: ignore[attr-defined]
     _, body, _ = call(server, "GET", "/pause")

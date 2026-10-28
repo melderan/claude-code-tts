@@ -67,6 +67,7 @@ from claude_code_tts.state import (
     clear_current_message,
     clear_heartbeat,
     clear_pid,
+    describe_pause_source,
     ensure_pid_file,
     get_interrupted_message,
     heartbeat_age,
@@ -76,6 +77,7 @@ from claude_code_tts.state import (
     is_daemon_running,
     lets_through,
     may_play,
+    pause_source,
     pid_alive,
     read_output_device,
     read_playback_state,
@@ -445,6 +447,14 @@ def held_by(state: dict) -> str:
     if in_meeting(state):
         return "meeting" + (f" over a hold by {state.get('paused_by') or 'user'}" if state.get("paused") else "")
     return str(state.get("paused_by") or "user")
+
+
+def pause_source_note(state: dict) -> str:
+    """" (from claude-tts pause, pid 42 under bash, on mac, at 19:52:07Z)" for a person's pause that names its writer."""
+    if state.get("paused_by") != "user":
+        return ""
+    words = describe_pause_source(state.get("paused_from"))
+    return f" (from {words})" if words else " (from a writer that named nothing: an older claude-tts)"
 
 
 def let_through_note(state: dict) -> str:
@@ -1854,9 +1864,9 @@ def daemon_loop(lockpick: bool = False) -> None:
             log_fn=log,
             read_playback_state=read_playback_state,
             clear_current_message=clear_current_message,
-            set_paused=set_paused,
+            set_paused=lambda paused: set_paused(paused, source=pause_source("bridge POST /pause", process=False)),
             mic_hold_max_s=lambda: float(load_raw_config().get("mic_pause_max_s", MIC_PAUSE_MAX_S)),
-            set_let_through=hold,
+            set_let_through=lambda rooms: hold(rooms, pause_source("bridge POST /pause let", process=False)),
             read_output_device=read_output_device,
             preempt=request_preempt,
         )
@@ -2079,6 +2089,7 @@ def daemon_loop(lockpick: bool = False) -> None:
         log("Started paused; holding the queue since the pause")
     last_reap = time.monotonic()
     hold_notices = 0  # "Still paused" lines logged for the current hold
+    last_source: object = startup_state.get("paused_from")  # the writer the log last named
     prefetch = Prefetch()
     supersedes = msgqueue.Supersedes(keep_s=float(config["max_age_seconds"]))
     # Only the spans a recording held the queue: a reply that waited through one is not stale
@@ -2113,9 +2124,15 @@ def daemon_loop(lockpick: bool = False) -> None:
                 # through (JMO 2026-10-02); their messages are the only ones picked, everyone
                 # else's wait where they are, the newest max_depth of them: a four-hour focus
                 # held 731 on 2026-10-19, and a count that only grows says nothing.
+                source = state.get("paused_from")
                 if not was_paused:
                     hold_notices = 0
-                    log(f"Paused by {held_by(state)}; holding the queue{let_through_note(state)}")
+                    log(f"Paused by {held_by(state)}; holding the queue{let_through_note(state)}{pause_source_note(state)}")
+                elif isinstance(source, dict) and source != last_source:
+                    # A person's pause written over a hold already on (a hold over a mic pause,
+                    # a second `hold --let`): the first line named another writer, or none.
+                    log(f"Paused by {held_by(state)} again{let_through_note(state)}{pause_source_note(state)}")
+                last_source = source
                 due = hold_notices_due(ledger.open_for(), HOLD_NOTICE_EVERY_S)
                 if due > hold_notices:
                     hold_notices = due

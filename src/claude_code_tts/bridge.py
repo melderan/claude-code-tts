@@ -38,6 +38,7 @@ from claude_code_tts import __version__, msgqueue, reel
 from claude_code_tts.config import TTS_CONFIG_DIR, load_raw_config, session_read
 from claude_code_tts.state import (
     click_read_through_hold,
+    describe_pause_source,
     in_meeting,
     may_play,
     room_tag,
@@ -824,6 +825,8 @@ def pause_view(
     dropped), and whether a TLDL reel is due; `reel_last_at` is when the last one was made.
     `meeting` is the call holding every voice beside any pause (meeting.py): the apps with
     the microphone and since when, null when there is none; a Resume does not end it.
+    `paused_from` is who wrote a person's pause, in words ("claude-tts pause, pid 42 under
+    bash < claude, on mac, at 19:52:07Z"), null for any other hold or a writer that named nothing.
     """
     current = state.get("current_message") or {}
     meeting = state.get("meeting")
@@ -860,6 +863,9 @@ def pause_view(
         "reel_ready": bool(rs.get("reel_ready")) if same_hold else False,
         "reel_last_at": _rfc3339(float(last)) if isinstance(last, (int, float)) else None,
         "meeting": meeting_view,
+        "paused_from": (describe_pause_source(state.get("paused_from")) or None)
+        if paused and state.get("paused_by") == "user"
+        else None,
     }
 
 

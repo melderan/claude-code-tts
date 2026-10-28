@@ -19,6 +19,8 @@ import fcntl
 import json
 import os
 import signal
+import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -397,6 +399,7 @@ def write_playback_state(
     preempted_message: dict | None | object = UNSET,
     stop_read: str | None | object = UNSET,
     meeting: list[str] | None | object = UNSET,
+    paused_from: dict | None | object = UNSET,
 ) -> None:
     """Update playback state atomically.
 
@@ -410,11 +413,13 @@ def write_playback_state(
     a person asked to stop from outside the daemon (stop_read()); the daemon clears it.
     meeting is the apps that have the microphone during a call (meeting.py), a hold of its
     own beside paused: a release leaves it, and only the meeting watch ends it.
+    paused_from is who wrote a person's pause (pause_source()); a release, or a pause by
+    anyone else written without one, clears it.
     """
     with _PLAYBACK_STATE_LOCK:
         _write_playback_state_locked(
             audio_pid, paused, paused_by, current_message, let_through, mic_held, preempted_message, stop_read,
-            meeting,
+            meeting, paused_from,
         )
 
 
@@ -428,6 +433,7 @@ def _write_playback_state_locked(
     preempted_message: dict | None | object = UNSET,
     stop_read: str | None | object = UNSET,
     meeting: list[str] | None | object = UNSET,
+    paused_from: dict | None | object = UNSET,
 ) -> None:
     state = read_playback_state()
     if audio_pid is not UNSET:
@@ -442,9 +448,16 @@ def _write_playback_state_locked(
             state.pop("let_through", None)
             state.pop("mic_held", None)
             state.pop("mic_held_since", None)
+            state.pop("paused_from", None)
         state["paused"] = paused
     if paused_by is not UNSET:
         state["paused_by"] = paused_by
+        if paused_by != "user" and paused_from is UNSET:
+            state.pop("paused_from", None)
+    if isinstance(paused_from, dict) and state.get("paused"):
+        state["paused_from"] = paused_from
+    elif paused_from is None:
+        state.pop("paused_from", None)
     if let_through is not UNSET:
         rooms = [str(r) for r in let_through] if isinstance(let_through, list) else []
         if rooms:
@@ -486,17 +499,80 @@ def _write_playback_state_locked(
     atomic_write_json(PLAYBACK_STATE_FILE, state)
 
 
-def set_paused(paused: bool, by: str = "user") -> dict:
+PAUSE_SOURCE_PARENTS = 3
+
+
+def _ps_row(pid: int) -> tuple[int, str] | None:
+    """(its parent's pid, its command name) for a process, from ps; None when ps cannot say."""
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True, timeout=1.0, check=False
+        ).stdout.strip()
+        ppid, _, comm = out.partition(" ")
+        return int(ppid), os.path.basename(comm.strip())
+    except Exception:  # noqa: BLE001  the trace of a pause must never stop the pause
+        return None
+
+
+def pause_source(what: str, process: bool = True) -> dict:
+    """Who is writing a person's pause, kept in playback.json as paused_from.
+
+    A "user" pause can come from any process that runs `claude-tts pause` or `hold`: a
+    hotkey on the Mac, a room's shell through the mount, a Joy-Con map. Through 9.82.1 none
+    left a trace, and on 2026-10-27 a pause no one remembered writing kept JMO pressing
+    Resume after every recording. Now the daemon's "Paused by user" line, the mic watcher's
+    "staying paused" line and `claude-tts status` name the command, its pid and the chain
+    of processes above it (a hotkey app, a shell under Claude), the host and the session.
+    process=False leaves the pids out, for a writer inside the daemon (the bridge).
+    """
+    src: dict = {"what": what, "host": socket.gethostname(), "at": time.time()}
+    if process:
+        src["pid"] = os.getpid()
+        chain: list[str] = []
+        pid = os.getppid()
+        while pid > 1 and len(chain) < PAUSE_SOURCE_PARENTS:
+            row = _ps_row(pid)
+            if row is None:
+                break
+            pid, name = row
+            chain.append(name)
+        if chain:
+            src["parents"] = chain
+    session = os.environ.get("CLAUDE_TTS_SESSION", "")
+    if session:
+        src["session"] = session
+    return src
+
+
+def describe_pause_source(src: object) -> str:
+    """The words for paused_from: "claude-tts pause, pid 42 under bash < claude, on mac, at 19:52:07Z"."""
+    if not isinstance(src, dict) or not src.get("what"):
+        return ""
+    parts = [str(src["what"])]
+    if src.get("pid"):
+        under = " < ".join(str(p) for p in (src.get("parents") or []))
+        parts.append(f"pid {src['pid']}" + (f" under {under}" if under else ""))
+    if src.get("host"):
+        parts.append(f"on {src['host']}")
+    if src.get("session"):
+        parts.append(f"session {src['session']}")
+    at = src.get("at")
+    if isinstance(at, (int, float)) and not isinstance(at, bool):
+        parts.append("at " + time.strftime("%H:%M:%SZ", time.gmtime(at)))
+    return ", ".join(parts)
+
+
+def set_paused(paused: bool, by: str = "user", source: dict | None = None) -> dict:
     """Hold or release the whole queue, the way the pause hotkey does.
 
     Only the flag is written. The play loop polls it every 50 ms and stops the
     player itself, treating the stop as a pause (rewind, replay on resume), so
     nothing here needs to know a pid. A release clears paused_by, so a person
     resuming from a page wins over a mic hold exactly as `claude-tts pause` does.
-    Returns the state as written.
+    source (pause_source()) names the writer of a pause. Returns the state as written.
     """
     if paused:
-        write_playback_state(paused=True, paused_by=by)
+        write_playback_state(paused=True, paused_by=by, paused_from=source if source else UNSET)
     else:
         write_playback_state(paused=False, paused_by=None)
     return read_playback_state()
@@ -614,23 +690,27 @@ def stop_read(job_id: str) -> None:
     write_playback_state(stop_read=job_id)
 
 
-def hold(let: list[str] | None = None) -> dict:
+def hold(let: list[str] | None = None, source: dict | None = None) -> dict:
     """A person's hold on everyone, letting the rooms in `let` play on; the state as written.
 
     Replaces the let-through list. A recording in progress (a mic hold, or mic_held already)
     stays a recording: the rooms let through wait for Handy's stop like everyone else.
+    source (pause_source()) names the writer.
     """
     before = read_playback_state()
     recording = bool(before.get("paused") and before.get("paused_by") == "mic") or bool(before.get("mic_held"))
-    write_playback_state(paused=True, paused_by="user", let_through=list(let or []), mic_held=recording)
+    write_playback_state(
+        paused=True, paused_by="user", let_through=list(let or []), mic_held=recording,
+        paused_from=source if source else UNSET,
+    )
     return read_playback_state()
 
 
-def let_rooms(rooms: list[str]) -> dict:
+def let_rooms(rooms: list[str], source: dict | None = None) -> dict:
     """Add rooms to the let-through list of the current hold; holds everyone first if not held."""
     before = read_playback_state()
     if not (before.get("paused") and before.get("paused_by") == "user"):
-        return hold(rooms)
+        return hold(rooms, source)
     current = list(before.get("let_through") or [])
     merged = current + [r for r in rooms if r not in current]
     write_playback_state(let_through=merged)

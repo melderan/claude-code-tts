@@ -16,6 +16,11 @@ Running it toggles between paused and playing states:
 While everyone is held and a read you clicked on a page plays through the hold, a press
 stops just that read and the hold stays; the next press releases as before.
 
+A focus hold that lets some rooms through (`claude-tts hold --let`, `/tts-focus`) is not
+toggled off by a press: the command says a hold is set, changes nothing and exits 1.
+`claude-tts kraken` releases it (9.83.0; through 9.82.1 a press released it and every room
+spoke).
+
 It also shows a macOS notification to confirm the action.
 
 ## Setup Options

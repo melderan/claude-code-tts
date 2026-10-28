@@ -65,5 +65,6 @@ def test_cmd_pause_does_not_call_osascript_off_macos(tmp_path, monkeypatch):
     calls: list = []
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: calls.append(a))
     cli.cmd_pause(argparse.Namespace())
-    assert calls == []
+    # ps runs for the pause's writer (paused_from, 9.83.0); the notification must not
+    assert [c for c in calls if c and c[0] and c[0][0] == "osascript"] == []
     assert read_playback_state()["paused"] is True

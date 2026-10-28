@@ -385,7 +385,9 @@ def test_pause_view_carries_the_hold_and_the_reel_for_the_same_hold_only() -> No
 def test_status_line_words_and_a_stale_status_reads_as_none(tmp_path: Path) -> None:
     status = {"held_since": SINCE, "unheard": 312, "hold_cost": {"trimmed": 290, "stale": 12, "expired": 0},
               "reel_ready": True}
-    assert reel.describe_hold(status, now=SINCE + 7500) == "2h 5m, 312 unheard (trimmed 290, stale 12), TLDL reel ready"
+    assert reel.describe_hold(status, now=SINCE + 7500) == (
+        "2h 5m, 312 unheard, 302 of them already dropped (trimmed 290, stale 12), TLDL reel ready"
+    )
     assert reel.describe_hold({}) == ""
     path = tmp_path / "status.json"
     path.write_text(json.dumps({**status, "checked_at": SINCE}))
