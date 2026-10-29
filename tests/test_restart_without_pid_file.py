@@ -167,7 +167,8 @@ class TestTheDeployScriptTellsAnOldDaemonFromTheNewOne:
     def test_the_restart_step_has_no_start_fallback(self):
         import inspect
 
-        src = inspect.getsource(up.main)
+        # The whole script, not main(): since 9.84.0 main() only wraps _main(), which runs the steps.
+        src = inspect.getsource(up)
         assert 'step("restart", ["claude-tts", "daemon", "restart"])' in src
         assert '["claude-tts", "daemon", "start"]' not in src
 

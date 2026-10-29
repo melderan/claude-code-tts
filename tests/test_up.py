@@ -14,6 +14,14 @@ up = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(up)
 
 
+@pytest.fixture(autouse=True)
+def _no_pinned_signer(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A machine with a real pin must not lend it to these tests, nor send them to its gpg."""
+    monkeypatch.delenv(up.SIGNER_ENV, raising=False)
+    missing = tmp_path_factory.mktemp("nopin") / "release-signer"
+    monkeypatch.setattr(up, "signer_file", lambda: missing)
+
+
 @pytest.mark.parametrize(
     ("installed", "daemon", "alive", "expect_skip"),
     [
@@ -204,7 +212,7 @@ def test_install_asks_for_the_preferred_python_then_falls_back(monkeypatch: pyte
     """The first install command pins PREFERRED_PYTHON; the alternative has no pin."""
     import inspect
 
-    src = inspect.getsource(up.main)
+    src = inspect.getsource(up._main)
     assert '"--python", PREFERRED_PYTHON' in src
     after_pin = src.split('"--python", PREFERRED_PYTHON', 1)[1]
     assert '["uv", "tool", "install", ".", "--force", "--build", "-v"],' in after_pin

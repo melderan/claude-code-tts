@@ -80,6 +80,11 @@ claude-tts-install
 just up                       # refuses a tree with uncommitted changes; just up --dirty installs it anyway
 just up --offline             # uv builds from its cache only, no index asked; "up_offline": true in config.json does it for scheduled runs
 just timeline                 # the runs so far, with version and git ref
+# A deploy clone the scheduled run trusts: fetch the tag by name (a bare `git fetch origin v<x>` makes no local tag),
+# pin the release signer outside the checkout, and keep the logs where readers can see them
+git fetch --no-tags origin tag v<x> && git checkout --detach v<x>
+echo <fingerprint> > ~/Library/Application\ Support/claude-tts/release-signer   # or CLAUDE_TTS_UP_SIGNER; elsewhere ~/.config/claude-tts/
+CLAUDE_TTS_UP_LOGDIR=~/.claude-tts/up-logs just up --if-changed                    # timeline.log and run logs there, never through a symlink
 # Without just: uv tool install . --force --build && claude-tts-install --upgrade
 # (--build is needed where a uv config disables source builds; harmless elsewhere)
 
@@ -308,7 +313,13 @@ restarts the daemon, verifies the heartbeat, writes the full output of the run t
 `.logs/just/up-<time>-<git ref>.log`, and appends one line (time, version, git ref, branch, daemon,
 the hatchling that built it, bridge and mic state, run file) to `.logs/just/timeline.log`, which `just timeline` prints. The
 directory is gitignored and lives in the checkout, so a sandbox sharing the working tree can read
-what the host is running without asking. `just --list` shows the rest (`PY=3.14 test`,
+what the host is running without asking; `CLAUDE_TTS_UP_LOGDIR` moves it for a deploy clone no
+sandbox shares. Every log is opened with no symlink followed, at the file or at its directory, and
+a log that is not a plain file with one link refuses the run. With a release signer pinned
+(`CLAUDE_TTS_UP_SIGNER`, or the `release-signer` file, both outside the checkout), `--if-changed`
+deploys a tag only when `git verify-tag` names that exact key: a good signature from another key in
+the keyring holds, and every timeline line says `signer=pinned` or `signer=unpinned`.
+`tests/test_up_trust.py` runs real gpg with two keys to prove it. `just --list` shows the rest (`PY=3.14 test`,
 `cov`, `e2e`, `fmt`). Install just with `brew install just` or `uv tool install rust-just`.
 
 CI (`.github/workflows/ci.yml`) pins every action to a commit SHA, runs with a read-only token, and
