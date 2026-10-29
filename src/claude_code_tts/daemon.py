@@ -2875,7 +2875,7 @@ def log_stats(lines: Iterable[str]) -> dict:
     count = 0
     first: str | None = None
     last: str | None = None
-    messages = streams = mic_pauses = errors = stale = stale_held = spared = duplicates = 0
+    messages = streams = mic_pauses = missed_starts = errors = stale = stale_held = spared = duplicates = 0
     pending: datetime | None = None
     gaps: list[float] = []
     kinds: dict[str, int] = {}
@@ -2905,6 +2905,8 @@ def log_stats(lines: Iterable[str]) -> dict:
             pending = None
         elif msg.startswith("Mic watcher: paused"):
             mic_pauses += 1
+        elif msg.startswith("Mic watcher: missed start:"):
+            missed_starts += 1
         elif msg.startswith("Dropped stale message "):
             stale += 1
             stale_held += msg.endswith("under a hold")
@@ -2924,6 +2926,7 @@ def log_stats(lines: Iterable[str]) -> dict:
         "messages": messages,
         "streams": streams,
         "mic_pauses": mic_pauses,
+        "missed_starts": missed_starts,
         "errors": errors,
         "stale_dropped": stale,
         "stale_dropped_held": stale_held,
@@ -2951,7 +2954,7 @@ def format_log_stats(stats: dict, name: str, size_bytes: int) -> str:
     out = [
         f"{name}: {stats['lines']} lines, {size}{span}",
         f"messages spoken: {stats['messages']}   streamed: {stats['streams']}   "
-        f"mic pauses: {stats['mic_pauses']}   errors: {stats['errors']}   "
+        f"mic pauses: {stats['mic_pauses']} (missed starts: {stats.get('missed_starts', 0)})   errors: {stats['errors']}   "
         f"stale dropped: {stats.get('stale_dropped', 0)} ({stats.get('stale_dropped_held', 0)} under a hold)   "
         f"kept through a recording: {stats.get('spared_by_recording', 0)}",
         f"duplicates dropped: {stats.get('duplicates', 0)}",

@@ -14,6 +14,7 @@ import os
 import re
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -159,6 +160,13 @@ RESUME_DELAY_MS = 1500
 # How often, while a recording is open, to look for the file Handy saves when it stops.
 SAVED_RECORDING_POLL_S = 0.5
 
+# How often, with no recording open, to look for a file Handy saved for a recording this
+# watcher never saw start, and how far past a seen recording's end its file may still land.
+MISSED_START_POLL_S = 5.0
+MISSED_START_SLACK_S = 5.0
+# The recordings this watcher saw, newest last, for matching a saved file to one of them.
+SEEN_RECORDINGS_KEPT = 20
+
 # How often to check for log rotation (seconds).
 # Prevents false positives from inode races during active writes.
 ROTATION_CHECK_INTERVAL = 2.0
@@ -189,6 +197,12 @@ class MicWatcher:
         self._recordings_dir = recordings_dir
         self._files_at_start: set[str] = set()  # Handy's recordings when the hold began
         self._last_dir_check = 0.0
+        # (start, end) wall clock of each recording this watcher saw, and every file name it has
+        # matched or reported; a saved file outside every interval is a start it missed.
+        self._seen_recordings: deque[tuple[float, float]] = deque(maxlen=SEEN_RECORDINGS_KEPT)
+        self._files_seen: set[str] = set()
+        self._last_missed_check = 0.0
+        self.missed_starts = 0
         # The file being tailed (inode) and how far into it the last line read ended; None
         # until the first open of this run.
         self._tail_inode: int | None = None
@@ -215,6 +229,46 @@ class MicWatcher:
             self._files_at_start = {p.name for p in self._recordings_dir.glob("handy-*.wav")}
         except OSError:
             self._files_at_start = set()
+
+    def _end_recording(self) -> None:
+        self._recording = False
+        self._seen_recordings.append((self._recording_since, time.time()))
+
+    def _recording_names(self) -> set[str]:
+        try:
+            return {p.name for p in self._recordings_dir.glob("handy-*.wav")}
+        except OSError:
+            return set()
+
+    def _poll_missed_start(self) -> int:
+        """With no recording open, report each new file Handy saved for a recording never seen to start.
+
+        Handy saves a file for every recording, named by the second it stopped. One that lands
+        outside every recording this watcher saw means a start line was missed, from any
+        cause: on 2026-10-23 a log rotation hid one and a room spoke over the person. One WARN
+        per file, counted in `claude-tts daemon stats`. Files present when the watcher started
+        are never reported. Returns how many it reported.
+        """
+        now = time.monotonic()
+        if self._recording or now - self._last_missed_check < MISSED_START_POLL_S:
+            return 0
+        self._last_missed_check = now
+        new = sorted(self._recording_names() - self._files_seen)
+        self._files_seen.update(new)
+        missed = 0
+        for name in new:
+            saved_at = recording_saved_at(self._recordings_dir / name)
+            # Handy stamps to the second, so a short recording's file can carry a second before its own start.
+            if any(start - 1.0 <= saved_at <= end + MISSED_START_SLACK_S for start, end in self._seen_recordings):
+                continue
+            missed += 1
+            self.missed_starts += 1
+            self._log(
+                f"Mic watcher: missed start: Handy saved {name} with no recording seen to start "
+                f"({self.missed_starts} since the watcher started)",
+                "WARN",
+            )
+        return missed
 
     def _poll_saved_recording(self) -> bool:
         """While a recording is open, look for the file Handy saves when it stops (twice a second).
@@ -249,7 +303,7 @@ class MicWatcher:
         """
         if not self._recording or saved_at + 1.0 < self._recording_since:
             return False
-        self._recording = False
+        self._end_recording()
         self._log(
             f"Mic watcher: Handy saved the recording started {time.time() - self._recording_since:.0f}s ago; "
             "treating it as stopped"
@@ -351,6 +405,9 @@ class MicWatcher:
                 "Mic watcher: Handy's own mute_while_recording is on; Handy will also mute "
                 "the Mac's output during recording, independent of this pause"
             )
+
+        # What Handy saved before this watcher looked is not a start it missed.
+        self._files_seen = self._recording_names()
 
         # Check if mic is currently recording before we start tailing.
         # This handles the case where the daemon restarts mid-recording.
@@ -481,7 +538,7 @@ class MicWatcher:
                 # Handy logs several stop-side lines per recording;
                 # the first one already resumed us.
                 return
-            self._recording = False
+            self._end_recording()
             # Wait for transcription + paste before resuming
             self._stop_event.wait(self._resume_delay)
             if not self._stop_event.is_set():
@@ -506,6 +563,7 @@ class MicWatcher:
                                 self._handle_line(line)
                             break  # Will restart in outer loop
                         self._poll_saved_recording()
+                        self._poll_missed_start()
                         self._stop_event.wait(0.05)
                         continue
 

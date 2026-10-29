@@ -971,3 +971,98 @@ class TestSavedRecordingEndsTheHold:
             assert w._poll_saved_recording() is False
         finally:
             w.stop()
+
+
+def _missed_polled_twice(w: MicWatcher) -> bool:
+    """True once two missed-start looks began after the call: the first finished."""
+    since = time.monotonic()
+    if not _wait_for(lambda: w._last_missed_check > since):  # type: ignore[attr-defined]
+        return False
+    first = w._last_missed_check  # type: ignore[attr-defined]
+    return _wait_for(lambda: w._last_missed_check > first)  # type: ignore[attr-defined]
+
+
+class TestMissedStart:
+    """A file Handy saved for a recording the watcher never saw start is a WARN and a count.
+
+    Handy saves a file for every recording, named by the second it stopped. On 2026-10-23 a
+    log rotation hid a start line, the queue never paused, and a room spoke over the person;
+    nothing in the log said a start was missed. Any cause of a missed start shows here.
+    """
+
+    def _watcher(self, tmp_path, monkeypatch, poll_s=0.05):
+        log_file = tmp_path / "handy.log"
+        log_file.write_text("")
+        monkeypatch.setattr("claude_code_tts.mic_watcher.HANDY_LOG", log_file)
+        monkeypatch.setattr("claude_code_tts.mic_watcher.SAVED_RECORDING_POLL_S", poll_s)
+        monkeypatch.setattr("claude_code_tts.mic_watcher.MISSED_START_POLL_S", poll_s)
+        rec = tmp_path / "recordings"
+        rec.mkdir()
+        state = {"paused": False, "paused_by": None}
+        w = MicWatcher(
+            log_fn=MagicMock(),
+            read_playback_state=lambda: dict(state),
+            write_playback_state=lambda **kw: state.update(kw),
+            resume_delay_ms=10,
+            recordings_dir=rec,
+        )
+        return w, log_file, rec
+
+    def test_a_file_with_no_start_seen_is_a_missed_start(self, tmp_path, monkeypatch):
+        w, _, rec = self._watcher(tmp_path, monkeypatch)
+        try:
+            _start_tailing(w)
+            (rec / f"handy-{int(time.time())}.wav").write_bytes(b"RIFF")
+            assert _wait_for(lambda: w.missed_starts == 1), "the missed start was never reported"
+            assert _logged(w, "missed start: Handy saved handy-")
+            assert any(c.args[1:] == ("WARN",) for c in w._log.call_args_list if "missed start" in c.args[0])  # type: ignore[attr-defined]
+        finally:
+            w.stop()
+
+    def test_a_file_from_a_seen_recording_is_not_reported(self, tmp_path, monkeypatch):
+        w, log_file, rec = self._watcher(tmp_path, monkeypatch)
+        try:
+            _start_tailing(w)
+            with open(log_file, "a") as f:
+                f.write("[DEBUG] TranscribeAction::start called for binding: transcribe\n")
+            assert _wait_for(lambda: w.recording)
+            with open(log_file, "a") as f:
+                f.write("[DEBUG] TranscribeAction::stop called for binding: transcribe\n")
+            assert _wait_for(lambda: not w.recording)
+            (rec / f"handy-{int(time.time())}.wav").write_bytes(b"RIFF")  # lands after the stop line
+            assert _missed_polled_twice(w), "the watcher stopped looking for missed starts"
+            assert w.missed_starts == 0
+        finally:
+            w.stop()
+
+    def test_files_from_before_the_watcher_started_are_never_reported(self, tmp_path, monkeypatch):
+        w, _, rec = self._watcher(tmp_path, monkeypatch)
+        (rec / "handy-1790958850.wav").write_bytes(b"RIFF")
+        try:
+            _start_tailing(w)
+            assert _missed_polled_twice(w)
+            assert w.missed_starts == 0
+        finally:
+            w.stop()
+
+    def test_each_missed_file_is_reported_once(self, tmp_path, monkeypatch):
+        w, _, rec = self._watcher(tmp_path, monkeypatch)
+        try:
+            _start_tailing(w)
+            (rec / f"handy-{int(time.time())}.wav").write_bytes(b"RIFF")
+            assert _wait_for(lambda: w.missed_starts == 1)
+            assert _missed_polled_twice(w)
+            assert w.missed_starts == 1
+        finally:
+            w.stop()
+
+    def test_daemon_stats_counts_missed_starts(self):
+        from claude_code_tts.daemon import format_log_stats, log_stats
+
+        lines = [
+            "[2026-10-27 03:00:00] [WARN] Mic watcher: missed start: Handy saved handy-1793070000.wav with no recording seen to start (1 since the watcher started)",
+            "[2026-10-27 03:00:01] [INFO] Mic watcher: paused for recording",
+        ]
+        stats = log_stats(lines)
+        assert stats["missed_starts"] == 1 and stats["mic_pauses"] == 1
+        assert "(missed starts: 1)" in format_log_stats(stats, "daemon.log", 100)

@@ -230,7 +230,7 @@ When adding a new `/tts-*` command:
 ```bash
 tail -f ~/.claude-tts/debug.log       # Hook debug log (shared with the daemon dir)
 claude-tts daemon logs --follow      # Daemon log
-claude-tts daemon stats              # Digest: messages, queue-to-first-audio latency, pauses, log noise
+claude-tts daemon stats              # Digest: messages, queue-to-first-audio latency, pauses (and missed starts: a Handy recording saved with no start the mic watcher saw, one WARN each), log noise
 claude-tts ledger --last 20          # What this session's hooks were asked to speak, in full, and what the daemon did with each
 claude-tts status                    # Quick status: mute, pause, daemon, heartbeat age, queue depth
 ```
