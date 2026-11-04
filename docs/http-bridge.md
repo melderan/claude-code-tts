@@ -82,6 +82,12 @@ separate "daemon down" answer because the bridge lives inside the daemon.
   the session file's persona, else `project_personas[session]`, else the active persona; a
   room's choice that names no configured persona is passed over (9.79.0). Omitted without a
   `session`: the active persona. Named and unknown: `400`.
+- `room_voice` is optional, `true` or `false` (anything else: `400`). `true` asks for the
+  room's own persona and nothing else: the session file's persona, else
+  `project_personas[session]`, never the active persona. A room with neither: `409`
+  `{"error": "this room has no voice of its own", "session": ...}`, and nothing is queued. It
+  needs a `session` and excludes `persona` (either missing or both sent: `400`). This is for
+  a client whose rule is "the exact voice or none" (9.86.0).
 - `source` is a short label for who is speaking. It becomes the speaker key
   (`session_id` "browser", `project` "<source>:<label>"), so the daemon's speaker-change chime
   fires when a room and the page interleave, exactly as it does between two rooms. Default

@@ -231,20 +231,30 @@ SESSION_RE = re.compile(r"\w+(?:-\w+)*(?:--\w+(?:-\w+)*){1,4}", re.ASCII)
 SPEED_MIN, SPEED_MAX = 0.5, 4.0
 
 
-def room_persona(config: dict, session: str) -> str:
-    """The persona a request with none speaks in: the room's own, as a hook would pick it.
+def own_room_persona(config: dict, session: str) -> str | None:
+    """The room's own configured persona, or None when the room has none.
 
-    The session file's persona, else project_personas for the session, else active_persona,
-    the order load_config uses for a hook. A room's choice that names no persona in the
-    config is passed over rather than refused: the room cannot fix the config, and its
-    speech should still reach the queue.
+    The session file's persona, else project_personas for the session. A choice that names
+    no persona in the config counts as none. A request with `room_voice` speaks in this and
+    nothing else (9.86.0).
     """
     personas = config.get("personas", {})
     if session:
         for candidate in (session_read(session).get("persona"), config.get("project_personas", {}).get(session)):
             if candidate and candidate in personas:
                 return str(candidate)
-    return str(config.get("active_persona", "claude-prime"))
+    return None
+
+
+def room_persona(config: dict, session: str) -> str:
+    """The persona a request with none speaks in: the room's own, as a hook would pick it.
+
+    The room's own (own_room_persona), else active_persona, the order load_config uses for a
+    hook. A room's choice that names no persona in the config is passed over rather than
+    refused: the room cannot fix the config, and its speech should still reach the queue.
+    """
+    own = own_room_persona(config, session)
+    return own if own is not None else str(config.get("active_persona", "claude-prime"))
 
 
 def write_bridge_message(
@@ -665,9 +675,28 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if session and not SESSION_RE.fullmatch(session):
             self._send_json(400, {"error": "session must be owner--house--room in letters, digits, _ . -"})
             return
+        room_voice = body.get("room_voice", False)
+        if not isinstance(room_voice, bool):
+            self._send_json(400, {"error": "room_voice must be true or false"})
+            return
+        if room_voice and body.get("persona"):
+            self._send_json(400, {"error": "room_voice and persona are exclusive: send one"})
+            return
+        if room_voice and not session:
+            self._send_json(400, {"error": "room_voice needs a session"})
+            return
         config = load_raw_config()
         personas = config.get("personas", {})
-        persona = str(body.get("persona") or room_persona(config, session))
+        if room_voice:
+            # The room's own voice or nothing: a client whose rule is "never substitute" asks
+            # for this, and the active persona is a substitute (codex-tts, 2026-11-04).
+            own = own_room_persona(config, session)
+            if own is None:
+                self._send_json(409, {"error": "this room has no voice of its own", "session": session})
+                return
+            persona = own
+        else:
+            persona = str(body.get("persona") or room_persona(config, session))
         if persona not in personas:
             self._send_json(400, {"error": "unknown persona", "persona": persona})
             return

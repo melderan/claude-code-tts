@@ -287,6 +287,50 @@ def test_speak_persona_in_the_request_wins_over_the_rooms(server: Bridge, tts_ho
 
 
 @pytest.mark.parametrize(
+    ("session", "persona"),
+    [("acme--gpt--gateway", "gpt-gateway-sarah"), ("sbx--gpt--house-gpt", "house-aster")],
+)
+def test_room_voice_speaks_in_the_rooms_own(
+    server: Bridge, tts_home: Path, room_voices: dict, session: str, persona: str
+) -> None:
+    body = {"text": "Hi.", "source": "codex-tts", "session": session, "room_voice": True}
+    assert call(server, "POST", "/speak", body)[0] == 202
+    assert json.loads(next((tts_home / "queue").glob("*.json")).read_text())["persona"] == persona
+
+
+@pytest.mark.parametrize("session", ["acme--gpt--forge", "acme--gpt--unnamed"])
+def test_room_voice_refuses_a_room_with_none_and_queues_nothing(
+    server: Bridge, tts_home: Path, room_voices: dict, session: str
+) -> None:
+    """codex-tts's rule is the exact voice or none: the active persona is a substitute, so a
+    room whose choice names no configured persona, or that has no choice, gets 409."""
+    body = {"text": "Hi.", "source": "codex-tts", "session": session, "room_voice": True}
+    status, reply, _ = call(server, "POST", "/speak", body)
+    assert status == 409
+    assert reply == {"error": "this room has no voice of its own", "session": session}
+    assert not list((tts_home / "queue").glob("*.json"))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"text": "x", "session": "acme--gpt--gateway", "room_voice": "yes"},
+        {"text": "x", "session": "acme--gpt--gateway", "room_voice": 1},
+        {"text": "x", "session": "acme--gpt--gateway", "room_voice": True, "persona": "claude-connery"},
+        {"text": "x", "room_voice": True},
+    ],
+)
+def test_room_voice_refuses_a_malformed_request(server: Bridge, room_voices: dict, body: dict) -> None:
+    assert call(server, "POST", "/speak", body)[0] == 400
+
+
+def test_room_voice_false_is_the_old_fallback(server: Bridge, tts_home: Path, room_voices: dict) -> None:
+    body = {"text": "Hi.", "session": "acme--gpt--unnamed", "room_voice": False}
+    assert call(server, "POST", "/speak", body)[0] == 202
+    assert json.loads(next((tts_home / "queue").glob("*.json")).read_text())["persona"] == "claude-connery"
+
+
+@pytest.mark.parametrize(
     "session", ["../x--y", "a--b/c", "browser", "a---b", "a--b--c--d--e--f--g", "a--b c", "é--b"]
 )
 def test_speak_refuses_a_session_that_is_not_a_room(server: Bridge, session: str) -> None:
