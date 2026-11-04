@@ -112,6 +112,17 @@ if [[ $YES -eq 0 ]]; then
     fi
 fi
 
+# Signing is tried before the bump and the pre-commit gate: a signing key whose passphrase
+# was not cached failed the commit only after the gate's two minutes (2026-11-04). The probe
+# signs HEAD's tree into one commit object that nothing references.
+if [[ $(git config --bool commit.gpgsign 2>/dev/null || true) == "true" ]] && git rev-parse -q --verify HEAD >/dev/null; then
+    if ! probe_err=$(git commit-tree -S -m "signing probe" "HEAD^{tree}" 2>&1 >/dev/null); then
+        echo -e "${RED}Signing does not work right now; nothing bumped, nothing committed:${NC}"
+        echo "$probe_err"
+        exit 1
+    fi
+fi
+
 # The files the bump rewrites, as they were: a refused commit (the pre-commit gate) puts them
 # back, so a rerun bumps once, not twice (9.66.1 nearly went out as 9.66.2 on 2026-10-22).
 # The saved copy, not HEAD, so an edit of the person's own in pyproject.toml survives.

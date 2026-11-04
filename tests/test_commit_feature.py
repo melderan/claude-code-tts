@@ -137,6 +137,26 @@ def test_a_refused_commit_puts_the_version_back_and_keeps_the_change(repo):
     assert '"1.2.4"' in (root / "src" / "claude_code_tts" / "__init__.py").read_text()
 
 
+def test_a_signing_failure_stops_before_the_bump_and_the_gate(repo, tmp_path):
+    """2026-11-04: a cold signing key failed only after the pre-commit gate's two minutes."""
+    root, _ = repo
+    fake_gpg = tmp_path / "fake-gpg"
+    fake_gpg.write_text("#!/bin/sh\necho 'the passphrase cache is cold' >&2\nexit 2\n")
+    fake_gpg.chmod(0o755)
+    git(root, "config", "commit.gpgsign", "true")
+    git(root, "config", "gpg.program", str(fake_gpg))
+    marker = tmp_path / "gate-ran"
+    hook = root / ".git" / "hooks" / "pre-commit"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    hook.chmod(0o755)
+    r = run(repo, "-y", "fix", "something")
+    assert r.returncode == 1
+    assert "Signing does not work right now" in r.stdout and "cache is cold" in r.stdout
+    assert not marker.exists(), "the gate ran before signing was tried"
+    assert '"1.2.3"' in (root / "src" / "claude_code_tts" / "__init__.py").read_text()
+    assert git(root, "log", "--format=%s") == "chore: start\n"
+
+
 def test_unknown_type_refuses(repo):
     r = run(repo, "-y", "style", "something")
     assert r.returncode == 2
