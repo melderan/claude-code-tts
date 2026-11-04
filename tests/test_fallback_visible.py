@@ -165,7 +165,8 @@ class TestPidFileSurvivesAStatusCheck:
 
     def test_a_live_pid_without_a_heartbeat_is_running(self, state_dir):
         st.PID_FILE.write_text("4242")
-        with patch.object(st.os, "kill", lambda pid, sig: None):
+        with patch.object(st.os, "kill", lambda pid, sig: None), \
+             patch.object(st, "pid_is_daemon", lambda pid: True):
             assert st.is_daemon_running() == (True, 4242)
 
     def test_nothing_at_all_is_not_running(self, state_dir):

@@ -4387,7 +4387,9 @@ def cmd_daemon(args: argparse.Namespace) -> None:
     elif dc == "install":
         install_service()
     elif dc == "foreground":
-        run_foreground(lockpick=lockpick)
+        # A refusal is exit 1, so launchd (KeepAlive SuccessfulExit false) tries again.
+        if not run_foreground(lockpick=lockpick):
+            sys.exit(1)
     elif dc == "control":
         qf = write_control_message(
             text=getattr(args, "text", ""),

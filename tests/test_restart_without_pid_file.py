@@ -105,6 +105,7 @@ class TestStopWithoutAPidFile:
                 sent.append((pid, sig))
 
         monkeypatch.setattr(daemon_mod.os, "kill", fake_kill)
+        monkeypatch.setattr(daemon_mod, "pid_is_daemon", lambda pid: True)  # this process stands in for it
         assert daemon_mod.stop_daemon() is True
         assert sent == [(os.getpid(), signal.SIGTERM)]
         assert "stopped gracefully" in capsys.readouterr().out

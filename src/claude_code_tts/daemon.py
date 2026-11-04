@@ -66,6 +66,7 @@ from claude_code_tts.state import (
     acquire_lock,
     clear_current_message,
     clear_heartbeat,
+    clear_own_pid,
     clear_pid,
     describe_pause_source,
     ensure_pid_file,
@@ -79,6 +80,7 @@ from claude_code_tts.state import (
     may_play,
     pause_source,
     pid_alive,
+    pid_is_daemon,
     read_output_device,
     read_playback_state,
     release_lock,
@@ -2625,6 +2627,7 @@ def daemon_loop(lockpick: bool = False) -> None:
     if not _shutdown_by_signal:
         speak_announcement("Voice daemon shutting down. Catch you later.")
     clear_heartbeat()
+    clear_own_pid()
     release_lock()
     log("Daemon stopped")
 
@@ -2726,6 +2729,12 @@ def stop_daemon() -> bool:
         )
         return False
 
+    if pid_is_daemon(pid) is False:
+        # A pid file a reboot left behind names someone else's process now; SIGTERM and then
+        # SIGKILL to it would hit an unrelated program (Haley, 2026-11-04).
+        print(f"PID {pid} is not a claude-tts daemon by its command line; not signalling it")
+        return False
+
     try:
         os.kill(pid, signal.SIGTERM)
         idle_since: float | None = None
@@ -2757,6 +2766,10 @@ def stop_daemon() -> bool:
 
         print("Daemon is not speaking and did not exit, forcing...")
         player_pid = read_playback_state().get("audio_pid")
+        if pid_is_daemon(pid) is False:
+            print(f"PID {pid} is no longer a claude-tts daemon; not killing it")
+            clear_pid()
+            return False
         os.kill(pid, signal.SIGKILL)
         if kill_orphan_player(player_pid):
             print(f"Stopped its player too (PID {player_pid})")
@@ -2802,15 +2815,21 @@ def daemon_status() -> None:
             pass
 
 
-def run_foreground(lockpick: bool = False) -> None:
-    """Run daemon in foreground (for debugging)."""
+def run_foreground(lockpick: bool = False) -> bool:
+    """Run the daemon in this process (launchd and systemd do this); False when it refused.
+
+    The refusal is a failure to the caller, exit 1: launchd's KeepAlive is SuccessfulExit
+    false, so a refusal that exited 0 was never retried, and a daemon that refused over a
+    stale pid stayed down from an 11:20 boot until a hand kickstart (2026-11-04).
+    """
     if not lockpick:
         running, pid = is_daemon_running()
         if running:
             print(f"Background daemon is running (PID: {pid})")
             print("Stop it first with: claude-tts daemon stop")
             print("Or use --lockpick to force takeover")
-            return
+            log(f"Foreground start refused: a daemon is running (PID: {pid})", "WARN")
+            return False
 
     print("Running in foreground (Ctrl+C to stop)...")
     print(f"Queue directory: {msgqueue.QUEUE_DIR}")
@@ -2823,6 +2842,7 @@ def run_foreground(lockpick: bool = False) -> None:
         daemon_loop(lockpick=lockpick)
     except KeyboardInterrupt:
         print("\nStopped")
+    return True
 
 
 def daemon_restart(lockpick: bool = False) -> bool:

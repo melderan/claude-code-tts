@@ -49,8 +49,11 @@ class TestIsDaemonRunning:
         assert daemon_mod.is_daemon_running() == (False, None)
         assert not pid_file.exists()
 
-    def test_no_heartbeat_live_pid(self, tmp_path, monkeypatch):
+    def test_no_heartbeat_live_daemon_pid(self, tmp_path, monkeypatch):
+        """A daemon between its start and its first heartbeat; a live pid that is not a
+        daemon is tests/test_stale_pid_after_reboot.py."""
         self._files(tmp_path, monkeypatch, os.getpid(), None)
+        monkeypatch.setattr(state_mod, "pid_is_daemon", lambda pid: True)
         assert daemon_mod.is_daemon_running() == (True, os.getpid())
 
 

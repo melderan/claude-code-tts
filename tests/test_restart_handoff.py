@@ -298,6 +298,7 @@ class TestStopDaemonWaitsWhileSpeaking:
             clock["t"] += s
 
         with patch.object(daemon_mod_, "is_daemon_running", return_value=(True, 4242)), \
+             patch.object(daemon_mod_, "pid_is_daemon", return_value=True), \
              patch.object(daemon_mod_, "read_playback_state", return_value={"audio_pid": 777}), \
              patch.object(daemon_mod_.os, "kill", side_effect=fake_kill), \
              patch.object(daemon_mod_.time, "sleep", fake_sleep), \

@@ -18,6 +18,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -114,9 +115,20 @@ def acquire_lock(lockpick: bool = False, log: Callable[[str, str], None] | None 
 
 
 def release_lock() -> None:
-    """Release the daemon lock."""
+    """Release the daemon lock, blanking the pid written into it first.
+
+    The file itself stays (removing a flock file races a daemon that has just opened it), but
+    a released lock no longer names a pid: after a reboot that pid belongs to someone else
+    (2026-11-04, see pid_is_daemon).
+    """
     global _lock_fd
     if _lock_fd:
+        try:
+            _lock_fd.seek(0)
+            _lock_fd.truncate()
+            _lock_fd.flush()
+        except Exception:
+            pass
         try:
             fcntl.flock(_lock_fd, fcntl.LOCK_UN)
             _lock_fd.close()
@@ -169,6 +181,18 @@ def clear_pid() -> None:
     PID_FILE.unlink(missing_ok=True)
 
 
+def clear_own_pid() -> None:
+    """Remove the pid file if it names this process; the daemon does this on a graceful stop.
+
+    Through 9.85.0 a daemon run by launchd or systemd (`daemon foreground`, no atexit) left
+    its pid behind on every stop, and after a reboot that pid was another process: the next
+    start said "Background daemon is running (PID: 927)" and quit (2026-11-04, twice by
+    then). A pid file naming another process is a takeover's (--lockpick) and stays.
+    """
+    if _pid_in(PID_FILE) == os.getpid():
+        PID_FILE.unlink(missing_ok=True)
+
+
 def _pid_in(path: Path) -> int | None:
     """The pid a marker file holds, or None when the file is missing, empty or not a number."""
     try:
@@ -202,6 +226,46 @@ def pid_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
+
+
+# Every daemon's command line names the program and a daemon verb. The program is the
+# installed `claude-tts` entry point (launchd and systemd run `<bin>/claude-tts daemon
+# foreground`; `daemon start` and `daemon restart` fork the daemon from themselves, so the
+# child keeps that line) or the module (`python -m claude_code_tts.cli daemon foreground`, the
+# in-place re-exec after a control restart). A hook's `claude-tts speak` or a `daemon status`
+# has the program and not the verb.
+_DAEMON_PROGRAM_WORDS = ("claude-tts", "claude_code_tts")
+_DAEMON_VERB_RE = re.compile(r"(?:^|\s)daemon\s+(?:start|restart|foreground)(?:\s|$)")
+
+
+def pid_is_daemon(pid: int) -> bool | None:
+    """Whether this live pid is another process's claude-tts daemon; None when unknown.
+
+    os.kill(pid, 0) only says that some process holds the pid. After a reboot the pid a
+    stopped daemon left behind is reused (927 and 851 on JMO's Mac, 2026-11-04), so a live
+    pid with no heartbeat is not evidence of a daemon. This asks ps instead of trying the
+    flock: a probe that takes the lock, however briefly, can make a starting daemon's
+    non-blocking acquire_lock fail. None (no ps, a timeout, no line) keeps the old answer.
+
+    This process and its parent are never another daemon. launchd starts the same jobs in
+    the same order on every boot, so the new `daemon foreground` can draw the old daemon's
+    pid, and it would then find itself in the stale file (Haley, 2026-11-04).
+    """
+    if pid in (os.getpid(), os.getppid()):
+        return False
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    command = out.stdout.strip()
+    if not command:
+        return None
+    return any(word in command for word in _DAEMON_PROGRAM_WORDS) and bool(_DAEMON_VERB_RE.search(command))
 
 
 # The loop passes every 100 ms and readers accept a heartbeat up to HEARTBEAT_MAX_AGE_S old, so
@@ -275,11 +339,15 @@ def is_daemon_running() -> tuple[bool, int | None]:
         return False, None
     try:
         os.kill(pid, 0)
-        return True, pid
     except (ProcessLookupError, PermissionError):
         if heartbeat_says_dead:
             PID_FILE.unlink(missing_ok=True)
         return False, None
+    if heartbeat_says_dead and pid_is_daemon(pid) is False:
+        # Alive, but not a daemon: a reused pid from before a reboot. Nobody is here.
+        PID_FILE.unlink(missing_ok=True)
+        return False, None
+    return True, pid
 
 
 # --- Restart markers ---
