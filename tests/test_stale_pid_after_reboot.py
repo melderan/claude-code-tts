@@ -60,7 +60,7 @@ def _wait_for_command(pid: int, word: str) -> None:
     """ps shows the exec'd command line, not the forked parent's, once exec has run."""
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
-        out = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
+        out = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
         if word in out:
             return
         time.sleep(0.02)  # sleep-ok: polling ps for an exec to land, bounded by the deadline
@@ -100,6 +100,13 @@ class TestALiveStrangerIsNotTheDaemon:
         _wait_for_command(stranger, "sleep")
         _wait_for_command(daemon_like, "claude_code_tts")
         assert st.pid_is_daemon(stranger) is False
+        assert st.pid_is_daemon(daemon_like) is True
+
+    def test_a_narrow_terminal_does_not_hide_the_daemon_verb(self, daemon_like, monkeypatch):
+        """CI, ubuntu py3.14, 2026-11-04: procps cut the line at $COLUMNS, before the verb that
+        follows a long interpreter path, and a real daemon read as a stranger."""
+        _wait_for_command(daemon_like, "claude_code_tts")
+        monkeypatch.setenv("COLUMNS", "40")
         assert st.pid_is_daemon(daemon_like) is True
 
     def test_a_claude_tts_client_is_not_a_daemon(self, state_dir):

@@ -255,7 +255,9 @@ def pid_is_daemon(pid: int) -> bool | None:
         return False
     try:
         out = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
+            # -ww: the whole line. Without it procps cuts the line at $COLUMNS (80 on a CI
+            # runner), and the daemon verb comes after a long interpreter path (9.86.1).
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
             capture_output=True,
             text=True,
             timeout=2,
