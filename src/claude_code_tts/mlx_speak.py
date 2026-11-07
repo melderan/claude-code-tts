@@ -67,7 +67,7 @@ def generate_kwargs(generate: Callable[..., Any], *, voice: str, speed: float, l
 def _to_floats(audio: Any) -> list[float]:
     """Flatten one generated audio chunk (an mx.array, numpy array or list) to floats."""
     try:
-        import numpy as np  # ty: ignore[unresolved-import]  (present in the mlx venv)
+        import numpy as np  # ty: ignore[import-not-found]  (present in the mlx venv)
 
         return [float(x) for x in np.asarray(audio, dtype="float32").reshape(-1)]
     except ImportError:
@@ -93,7 +93,7 @@ def write_wav(path: Path, samples: Iterable[float], sample_rate: int) -> int:
     """
     frames: bytes | bytearray
     try:
-        import numpy as np  # ty: ignore[unresolved-import]  (present in the mlx venv)
+        import numpy as np  # ty: ignore[import-not-found]  (present in the mlx venv)
 
         arr = np.clip(np.asarray(list(samples), dtype="float32"), -1.0, 1.0)
         frames = (arr * 32767).astype("<i2").tobytes()
@@ -138,7 +138,7 @@ def synthesize(model: Any, text: str, *, voice: str, speed: float, lang_code: st
 
 
 def _load(model_id: str) -> Any:
-    from mlx_audio.tts.utils import load_model  # ty: ignore[unresolved-import]  (mlx venv only)
+    from mlx_audio.tts.utils import load_model  # ty: ignore[import-not-found]  (mlx venv only)
 
     return load_model(model_id)
 
