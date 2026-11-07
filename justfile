@@ -17,17 +17,17 @@ default:
 check: lint typecheck
 
 lint:
-    uv tool run ruff check src tests scripts
+    uv tool run ruff@0.17.4 check src tests scripts
     scripts/sleep-race-check.py
 
 fmt:
-    uv tool run ruff check --fix src tests scripts
-    uv tool run ruff format src tests scripts
+    uv tool run ruff@0.17.4 check --fix src tests scripts
+    uv tool run ruff@0.17.4 format src tests scripts
 
 # mypy is the long-standing checker; ty (Astral) catches what it misses. Both must pass.
 typecheck:
-    uv tool run mypy src
-    uv tool run ty check src
+    uv tool run mypy@2.4.1 src
+    uv tool run ty@0.0.99 check src
 
 # Interpreter for `just test`; override before the recipe name: `just PY=3.14 test`
 PY := "3.12"

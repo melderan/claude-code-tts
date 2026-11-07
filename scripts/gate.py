@@ -48,11 +48,11 @@ FAST: list[tuple[str, list[str]]] = [
     # First, and cheapest: nothing private (names, paths, hosts, internal tools) leaves this
     # public repo, in files, staged changes, unpushed commit messages or tag notes.
     ("private", ["scripts/private-check.py"]),
-    ("lint", ["uv", "tool", "run", "ruff", "check", "src", "tests", "scripts"]),
+    ("lint", ["uv", "tool", "run", "ruff@0.17.4", "check", "src", "tests", "scripts"]),
     # A fixed sleep before an assert bets on a thread's timing; macOS ci lost that bet (9.66.1).
     ("sleep-race", ["scripts/sleep-race-check.py"]),
-    ("mypy", ["uv", "tool", "run", "mypy", "src"]),
-    ("ty", ["uv", "tool", "run", "ty", "check", "src"]),
+    ("mypy", ["uv", "tool", "run", "mypy@2.4.1", "src"]),
+    ("ty", ["uv", "tool", "run", "ty@0.0.99", "check", "src"]),
     ("version", ["scripts/check-version.sh"]),
     ("tests", ["uv", "run", "--python", "3.12", "--with", "pytest", "pytest", "-q",
                "--ignore=tests/docker", "-p", "no:cacheprovider"]),
