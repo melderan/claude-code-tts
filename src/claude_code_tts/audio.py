@@ -759,13 +759,16 @@ def speak_direct(text: str, config: TTSConfig) -> None:
         )
 
 
-def write_queue_message(text: str, config: TTSConfig, *, engine: str = "") -> Path:
+def write_queue_message(
+    text: str, config: TTSConfig, *, engine: str = "", extra: dict | None = None
+) -> Path:
     """Write a queue message JSON file for the daemon.
 
     engine names the engine the caller chose for this one message ("mlx"):
     the daemon then plays the message's voice fields for that engine instead
     of the persona's, so `claude-tts speak --voice-mlx ...` uses the daemon's
-    resident model rather than loading its own.
+    resident model rather than loading its own. extra adds fields as they are
+    (`claude-tts summon`: lane, source, summon, volume).
     """
     method = config.speed_method or "playback"
 
@@ -795,6 +798,8 @@ def write_queue_message(text: str, config: TTSConfig, *, engine: str = "") -> Pa
         message["claude_session_id"] = config.claude_session_id
     if config.message_id:
         message["id"] = config.message_id
+    if extra:
+        message.update(extra)
 
     queue_file, _ = msgqueue.write_message(message)
 

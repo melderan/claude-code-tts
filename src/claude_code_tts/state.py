@@ -697,7 +697,7 @@ def lets_through(session_id: str, let_through: list[str] | None) -> bool:
     return any(entry in (session_id, tag, last) for entry in let_through)
 
 
-def may_play(state: dict, session_id: str, lane: str = "", queued_at: object = None) -> bool:
+def may_play(state: dict, session_id: str, lane: str = "", queued_at: object = None, *, summon: bool = False) -> bool:
     """Whether a message from session_id may play under this state.
 
     Not paused: yes. A mic hold (paused_by "mic"), or a recording under a person's hold
@@ -707,10 +707,12 @@ def may_play(state: dict, session_id: str, lane: str = "", queued_at: object = N
     that plays through stops that read (click_read_through_hold, stop_read). A meeting:
     nobody, not even a room let through, since a recorder in the call takes the system audio
     as well as the microphone; only a now block clicked after the call began, which is the
-    person choosing to be heard in it.
+    person choosing to be heard in it. A summon (`claude-tts summon`: a now block a room
+    wrote, not the person) plays through a person's hold like a click, never through a call,
+    so a room calling for help does not shout into someone's meeting.
     """
     if in_meeting(state):
-        return lane == NOW_LANE and _queued_after(state["meeting"].get("since"), queued_at)
+        return lane == NOW_LANE and not summon and _queued_after(state["meeting"].get("since"), queued_at)
     if not state.get("paused"):
         return True
     if state.get("paused_by") != "user" or state.get("mic_held"):
@@ -745,7 +747,9 @@ def click_read_through_hold(state: dict) -> str | None:
         return None
     if not (state.get("paused") and state.get("paused_by") == "user"):
         return None
-    if not may_play(state, str(current.get("session_id", "")), NOW_LANE, current.get("timestamp")):
+    if not may_play(
+        state, str(current.get("session_id", "")), NOW_LANE, current.get("timestamp"), summon=bool(current.get("summon"))
+    ):
         return None
     return str(current["id"])
 

@@ -1997,6 +1997,81 @@ def cmd_hold(args: argparse.Namespace) -> None:
         print("A recording is in progress; the rooms let through wait for it to end")
 
 
+SUMMON_SOURCE = "summon"
+SUMMON_DEFAULT_VOLUME = 80
+SUMMON_DEFAULT_WAIT_S = 120.0
+_SETTLED = ("played", "failed", "cancelled", "dropped")
+
+
+def cmd_summon(args: argparse.Namespace) -> None:
+    """Call the person: this room's words next, through their hold, louder, and say if it landed.
+
+    One now block in this room's voice. It plays through a person's hold or pause set before it,
+    the way a click on a page does, and lets no other room through; the hold stays as it was. It
+    plays even if this session is muted, and leaves the mute as it was. It waits for a recording
+    (the person is speaking) and never plays during a call. While it plays the daemon raises the
+    Mac's output volume to at least --volume and unmutes it, then puts both back. The words go
+    into this room's voice ledger first; the command waits for the daemon's outcome and exits 0
+    only when it played. It goes next, after the message playing now (a let-through room's) ends.
+    """
+    from claude_code_tts import ledger
+    from claude_code_tts.audio import daemon_healthy, write_queue_message
+    from claude_code_tts.state import in_meeting, read_playback_state
+
+    text = " ".join(args.text).strip()
+    if not text:
+        print("Nothing to say: claude-tts summon 'JMO I need your help!'", file=sys.stderr)
+        sys.exit(2)
+    if not 1 <= args.volume <= 100:
+        print(f"--volume must be 1-100, not {args.volume}", file=sys.stderr)
+        sys.exit(2)
+    session_id = get_session_id(for_write=True)
+    if not daemon_healthy():
+        print("The daemon is not running, so nobody heard it: claude-tts daemon start, then summon again")
+        sys.exit(1)
+    cfg = load_config(session_id)
+    msg_id = ledger.new_id()
+    cfg.message_id = msg_id
+    entry = {"id": msg_id, "event": "summon", "project": cfg.project_name, "text": text, "volume": args.volume}
+    if not ledger.record(session_id, entry):
+        print("Voice ledger write failed; summoning anyway", file=sys.stderr)
+    write_queue_message(
+        text,
+        cfg,
+        extra={"lane": "now", "source": SUMMON_SOURCE, "summon": True, "volume": args.volume},
+    )
+    print(f"Summon {msg_id} queued for {session_id}, output volume at least {args.volume}")
+    if args.wait <= 0:
+        return
+
+    deadline = time.monotonic() + args.wait
+    said_why = ""
+    while time.monotonic() < deadline:
+        hit = next((o for o in reversed(ledger.outcomes(session_id)) if o.get("id") == msg_id), None)
+        if hit is not None and hit.get("outcome") in _SETTLED:
+            outcome = str(hit["outcome"])
+            reason = f" ({hit['reason']})" if hit.get("reason") else ""
+            print(f"Summon {msg_id}: {outcome}{reason}")
+            sys.exit(0 if outcome == "played" else 1)
+        state = read_playback_state()
+        why = (
+            "a call holds every voice; it plays when the call ends"
+            if in_meeting(state)
+            else "a recording is in progress; it plays when the recording ends"
+            if state.get("paused_by") == "mic" or state.get("mic_held")
+            else ""
+        )
+        if why and why != said_why:
+            print(f"Waiting: {why}")
+            said_why = why
+        time.sleep(0.25)
+    print(
+        f"Summon {msg_id}: not spoken after {args.wait:.0f}s; it stays queued. "
+        f"claude-tts ledger --last 1 shows its outcome later"
+    )
+    sys.exit(1)
+
+
 def cmd_kraken(args: argparse.Namespace) -> None:
     """Release the kraken: everyone speaks again, in the order they queued.
 
@@ -4840,6 +4915,20 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--full", action="store_true", help="Print each row's whole text")
     p.add_argument("--json", action="store_true", help="JSON rows")
     p.set_defaults(func=cmd_ledger)
+
+    # --- summon ---
+    p = subparsers.add_parser(
+        "summon",
+        help="Call the person: this room's words next, through their hold (never a call), louder; exit 0 once played",
+    )
+    p.add_argument("text", nargs="+", help="What to say, e.g. 'JMO I need your help!'")
+    p.add_argument(
+        "--volume", type=int, default=SUMMON_DEFAULT_VOLUME, help="Output volume floor while it plays, 1-100 (macOS)"
+    )
+    p.add_argument(
+        "--wait", type=float, default=SUMMON_DEFAULT_WAIT_S, help="Seconds to wait for the outcome; 0 queues and exits"
+    )
+    p.set_defaults(func=cmd_summon)
 
     # --- verify ---
     p = subparsers.add_parser(

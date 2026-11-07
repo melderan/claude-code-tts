@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from claude_code_tts import ledger as voice_ledger
-from claude_code_tts import msgqueue, spoken
+from claude_code_tts import msgqueue, spoken, volume
 from claude_code_tts import state as daemon_state
 from claude_code_tts.audio import _set_last_error as audio_set_last_error
 from claude_code_tts.audio import (
@@ -196,7 +196,7 @@ _daemon_mode = False
 
 # The session whose message is playing or about to play; the hold is judged against it
 # (state.may_play), so a room a person let through keeps speaking while the rest wait.
-_SPEAKING: dict[str, Any] = {"session": "", "lane": "", "queued_at": None}
+_SPEAKING: dict[str, Any] = {"session": "", "lane": "", "queued_at": None, "summon": False}
 
 # Now blocks the bridge has queued ("asked") and how many of those the loop has seen settled
 # ("settled"). While asked is ahead, whatever plays outside the now lane is cut off the way a
@@ -225,10 +225,17 @@ def _speaking(msg: dict) -> None:
     _SPEAKING["session"] = str(msg.get("session_id", ""))
     _SPEAKING["lane"] = str(msg.get("lane") or "")
     _SPEAKING["queued_at"] = msg.get("timestamp")
+    _SPEAKING["summon"] = bool(msg.get("summon"))
 
 
 def _may_play(state: dict, msg: dict) -> bool:
-    return may_play(state, str(msg.get("session_id", "")), str(msg.get("lane") or ""), msg.get("timestamp"))
+    return may_play(
+        state,
+        str(msg.get("session_id", "")),
+        str(msg.get("lane") or ""),
+        msg.get("timestamp"),
+        summon=bool(msg.get("summon")),
+    )
 
 
 def _trimmed_while_held(state: dict, msg: dict) -> bool:
@@ -251,7 +258,9 @@ def held_now(state: dict | None = None) -> bool:
     s = read_playback_state() if state is None else state
     if _preempt_pending() and _SPEAKING["lane"] != NOW_LANE:
         return True
-    return not may_play(s, _SPEAKING["session"], _SPEAKING["lane"], _SPEAKING["queued_at"])
+    return not may_play(
+        s, _SPEAKING["session"], _SPEAKING["lane"], _SPEAKING["queued_at"], summon=bool(_SPEAKING["summon"])
+    )
 
 
 def take_stop_read(job_id: str | None, state: dict | None = None) -> bool:
@@ -1415,10 +1424,11 @@ def _cancel_removed_job(msg: dict) -> None:
 def _outcome(msg: dict, outcome: str, reason: str = "", **extra: object) -> None:
     """One line in the daemon's voice ledger for how a hook's message ended.
 
-    Bridge and control messages have jobs for this and are left alone. A failed write is one
-    WARN line; the queue goes on.
+    Bridge and control messages have jobs for this and are left alone. A summon has a job (so the
+    pause hotkey can stop it) and a ledger row both: the room that summoned waits on that row
+    to know whether it reached the person. A failed write is one WARN line; the queue goes on.
     """
-    if msg.get("type") == "control" or msg.get("source"):
+    if msg.get("type") == "control" or (msg.get("source") and not msg.get("summon")):
         return
     session_id, msg_id = str(msg.get("session_id") or ""), msg.get("id")
     if not session_id or not msg_id:
@@ -1654,6 +1664,11 @@ def prepare_message(msg: dict, raw_config: dict) -> PreparedMessage:
         current_msg_info["id"] = job_id
         current_msg_info["source"] = msg.get("source")
         current_msg_info["want_marks"] = want_marks
+    if msg.get("summon"):
+        # A cut-off summon resumes as one: through the hold, never through a call, as loud.
+        current_msg_info["summon"] = True
+        if msg.get("volume") is not None:
+            current_msg_info["volume"] = msg["volume"]
 
     return PreparedMessage(
         msg=msg,
@@ -1830,6 +1845,7 @@ def daemon_loop(lockpick: bool = False) -> None:
 
     _shutdown_by_signal = False
     clear_leftover_wavs()
+    volume.restore_left_over(log)  # a daemon that died mid-summon must not leave the Mac loud
 
     def handle_shutdown(signum: int, _frame: object) -> None:
         global _shutdown_requested
@@ -2239,19 +2255,20 @@ def daemon_loop(lockpick: bool = False) -> None:
                         else DEFAULT_TONE
                     )
 
-                    stream_message(
-                        interrupted,
-                        sentence_generator(
-                            persona,
-                            voice_kokoro=i_voice_kokoro,
-                            voice_kokoro_blend=i_voice_blend,
-                            tone=i_tone,
-                            voice_mlx=i_voice_mlx,
-                            speaker_mlx=i_speaker_mlx,
-                            lang_mlx=i_lang_mlx,
-                        ),
-                        start_index=int(interrupted.get("sentence_index", 0)),
-                    )
+                    with volume.raised(interrupted.get("volume"), log):
+                        stream_message(
+                            interrupted,
+                            sentence_generator(
+                                persona,
+                                voice_kokoro=i_voice_kokoro,
+                                voice_kokoro_blend=i_voice_blend,
+                                tone=i_tone,
+                                voice_mlx=i_voice_mlx,
+                                speaker_mlx=i_speaker_mlx,
+                                lang_mlx=i_lang_mlx,
+                            ),
+                            start_index=int(interrupted.get("sentence_index", 0)),
+                        )
                     continue
 
                 # Regenerate the full WAV, sentence by sentence if the page
@@ -2317,10 +2334,11 @@ def daemon_loop(lockpick: bool = False) -> None:
                         started_at=time.time(),
                         offset_ms=to_playback_ms(resume_from, i_speed, i_speed_method),
                     )
-                    if i_speed_method == "playback":
-                        _, was_killed, elapsed = daemon_play_audio(play_file, i_speed, i_job_id)
-                    else:
-                        _, was_killed, elapsed = daemon_play_audio(play_file, job_id=i_job_id)
+                    with volume.raised(interrupted.get("volume"), log):
+                        if i_speed_method == "playback":
+                            _, was_killed, elapsed = daemon_play_audio(play_file, i_speed, i_job_id)
+                        else:
+                            _, was_killed, elapsed = daemon_play_audio(play_file, job_id=i_job_id)
 
                     audio_file.unlink(missing_ok=True)
                     if play_file != audio_file:
@@ -2390,6 +2408,10 @@ def daemon_loop(lockpick: bool = False) -> None:
                 msg_file.unlink(missing_ok=True)
                 continue
             unplayed_claim = msg_claim
+            if msg.get("summon") and msg.get("source") and msg.get("id") and JOBS.get(str(msg["id"])) is None:
+                # Written by the CLI in another process, so no bridge made its job; the job is
+                # what lets the pause hotkey stop this one read and leave the hold in place.
+                JOBS.create(str(msg["id"]), source=str(msg["source"]), project=msg.get("project", ""), lane=NOW_LANE)
 
             # The message after the one that just played may be synthesized already.
             taken = prefetch.take(msg_file)
@@ -2419,35 +2441,36 @@ def daemon_loop(lockpick: bool = False) -> None:
             # sentence boundary. Pages asking for marks keep the one-piece path,
             # since marks need the whole WAV before playback starts.
             if speech_unit() == "sentence" and not want_marks:
-                if last_speaker and last_speaker != speaker_key:
-                    speaker_transition(
-                        config["speaker_transition"],
-                        last_speaker,
-                        speaker_key,
-                        project,
-                        persona,
-                        speed,
-                        speed_method,
-                        who=speaker_line(current_msg_info),
-                    )
-                last_speaker = speaker_key
-                current_msg_info["tone"] = tone.name
-                if prefetched:
-                    audio_file.unlink(missing_ok=True)  # speech_unit changed under us; stream anew
+                with volume.raised(msg.get("volume"), log):
+                    if last_speaker and last_speaker != speaker_key:
+                        speaker_transition(
+                            config["speaker_transition"],
+                            last_speaker,
+                            speaker_key,
+                            project,
+                            persona,
+                            speed,
+                            speed_method,
+                            who=speaker_line(current_msg_info),
+                        )
+                    last_speaker = speaker_key
+                    current_msg_info["tone"] = tone.name
+                    if prefetched:
+                        audio_file.unlink(missing_ok=True)  # speech_unit changed under us; stream anew
 
-                stream_message(
-                    current_msg_info,
-                    sentence_generator(
-                        persona,
-                        voice_kokoro=voice_kokoro,
-                        voice_kokoro_blend=voice_kokoro_blend,
-                        tone=tone,
-                        voice_mlx=voice_mlx,
-                        speaker_mlx=speaker_mlx,
-                        lang_mlx=lang_mlx,
-                    ),
-                    msg_file=msg_file,
-                )
+                    stream_message(
+                        current_msg_info,
+                        sentence_generator(
+                            persona,
+                            voice_kokoro=voice_kokoro,
+                            voice_kokoro_blend=voice_kokoro_blend,
+                            tone=tone,
+                            voice_mlx=voice_mlx,
+                            speaker_mlx=speaker_mlx,
+                            lang_mlx=lang_mlx,
+                        ),
+                        msg_file=msg_file,
+                    )
                 unplayed_claim = None
                 msg_claim.refresh(spoken.DAEMON_MIN_TTL_S)
                 continue
@@ -2553,10 +2576,11 @@ def daemon_loop(lockpick: bool = False) -> None:
                 speed=effective_speed,
                 duration_ms=to_playback_ms(wav_duration, effective_speed, effective_speed_method),
             )
-            if effective_speed_method == "playback":
-                _, was_killed, elapsed = daemon_play_audio(audio_file, effective_speed, job_id)
-            else:
-                _, was_killed, elapsed = daemon_play_audio(audio_file, job_id=job_id)
+            with volume.raised(msg.get("volume"), log):
+                if effective_speed_method == "playback":
+                    _, was_killed, elapsed = daemon_play_audio(audio_file, effective_speed, job_id)
+                else:
+                    _, was_killed, elapsed = daemon_play_audio(audio_file, job_id=job_id)
             # The TTL counts from the end of playback: the loop dequeues one message at a time,
             # so a double queued while this one played is picked only now. Measured from the
             # claim, max(30 s, duration) would let it through after any synthesis delay.
