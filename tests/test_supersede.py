@@ -394,6 +394,144 @@ class TestHookWritesTheSupersede:
         typed = "why did the plugin sent a message: line show up"
         assert cli_mod._supersede_from_hook({**self.hook, "prompt": typed}) is not None
 
+    def _transcript(self, tmp_path: Path, *records: dict) -> str:
+        path = tmp_path / "projects" / ROOM_A / "t.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        filler = {"type": "assistant", "message": {"content": [{"type": "text", "text": "x" * 200}]}}
+        path.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in (filler, *records, filler)))
+        return str(path)
+
+    # Records shaped as Claude Code 2.1.316 wrote them on 2026-11-08 (plugins, a peer, a person).
+    PID = "497412ba-921e-4d80-b942-62b98b653da7"
+
+    def _prompt_record(self, **who: object) -> dict:
+        return {"type": "user", "promptId": self.PID, "message": {"role": "user", "content": "fuel: ..."}, **who}
+
+    @pytest.mark.parametrize(
+        "who",
+        [
+            {"origin": {"kind": "plugin", "name": "mail-watch"}, "promptSource": "system"},
+            {"origin": {"kind": "peer", "name": "room-7c"}, "promptSource": "system"},
+            {"origin": {"kind": "task-notification"}, "promptSource": "system"},
+            {"promptSource": "sdk"},
+        ],
+        ids=["plugin", "peer", "task", "sdk"],
+    )
+    def test_a_prompt_its_record_says_someone_else_sent_drops_nothing(self, tmp_path, who):
+        # 2026-11-08: the hook's prompt for a plugin message is the plugin's own words ("fuel: ...",
+        # "mail: 2 new"), which the wording rule never matched; each mail plugin poke 0.1 s after a
+        # stop dropped a room's reply as stale, twice that day. The record knows the sender.
+        tp = self._transcript(tmp_path, self._prompt_record(**who))
+        hook = {**self.hook, "transcript_path": tp, "prompt_id": self.PID, "prompt": "fuel: context at 30%"}
+        assert cli_mod._supersede_from_hook(hook) is None
+        assert not self.queue_dir.exists()
+
+    @pytest.mark.parametrize("source", ["typed", "queued"])
+    def test_the_persons_prompt_supersedes_even_in_a_plugins_words(self, tmp_path, source):
+        tp = self._transcript(tmp_path, self._prompt_record(origin={"kind": "human"}, promptSource=source))
+        pasted = "The mail-watch plugin sent a message: why did this drop my reply?"
+        hook = {**self.hook, "transcript_path": tp, "prompt_id": self.PID, "prompt": pasted}
+        assert cli_mod._supersede_from_hook(hook) is not None
+
+    def test_the_prompts_own_record_decides_not_its_turns_tool_results(self, tmp_path):
+        tool_result = {"type": "user", "promptId": self.PID, "message": {"content": [{"type": "tool_result"}]}}
+        tp = self._transcript(tmp_path, self._prompt_record(origin={"kind": "human"}), tool_result)
+        assert cli_mod._prompt_sender(tp, self.PID) == "human"
+
+    @pytest.mark.parametrize("case", ["no-id", "bad-id", "no-file", "not-there", "too-far-back"])
+    def test_without_a_record_the_wording_decides(self, tmp_path, monkeypatch, case):
+        record = self._prompt_record(origin={"kind": "plugin", "name": "mail-watch"})
+        tp = self._transcript(tmp_path, record if case != "not-there" else {"type": "user", "promptId": "other-id-1"})
+        pid: object = self.PID
+        if case == "no-id":
+            pid = None
+        elif case == "bad-id":
+            pid = '"x"' + self.PID
+        elif case == "no-file":
+            tp = str(tmp_path / "projects" / ROOM_A / "missing.jsonl")
+        elif case == "too-far-back":
+            monkeypatch.setattr(cli_mod, "PROMPT_RECORD_TAIL_BYTES", 100)
+        assert cli_mod._prompt_sender(tp, pid) is None
+        monkeypatch.setattr(cli_mod, "PROMPT_RECORD_POLL_S", 0.0)
+        hook = {**self.hook, "transcript_path": tp, "prompt_id": pid, "prompt": "fuel: context at 30%"}
+        # as the deferred run sees it once its wait is over
+        assert cli_mod._supersede_from_hook(hook, cutoff=time.time(), wait_s=0.01) is not None
+        for words in ("<task-notification>\n<task-id>b1</task-id>", "Another Claude session sent a message:\n<cross"):
+            assert cli_mod._supersede_from_hook({**hook, "prompt": words}, cutoff=time.time(), wait_s=0.01) is None
+
+    def test_the_hook_defers_when_the_record_is_not_written_yet(self, tmp_path, monkeypatch):
+        # 2026-11-08, measured: the record lands 0.8 s after the hook begins, after it returns.
+        handed: list[tuple[dict, float]] = []
+        monkeypatch.setattr(cli_mod, "_defer_supersede", lambda hook, cutoff: handed.append((hook, cutoff)))
+        tp = self._transcript(tmp_path)
+        hook = {**self.hook, "transcript_path": tp, "prompt_id": self.PID}
+        before = time.time()
+        assert cli_mod._supersede_from_hook(hook) is None
+        assert not self.queue_dir.exists()
+        assert [h for h, _ in handed] == [hook] and before <= handed[0][1] <= time.time()
+
+    @pytest.mark.parametrize("kind, writes", [("human", True), ("plugin", False)])
+    def test_the_deferred_run_waits_for_the_record_and_cuts_at_the_hooks_time(self, monkeypatch, kind, writes):
+        answers = iter([None, None, kind])
+        monkeypatch.setattr(cli_mod, "_prompt_sender", lambda tp, pid: next(answers))
+        monkeypatch.setattr(cli_mod, "PROMPT_RECORD_POLL_S", 0.0)
+        cutoff = time.time() - 0.8
+        path = cli_mod._supersede_from_hook({**self.hook, "prompt_id": self.PID}, cutoff=cutoff, wait_s=5.0)
+        assert next(answers, "drained") == "drained"
+        if not writes:
+            assert path is None and not self.queue_dir.exists()
+            return
+        assert path is not None
+        assert json.loads(path.read_text())["timestamp"] == pytest.approx(cutoff, abs=1e-6)
+
+    def test_the_hook_hands_off_to_a_detached_silent_child_that_decides(self, tmp_path, monkeypatch, capsys):
+        spawned: list[tuple[list, dict, bytes]] = []
+
+        class FakeChild:
+            pid = 4242
+
+            def __init__(self, cmd, **kw):
+                self.cmd, self.kw, self._buf = cmd, kw, bytearray()
+                outer = self
+
+                class In:
+                    def write(self, b):
+                        outer._buf.extend(b)
+
+                    def close(self):
+                        spawned.append((outer.cmd, outer.kw, bytes(outer._buf)))
+
+                self.stdin = In()
+
+        monkeypatch.setattr(cli_mod.subprocess, "Popen", FakeChild)
+        tp = self._transcript(tmp_path)
+        hook = {**self.hook, "transcript_path": tp, "prompt_id": self.PID}
+        self._main(monkeypatch, ["supersede", "--from-hook"], json.dumps(hook))
+        assert capsys.readouterr().out == "" and not self.queue_dir.exists()
+        [(cmd, kw, payload)] = spawned
+        assert cmd[1:] == ["-m", "claude_code_tts.cli", "supersede", "--deferred"]
+        assert kw["stdout"] == kw["stderr"] == cli_mod.subprocess.DEVNULL and kw["start_new_session"]
+        # the child's side: the record has landed, the person sent it
+        with open(tp, "a") as fh:
+            fh.write(json.dumps(self._prompt_record(origin={"kind": "human"}, promptSource="typed")) + "\n")
+        self._main(monkeypatch, ["supersede", "--deferred"], payload.decode())
+        assert capsys.readouterr().out == ""
+        [written] = [json.loads(p.read_text()) for p in self.queue_dir.glob("*.json")]
+        assert written["supersede_session"] == ROOM_A
+        assert written["timestamp"] == pytest.approx(json.loads(payload)["cutoff"], abs=1e-6)
+
+    def test_the_deferred_entry_runs_as_a_module_and_stays_silent(self, tmp_path):
+        import subprocess
+        import sys
+        # the tree under test, not whatever claude_code_tts the interpreter has installed
+        src = str(Path(cli_mod.__file__).resolve().parents[1])
+        env = {**os.environ, "HOME": str(tmp_path), "CLAUDE_TTS_ENABLED": "0", "PYTHONPATH": src}
+        done = subprocess.run(
+            [sys.executable, "-m", "claude_code_tts.cli", "supersede", "--deferred"],
+            input=b'{"hook": {"prompt": "x"}, "cutoff": 1.0}', capture_output=True, env=env, timeout=60,
+        )
+        assert (done.returncode, done.stdout, done.stderr) == (0, b"", b"")
+
     def test_no_prompt_in_the_input_writes_nothing(self):
         for hook in ({"transcript_path": self.hook["transcript_path"]}, {**self.hook, "prompt": "  "}):
             assert cli_mod._supersede_from_hook(hook) is None

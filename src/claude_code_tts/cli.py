@@ -2694,21 +2694,77 @@ def _inherit_session_settings(session_id: str, transcript_path: str) -> bool:
 
 
 # Prompts Claude Code starts in the person's place, which UserPromptSubmit fires for all the
-# same: a plugin (a mail watcher, say) with "The <name> plugin sent a message:\n...", and a
-# background task's "<task-notification>...". The hook input carries no origin field (the
-# transcript line does: origin.kind == "plugin" | "task-notification"), so the text is the only
-# tell. 2026-10-02: a mail plugin poked two rooms every twenty minutes through a morning of
-# meetings and each poke dropped that room's unheard replies as "stale"; 32 went in one resume.
-PLUGIN_PROMPT = re.compile(r"^\s*(The \S+ plugin sent a message:|<task-notification>)")
+# same: a plugin's message, a background task's "<task-notification>...", another session's
+# "Another Claude session sent a message:", an SDK caller's. 2026-10-02: a mail plugin poked
+# two rooms every twenty minutes through a morning of meetings and each poke dropped that room's
+# unheard replies as "stale"; 32 went in one resume.
+#
+# The hook input has no origin field, but it has prompt_id, and the transcript's record of the
+# prompt (promptId) says who sent it: origin.kind "human" (promptSource "typed" or "queued") is
+# the person; "plugin", "peer", "task-notification", or no origin with promptSource "sdk", is
+# not. The text was the tell until 2026-11-08, when a capture showed the hook's prompt for a
+# plugin message is the plugin's own words: "The <name> plugin sent a message:" is only how the
+# transcript shows it, so PLUGIN_PROMPT never matched one, and every mail plugin poke dropped the
+# reply of the turn it followed by 0.1 s (two in one room that day, both wanted). The text
+# stays as the fallback for a prompt whose record is not found.
+PLUGIN_PROMPT = re.compile(r"^\s*(The \S+ plugin sent a message:|<task-notification>|Another Claude session sent a message:)")
+# How far back from the end of the transcript the prompt's record is looked for: it is the last
+# or nearly the last record when the hook runs; a long tool output after it is not possible yet.
+PROMPT_RECORD_TAIL_BYTES = 1 << 20
+# What _prompt_sender returns for a prompt the person sent: the origin kind, or the promptSource
+# of a record with no origin.
+PERSON_SENDERS = frozenset({"human", "typed", "queued"})
 
 
-def _supersede_from_hook(hook_data: dict) -> Path | None:
+def _prompt_sender(transcript_path: object, prompt_id: object) -> str | None:
+    """Who sent the prompt, from its transcript record: origin.kind, else promptSource, else "".
+
+    None when there is no record to read (no id, no file, not in the tail, unparsable); "" when
+    the record names neither, as one from a Claude Code before origin did. Reads only the tail.
+    """
+    if not isinstance(transcript_path, str) or not transcript_path or not isinstance(prompt_id, str):
+        return None
+    if not re.fullmatch(r"[0-9A-Za-z-]{8,64}", prompt_id):
+        return None
+    needle = f'"promptId":"{prompt_id}"'.encode()
+    try:
+        with open(transcript_path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - PROMPT_RECORD_TAIL_BYTES))
+            tail = fh.read()
+    except OSError:
+        return None
+    # The first record with the id is the prompt's own; its turn's tool results carry it after.
+    for line in tail.splitlines():
+        if needle not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or rec.get("type") != "user" or rec.get("promptId") != prompt_id:
+            continue
+        origin = rec.get("origin")
+        kind = origin.get("kind") if isinstance(origin, dict) else None
+        if isinstance(kind, str) and kind:
+            return kind
+        source = rec.get("promptSource")
+        return source if isinstance(source, str) else ""
+    return None
+
+
+def _supersede_from_hook(hook_data: dict, cutoff: float | None = None, wait_s: float = 0.0) -> Path | None:
     """UserPromptSubmit: tell the daemon this session's queued speech is stale; the file written.
 
     A reply or narration still waiting in a deep queue when the next prompt is typed is
     heard after the person moved on, which costs more than silence. The daemon drops the
     room's messages written before this one (msgqueue.supersede); the one playing finishes.
-    Only the person's prompt counts: one a plugin sent (PLUGIN_PROMPT) means nobody moved on.
+    Only the person's prompt counts: its transcript record names the sender (_prompt_sender), and
+    a plugin, a peer session, a task or an SDK caller means nobody moved on; with no record to
+    read, the wording (PLUGIN_PROMPT) is the tell. The record is written after the hook returns,
+    so the hook defers to a detached run (_defer_supersede) that calls this again with the
+    hook's time as cutoff and wait_s to wait for it.
     Same session as the Stop hook derives, from CLAUDE_TTS_SESSION or the transcript path.
     Only in queue mode with a live daemon, where the hook would queue its speech too.
     Never prints: this hook's stdout reaches Claude's context.
@@ -2722,9 +2778,6 @@ def _supersede_from_hook(hook_data: dict) -> Path | None:
     if not isinstance(prompt, str) or not prompt.strip():
         debug("user_prompt_submit: no prompt in the input, no supersede")
         return None
-    if PLUGIN_PROMPT.match(prompt):
-        debug("user_prompt_submit: a plugin sent the prompt, not the person; no supersede")
-        return None
     session_id = os.environ.get("CLAUDE_TTS_SESSION", "")
     if not session_id:
         m = re.search(r"/projects/([^/]+)/", str(hook_data.get("transcript_path") or ""))
@@ -2735,27 +2788,99 @@ def _supersede_from_hook(hook_data: dict) -> Path | None:
     cfg = load_config(session_id)
     if cfg.mode != "queue" or not daemon_healthy():
         return None
+    when = cutoff if cutoff is not None else time.time()
+    transcript_path, prompt_id = hook_data.get("transcript_path"), hook_data.get("prompt_id")
+    sender = _await_prompt_sender(transcript_path, prompt_id, wait_s)
+    if sender is None and wait_s <= 0 and _prompt_record_expected(transcript_path, prompt_id):
+        # Claude Code writes the prompt's record after its UserPromptSubmit hooks return
+        # (0.8 s after this hook began, measured 2026-11-08), so the hook cannot read it.
+        _defer_supersede(hook_data, when)
+        return None
+    if sender and sender not in PERSON_SENDERS:
+        debug(f"user_prompt_submit: sent by {sender}, not the person; no supersede")
+        return None
+    if not sender and PLUGIN_PROMPT.match(prompt):
+        debug("user_prompt_submit: a plugin sent the prompt, not the person; no supersede")
+        return None
     claude_session = hook_data.get("session_id")
     queue_file = msgqueue.write_supersede_message(
-        session_id, cfg.project_name, claude_session if isinstance(claude_session, str) else ""
+        session_id, cfg.project_name, claude_session if isinstance(claude_session, str) else "", cutoff=when
     )
     debug(f"user_prompt_submit: supersede for {session_id} written: {queue_file}")
     return queue_file
 
 
+# How long the deferred decision waits for the prompt's record before the wording decides, and
+# how often it looks. The record landed 0.8 s after the hook began on 2026-11-08.
+PROMPT_RECORD_WAIT_S = 5.0
+PROMPT_RECORD_POLL_S = 0.05
+
+
+def _prompt_record_expected(transcript_path: object, prompt_id: object) -> bool:
+    """True when a record is worth waiting for: a usable prompt id and a transcript that exists."""
+    return (
+        isinstance(prompt_id, str)
+        and re.fullmatch(r"[0-9A-Za-z-]{8,64}", prompt_id) is not None
+        and isinstance(transcript_path, str)
+        and bool(transcript_path)
+        and os.path.isfile(transcript_path)
+    )
+
+
+def _await_prompt_sender(transcript_path: object, prompt_id: object, wait_s: float) -> str | None:
+    """_prompt_sender, asked again every PROMPT_RECORD_POLL_S until it answers or wait_s has passed."""
+    deadline = time.monotonic() + max(0.0, wait_s)
+    while True:
+        sender = _prompt_sender(transcript_path, prompt_id)
+        if sender is not None or time.monotonic() >= deadline:
+            return sender
+        time.sleep(PROMPT_RECORD_POLL_S)
+
+
+def _defer_supersede(hook_data: dict, cutoff: float) -> None:
+    """Hand the decision to a detached `claude-tts supersede --deferred` and return at once.
+
+    The child reads {"hook": ..., "cutoff": ...} on stdin, waits for the prompt's record, and
+    writes the supersede with the hook's own time as its cutoff, so a reply of the new turn
+    queued meanwhile is not taken for an old one. Its own session, and no stdout or stderr: the
+    hook's pipe must close when the hook exits, or Claude Code waits on it. The cost: a reply the
+    person moved past can start playing in the second before the control lands.
+    """
+    payload = json.dumps({"hook": hook_data, "cutoff": cutoff})
+    child = subprocess.Popen(
+        [sys.executable, "-m", "claude_code_tts.cli", "supersede", "--deferred"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+    assert child.stdin is not None
+    child.stdin.write(payload.encode())
+    child.stdin.close()
+    debug(f"user_prompt_submit: the prompt's record is not written yet; pid {child.pid} decides")
+
+
 def cmd_supersede(args: argparse.Namespace) -> None:
     """`claude-tts supersede --from-hook`: what hooks/prompt-submitted.sh runs on UserPromptSubmit.
 
-    Reads the hook's JSON from stdin and writes a supersede control for its session. Prints
+    Reads the hook's JSON from stdin and writes a supersede control for its session, or hands
+    that to a detached `--deferred` run that waits for the prompt's transcript record. Prints
     nothing and always exits 0, whatever goes wrong: a UserPromptSubmit hook's stdout is
     added to the prompt, and a failing one must never get in the way of the prompt.
     """
-    if not args.from_hook:
+    if not (args.from_hook or args.deferred):
         return
     try:
-        hook_data = json.loads(sys.stdin.read() or "{}")
-        if isinstance(hook_data, dict):
-            _supersede_from_hook(hook_data)
+        data = json.loads(sys.stdin.read() or "{}")
+        if not isinstance(data, dict):
+            return
+        if args.deferred:
+            hook, cutoff = data.get("hook"), data.get("cutoff")
+            if isinstance(hook, dict) and isinstance(cutoff, (int, float)):
+                _supersede_from_hook(hook, cutoff=float(cutoff), wait_s=PROMPT_RECORD_WAIT_S)
+        else:
+            _supersede_from_hook(data)
     except Exception as e:  # noqa: BLE001
         debug(f"user_prompt_submit: supersede failed: {e}")
 
@@ -4802,6 +4927,7 @@ def main(argv: list[str] | None = None) -> None:
         "supersede", help="Drop this session's queued speech that has not started (UserPromptSubmit hook)"
     )
     p.add_argument("--from-hook", action="store_true", help="Read UserPromptSubmit hook JSON from stdin")
+    p.add_argument("--deferred", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_supersede)
 
     # --- audition ---

@@ -196,12 +196,17 @@ _NOT_A_ROOM = ("", "system", "browser")
 
 
 def write_supersede_message(
-    session_id: str, project: str = "", claude_session: str = "", log: Log | None = None
+    session_id: str,
+    project: str = "",
+    claude_session: str = "",
+    log: Log | None = None,
+    cutoff: float | None = None,
 ) -> Path | None:
-    """Say "a new prompt arrived in session_id now": its older queued messages are stale.
+    """Say "a new prompt arrived in session_id at cutoff (default now)": older messages are stale.
 
-    Written by the UserPromptSubmit hook. The cutoff is this message's own timestamp, taken
-    by write_message from the same clock the hook writers of that room use. claude_session
+    Written by the UserPromptSubmit hook, or by its deferred run a second later with the
+    hook's own time as cutoff. The cutoff is this message's own timestamp, taken by
+    write_message from the same clock the hook writers of that room use. claude_session
     is Claude Code's own session id from the hook input: two instances in one folder share
     session_id, and with it a prompt in one leaves the other's messages alone.
     An older daemon logs "Control message: pre=supersede" at INFO, speaks nothing and
@@ -220,6 +225,8 @@ def write_supersede_message(
         fields["supersede_project"] = project
     if claude_session:
         fields["supersede_claude_session"] = claude_session
+    if cutoff is not None:
+        fields["timestamp"] = cutoff
     queue_file, _ = write_message(fields)
     _say(log, f"Supersede written for {session_id}: {queue_file.name}", "DEBUG")
     return queue_file
