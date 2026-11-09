@@ -37,6 +37,7 @@ def room(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "VOICE_CARDS_DIR", tmp_path / "voice.d")
     monkeypatch.setattr(config, "CLAUDE_NAMES_DIR", tmp_path / "names")
     monkeypatch.setattr(config, "TTS_CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr("claude_code_tts.cli.TTS_CONFIG_FILE", tmp_path / "config.json")  # unmute checks it
     monkeypatch.setattr(session_mod, "ACTIVE_DIR", tmp_path / "active")
     monkeypatch.setattr(session_mod, "find_claude_ancestor_pid", lambda *a, **k: 4242)
     (tmp_path / "config.json").write_text('{"queue": {"speaker_transition": "chime+announce"}, "speaker_lines": ["rooms"]}')
@@ -166,3 +167,60 @@ class TestTheHookAndTheDaemon:
             a = daemon_mod.prepare_message({**base, "claude_session_id": PRIME}, {})
             b = daemon_mod.prepare_message({**base, "claude_session_id": SECOND}, {})
         assert a.speaker_key == b.speaker_key == f"{ROOM}:ops"
+
+
+def _queued(hook_state: Path) -> list[dict]:
+    return sorted((json.loads(p.read_text()) for p in (hook_state / "queue").glob("*.json")), key=lambda m: m["timestamp"])
+
+
+class TestASessionsOwnMute:
+    """`claude-tts mute --here|--session ID`: one session quiet, its room and the room's others not."""
+
+    def test_a_muted_session_is_silent_and_the_others_in_its_room_speak(self, room, hook_state, capsys):
+        from claude_code_tts.cli import cmd_mute
+
+        cmd_mute(argparse.Namespace(all=False, room=None, here=False, session=SECOND))
+        assert f"Claude session muted: {SECOND}" in capsys.readouterr().out
+        _speak(SECOND, hook_state / "p" / "second.jsonl", "The duty sweep is done and nothing is due.")
+        _speak(PRIME, hook_state / "p" / "prime.jsonl", "The cards are answered, all three of them.")
+        assert [m["claude_session_id"] for m in _queued(hook_state)] == [PRIME]
+        assert config.session_read(ROOM).get("muted") is not True  # the room is not muted
+
+    def test_unmute_takes_the_sessions_mute_back_and_keeps_its_name(self, room, hook_state):
+        from claude_code_tts.cli import cmd_mute, cmd_unmute
+
+        _name("Pat Tangerine", session=SECOND)
+        cmd_mute(argparse.Namespace(all=False, room=None, here=False, session=SECOND))
+        _name("reset", session=SECOND)  # a name reset keeps the mute
+        assert config.claude_session_muted(SECOND)
+        _name("Pat Tangerine", session=SECOND)
+        cmd_unmute(argparse.Namespace(all=False, room=None, here=False, session=SECOND))
+        assert not config.claude_session_muted(SECOND)
+        assert config.claude_session_name(SECOND) == "Pat Tangerine"
+        _speak(SECOND, hook_state / "p" / "second.jsonl", "The duty sweep is done and nothing is due.")
+        assert [m["name"] for m in _queued(hook_state)] == ["Pat Tangerine"]
+
+    def test_with_nothing_of_its_own_left_the_file_goes(self, room):
+        config.set_claude_session_own(SECOND, "muted", True)
+        config.set_claude_session_own(SECOND, "muted", False)
+        assert not (room / "names" / f"{SECOND}.json").exists()
+
+    def test_mute_here_uses_the_pin(self, room):
+        from claude_code_tts.cli import cmd_mute
+
+        session_mod.pin_claude_session(SECOND)
+        cmd_mute(argparse.Namespace(all=False, room=None, here=True, session=None))
+        assert config.claude_session_muted(SECOND) and not config.claude_session_muted(PRIME)
+
+
+class TestAHeadlessRunSwitchesTheHookOff:
+    """A headless run (a duty sweep) sets CLAUDE_TTS_ENABLED=0 in its environment: its hooks speak
+    nothing and its prompt drops nothing (the prompt side is pinned in test_supersede)."""
+
+    def test_the_speak_hook_queues_nothing_under_enabled_0(self, room, hook_state, monkeypatch):
+        monkeypatch.setenv("CLAUDE_TTS_ENABLED", "0")
+        _speak(SECOND, hook_state / "p" / "duty.jsonl", "The duty sweep is done and nothing is due.")
+        assert _queued(hook_state) == []
+        monkeypatch.delenv("CLAUDE_TTS_ENABLED")
+        _speak(PRIME, hook_state / "p" / "prime.jsonl", "The cards are answered, all three of them.")
+        assert len(_queued(hook_state)) == 1

@@ -35,6 +35,13 @@ starts a session that says the room's name again; `reset` with `--here` or `--se
 same on purpose. A name file nobody has rewritten in 30 days is deleted at the next write.
 `--here` finds the session's id through the pin its hooks write at every prompt (9.88.0).
 
+`claude-tts mute --here` (or `--session ID`) silences only that Claude session; its room and the
+room's other sessions keep speaking, and `unmute --here` takes it back (a muted room stays
+muted). The mute sits in the same file as the session's name, and the file goes when neither is
+left (9.89.0). A run nobody listens to (a headless sweep) is better started with
+`CLAUDE_TTS_ENABLED=0` in its environment: its hooks then speak nothing and its prompts drop
+nothing from the room's queue, with no id to know in advance.
+
 ## Shipped rule sets
 
 A plain string in the list names a set shipped with claude-tts, expanded in place:

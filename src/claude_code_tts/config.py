@@ -46,8 +46,9 @@ TTS_SESSIONS_DIR = TTS_CONFIG_DIR / "sessions.d"
 # One small file per session saying what it sounds like, resolved; for readers that must not
 # shell out (a status line). Contract: docs/voice-card.md.
 VOICE_CARDS_DIR = TTS_CONFIG_DIR / "voice.d"
-# A name one Claude session says instead of its room's, keyed by Claude Code's own session id
-# (`claude-tts name --here|--session ID`): two sessions awake in one room sound like two friends.
+# A name one Claude session says instead of its room's, and its own mute, keyed by Claude Code's
+# own session id (`claude-tts name|mute|unmute --here|--session ID`): two sessions awake in one
+# room sound like two friends, and one can be quiet while the other speaks.
 CLAUDE_NAMES_DIR = TTS_CONFIG_DIR / "names"
 VOICES_DIR = HOME / ".local" / "share" / "piper-voices"
 # The Piper voice every install ships with; personas fall back to it when
@@ -267,26 +268,50 @@ def claude_name_path(claude_session_id: str) -> Path | None:
     return CLAUDE_NAMES_DIR / f"{claude_session_id}.json"
 
 
-def claude_session_name(claude_session_id: str) -> str:
-    """The name this Claude session gave itself, or "" when it gave none."""
+def claude_session_own(claude_session_id: str) -> dict:
+    """What one Claude session set for itself over its room: `name` and `muted`; {} for none."""
     path = claude_name_path(claude_session_id)
     if path is None or not path.is_file():
-        return ""
+        return {}
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
-        return ""
-    return str(data.get("name") or "").strip() if isinstance(data, dict) else ""
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def claude_session_name(claude_session_id: str) -> str:
+    """The name this Claude session gave itself, or "" when it gave none."""
+    return str(claude_session_own(claude_session_id).get("name") or "").strip()
+
+
+def claude_session_muted(claude_session_id: str) -> bool:
+    """True when this Claude session was muted on its own (`claude-tts mute --here`)."""
+    return claude_session_own(claude_session_id).get("muted") is True
 
 
 def set_claude_session_name(claude_session_id: str, name: str, now: float | None = None) -> Path:
-    """Write (or with an empty name, remove) one Claude session's name; prunes stale ones."""
+    """Write (or with an empty name, remove) one Claude session's name; prunes stale files."""
+    return set_claude_session_own(claude_session_id, "name", name, now)
+
+
+def set_claude_session_own(claude_session_id: str, key: str, value: object, now: float | None = None) -> Path:
+    """Set (a falsy value removes) one key of a Claude session's own file; prunes stale files.
+
+    The file goes when nothing of the session's own is left in it, so a session that took
+    back its name and its mute says and does what its room does.
+    """
     path = claude_name_path(claude_session_id)
     if path is None:
         raise ValueError(f"not a Claude session id: {claude_session_id!r}")
     now = time.time() if now is None else now
-    if name:
-        atomic_write_json(path, {"name": name, "claude_session_id": claude_session_id, "set_at": now})
+    own = {k: v for k, v in claude_session_own(claude_session_id).items() if k in ("name", "muted")}
+    if value:
+        own[key] = value
+    else:
+        own.pop(key, None)
+    if own:
+        atomic_write_json(path, {**own, "claude_session_id": claude_session_id, "set_at": now})
     else:
         path.unlink(missing_ok=True)
     for old in CLAUDE_NAMES_DIR.glob("*.json") if CLAUDE_NAMES_DIR.is_dir() else ():

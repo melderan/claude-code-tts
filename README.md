@@ -356,7 +356,7 @@ export CLAUDE_TTS_SPEED=2.0            # Override playback speed
 export CLAUDE_TTS_SPEED_METHOD=playback # "playback" or "length_scale"
 export CLAUDE_TTS_VOICE=en_US-joe-medium # Override voice model
 export CLAUDE_TTS_MAX_CHARS=10000      # Max characters to speak
-export CLAUDE_TTS_ENABLED=0            # Set to 0 to disable entirely
+export CLAUDE_TTS_ENABLED=0            # Set to 0 to disable entirely (hooks speak nothing, prompts drop nothing; for a headless run)
 ```
 
 ### Session model

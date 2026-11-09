@@ -280,6 +280,11 @@ def cmd_mute(args: argparse.Namespace) -> None:
         _set_room_muted(args.room, True)
         return
 
+    claude_sid = _claude_session_arg(args)
+    if claude_sid:
+        _set_claude_session_muted(claude_sid, True)
+        return
+
     if getattr(args, "all", False):
         config["default_muted"] = True
         config["muted"] = True
@@ -322,6 +327,11 @@ def cmd_unmute(args: argparse.Namespace) -> None:
 
     if getattr(args, "room", None):
         _set_room_muted(args.room, False)
+        return
+
+    claude_sid = _claude_session_arg(args)
+    if claude_sid:
+        _set_claude_session_muted(claude_sid, False)
         return
 
     if getattr(args, "all", False):
@@ -454,6 +464,40 @@ def set_default_speed(speed: float, all_personas: bool = False, session_id: str 
     return names
 
 
+def _claude_session_arg(args: argparse.Namespace) -> str:
+    """The Claude session id `--here` or `--session ID` names, or "" when neither was given.
+
+    `--here` reads the pin the hooks write at each prompt. Exits 1 when there is no pin and 2
+    for an id that is not one.
+    """
+    from claude_code_tts.config import claude_name_path
+    from claude_code_tts.session import read_pinned_claude_session
+
+    if not (getattr(args, "session", None) or getattr(args, "here", False)):
+        return ""
+    claude_sid = (getattr(args, "session", None) or read_pinned_claude_session() or "").strip()
+    if not claude_sid:
+        print("No Claude session id pinned here yet (the hook pins it at each prompt); pass --session ID")
+        sys.exit(1)
+    if claude_name_path(claude_sid) is None:
+        print(f"Not a Claude session id: {claude_sid!r}")
+        sys.exit(2)
+    return claude_sid
+
+
+def _set_claude_session_muted(claude_sid: str, muted: bool) -> None:
+    """`mute|unmute --here|--session ID`: one Claude session, not its room."""
+    from claude_code_tts.config import set_claude_session_own
+
+    set_claude_session_own(claude_sid, "muted", muted)
+    if muted:
+        print(f"Claude session muted: {claude_sid}")
+        print("Its replies are not spoken; its room and the room's other sessions are unaffected.")
+    else:
+        print(f"Claude session unmuted: {claude_sid}")
+        print("It speaks as its room does (a muted room stays muted: claude-tts unmute for that).")
+
+
 def cmd_name(args: argparse.Namespace) -> None:
     """Show or set the name this session says for itself when it takes the floor.
 
@@ -468,26 +512,13 @@ def cmd_name(args: argparse.Namespace) -> None:
     sessions of one room answered in one voice). It is keyed by Claude Code's session id, so a
     /clear starts unnamed; the hook pins the id for `--here` at every prompt.
     """
-    from claude_code_tts.config import (
-        claude_name_path,
-        claude_session_name,
-        set_claude_session_name,
-    )
+    from claude_code_tts.config import claude_session_name, set_claude_session_name
     from claude_code_tts.filter import pronounce
-    from claude_code_tts.session import read_pinned_claude_session
     from claude_code_tts.speakerline import speak_line
 
     sid = get_session_id(for_write=True)
     value = (args.name or "").strip()
-    claude_sid = ""
-    if getattr(args, "session", None) or getattr(args, "here", False):
-        claude_sid = (getattr(args, "session", None) or read_pinned_claude_session() or "").strip()
-        if not claude_sid:
-            print("No Claude session id pinned here yet (the hook pins it at each prompt); pass --session ID")
-            sys.exit(1)
-        if claude_name_path(claude_sid) is None:
-            print(f"Not a Claude session id: {claude_sid!r}")
-            sys.exit(2)
+    claude_sid = _claude_session_arg(args)
     if len(value) > 64:
         print("A name is 64 characters at most")
         sys.exit(1)
@@ -3016,11 +3047,15 @@ def _speak_from_hook_unguarded(args: argparse.Namespace) -> None:
     if cfg.claude_session_id:
         # A second session awake in the room says its own name (`claude-tts name --here`),
         # and that command finds this session's id through the pin.
-        from claude_code_tts.config import claude_session_name
+        from claude_code_tts.config import claude_session_own
         from claude_code_tts.session import pin_claude_session
 
         pin_claude_session(cfg.claude_session_id)
-        own_name = claude_session_name(cfg.claude_session_id)
+        own = claude_session_own(cfg.claude_session_id)
+        if own.get("muted") is True:
+            debug(f"{hook_type}: this Claude session is muted on its own (claude-tts mute --here), skipping")
+            return
+        own_name = str(own.get("name") or "").strip()
         if own_name:
             cfg.name = own_name
 
@@ -4839,6 +4874,8 @@ def main(argv: list[str] | None = None) -> None:
     who = p.add_mutually_exclusive_group()
     who.add_argument("--all", action="store_true", help="Mute all sessions globally")
     who.add_argument("--room", metavar="ROOM", help="Mute one room's sessions (tts, or alice--claude--claude-code-tts)")
+    who.add_argument("--here", action="store_true", help="Mute this Claude session only, not its room")
+    who.add_argument("--session", metavar="ID", help="Mute the Claude session with this id only, not its room")
     p.set_defaults(func=cmd_mute)
 
     # --- voices ---
@@ -4854,6 +4891,8 @@ def main(argv: list[str] | None = None) -> None:
     who = p.add_mutually_exclusive_group()
     who.add_argument("--all", action="store_true", help="Unmute every session and make new sessions speak by default")
     who.add_argument("--room", metavar="ROOM", help="Unmute one room's sessions (tts, or alice--claude--claude-code-tts)")
+    who.add_argument("--here", action="store_true", help="Take back this Claude session's own mute")
+    who.add_argument("--session", metavar="ID", help="Take back the own mute of the Claude session with this id")
     p.set_defaults(func=cmd_unmute)
 
     # --- speed ---
