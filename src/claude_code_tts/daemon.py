@@ -1691,7 +1691,9 @@ def prepare_message(msg: dict, raw_config: dict) -> PreparedMessage:
         speaker_mlx=speaker_mlx,
         lang_mlx=lang_mlx,
         voice_label=voice_label,
-        speaker_key=f"{session_id}:{project}",
+        # The name is part of who speaks: two sessions of one room with names of their own
+        # (`claude-tts name --here`) are two speakers, and the floor changes between them.
+        speaker_key=f"{session_id}:{project}" + (f":{msg['name']}" if msg.get("name") else ""),
         audio_file=audio_file,
         current_msg_info=current_msg_info,
     )

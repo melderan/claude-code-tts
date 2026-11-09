@@ -462,24 +462,56 @@ def cmd_name(args: argparse.Namespace) -> None:
     that matches its id (speakerline.py), else "<name or project> says:". The name is a session
     key, so a rebuilt session inherits it the way it inherits its persona, and the voice card
     carries it. This prints which rule matched and every rule that was skipped and why.
+
+    `--here` or `--session ID` names one Claude session instead of the room: a second session
+    awake in the room says its own name, and the room's stays for the others (JMO 11-09, two
+    sessions of one room answered in one voice). It is keyed by Claude Code's session id, so a
+    /clear starts unnamed; the hook pins the id for `--here` at every prompt.
     """
+    from claude_code_tts.config import (
+        claude_name_path,
+        claude_session_name,
+        set_claude_session_name,
+    )
     from claude_code_tts.filter import pronounce
+    from claude_code_tts.session import read_pinned_claude_session
     from claude_code_tts.speakerline import speak_line
 
     sid = get_session_id(for_write=True)
     value = (args.name or "").strip()
-    if value.lower() == "reset":
-        session_set(sid, "name", "")
-        print("Name cleared")
-    elif value:
-        if len(value) > 64:
-            print("A name is 64 characters at most")
+    claude_sid = ""
+    if getattr(args, "session", None) or getattr(args, "here", False):
+        claude_sid = (getattr(args, "session", None) or read_pinned_claude_session() or "").strip()
+        if not claude_sid:
+            print("No Claude session id pinned here yet (the hook pins it at each prompt); pass --session ID")
             sys.exit(1)
-        session_set(sid, "name", value)
-        print(f"Name set: {value}")
-    name = str(session_read(sid).get("name") or "")
+        if claude_name_path(claude_sid) is None:
+            print(f"Not a Claude session id: {claude_sid!r}")
+            sys.exit(2)
+    if len(value) > 64:
+        print("A name is 64 characters at most")
+        sys.exit(1)
+    if value.lower() == "reset":
+        if claude_sid:
+            set_claude_session_name(claude_sid, "")
+            print(f"Name cleared for Claude session {claude_sid}; it says the room's name again")
+        else:
+            session_set(sid, "name", "")
+            print("Name cleared")
+    elif value:
+        if claude_sid:
+            set_claude_session_name(claude_sid, value)
+            print(f"Name set for Claude session {claude_sid}: {value}")
+        else:
+            session_set(sid, "name", value)
+            print(f"Name set: {value}")
+    room_name = str(session_read(sid).get("name") or "")
+    own = claude_session_name(claude_sid) if claude_sid else ""
+    name = own or room_name
     spoken = speak_line({"session_id": sid, "name": name, "project": sid}, load_raw_config().get("speaker_lines"))
     print(f"Name:     {name or '(none)'}")
+    if claude_sid:
+        print(f"Session:  {claude_sid}: {'its own name' if own else 'no name of its own'}; the room's is {room_name or '(none)'}")
     for key, val in spoken.fields.items():
         print(f"{key.capitalize() + ':':<10}{val}")
     print(f"Rule:     {spoken.rule or '(none matched: <name or project> says:)'}")
@@ -2880,6 +2912,12 @@ def cmd_supersede(args: argparse.Namespace) -> None:
             if isinstance(hook, dict) and isinstance(cutoff, (int, float)):
                 _supersede_from_hook(hook, cutoff=float(cutoff), wait_s=PROMPT_RECORD_WAIT_S)
         else:
+            claude_session = data.get("session_id")
+            if isinstance(claude_session, str):
+                # So `claude-tts name --here` works from a session's first turn (2 ms of ps).
+                from claude_code_tts.session import pin_claude_session
+
+                pin_claude_session(claude_session)
             _supersede_from_hook(data)
     except Exception as e:  # noqa: BLE001
         debug(f"user_prompt_submit: supersede failed: {e}")
@@ -2975,6 +3013,16 @@ def _speak_from_hook_unguarded(args: argparse.Namespace) -> None:
     cfg.hook_started = hook_started
     claude_session = hook_data.get("session_id")
     cfg.claude_session_id = claude_session if isinstance(claude_session, str) else ""
+    if cfg.claude_session_id:
+        # A second session awake in the room says its own name (`claude-tts name --here`),
+        # and that command finds this session's id through the pin.
+        from claude_code_tts.config import claude_session_name
+        from claude_code_tts.session import pin_claude_session
+
+        pin_claude_session(cfg.claude_session_id)
+        own_name = claude_session_name(cfg.claude_session_id)
+        if own_name:
+            cfg.name = own_name
 
     if cfg.muted:
         debug(f"{hook_type}: muted, skipping")
@@ -4818,6 +4866,9 @@ def main(argv: list[str] | None = None) -> None:
 
     p = subparsers.add_parser("name", help="Show or set the name this session says for itself on a speaker change")
     p.add_argument("name", nargs="?", help="The name, or 'reset' to say Friend again")
+    who = p.add_mutually_exclusive_group()
+    who.add_argument("--here", action="store_true", help="Name this Claude session only, not the room")
+    who.add_argument("--session", metavar="ID", help="Name the Claude session with this id only, not the room")
     p.set_defaults(func=cmd_name)
 
     # --- pronounce ---

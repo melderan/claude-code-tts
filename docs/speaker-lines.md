@@ -24,6 +24,17 @@ edit the next time the speaker changes, with no restart.
 `claude-tts name` (or `/tts-name`) shows what this session would say, which rule made it, the
 values the rule pulled out, and every rule it skipped with the reason.
 
+The name is the room's: every Claude session started with the same `CLAUDE_TTS_SESSION` says it.
+When two sessions of one room are awake, `claude-tts name --here 'Pat Tangerine'` names only the
+session that runs it, and `claude-tts name --session ID NAME` names the Claude session with that
+id (one a script starts with `claude --session-id ID`). The name is kept in
+`~/.claude-tts/names/<id>.json`; the hook puts it on the session's messages, the room's rule
+fills it in like any name, and the daemon counts a different name as a different speaker, so the
+boop and the line play between the two. It is keyed by Claude Code's session id, so a `/clear`
+starts a session that says the room's name again; `reset` with `--here` or `--session` does the
+same on purpose. A name file nobody has rewritten in 30 days is deleted at the next write.
+`--here` finds the session's id through the pin its hooks write at every prompt (9.88.0).
+
 ## Shipped rule sets
 
 A plain string in the list names a set shipped with claude-tts, expanded in place:

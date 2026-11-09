@@ -124,6 +124,38 @@ def pin_session(session_id: str) -> None:
         pass
 
 
+def pin_claude_session(claude_session_id: str) -> None:
+    """Write Claude Code's own session id beside the pin, keyed by the claude ancestor PID.
+
+    The hook knows it from its input; a command the session runs later (`claude-tts name
+    --here`) does not, and reads it back with read_pinned_claude_session(). No-op without a
+    claude ancestor or on a failed write.
+    """
+    claude_pid = find_claude_ancestor_pid()
+    if claude_pid is None or not claude_session_id:
+        return
+    path = _pin_path(claude_pid).with_suffix(".claude-session")
+    try:
+        ACTIVE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(claude_session_id)
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def read_pinned_claude_session() -> str | None:
+    """Claude Code's session id the hook pinned for the current claude ancestor, if any."""
+    claude_pid = find_claude_ancestor_pid()
+    if claude_pid is None:
+        return None
+    try:
+        content = _pin_path(claude_pid).with_suffix(".claude-session").read_text().strip()
+    except OSError:
+        return None
+    return content or None
+
+
 def read_pinned_session() -> str | None:
     """Read the pinned session ID for the current claude ancestor, if any."""
     claude_pid = find_claude_ancestor_pid()

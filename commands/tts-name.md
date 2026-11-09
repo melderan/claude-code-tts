@@ -1,6 +1,6 @@
 ---
 description: Show or set the name this session says for itself when it takes the floor
-argument-hint: [name|reset]
+argument-hint: [--here] [name|reset]
 disable-model-invocation: true
 ---
 

@@ -7,6 +7,7 @@ Handles the session resolution chain: session.d file > project_personas > global
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import time
@@ -45,6 +46,9 @@ TTS_SESSIONS_DIR = TTS_CONFIG_DIR / "sessions.d"
 # One small file per session saying what it sounds like, resolved; for readers that must not
 # shell out (a status line). Contract: docs/voice-card.md.
 VOICE_CARDS_DIR = TTS_CONFIG_DIR / "voice.d"
+# A name one Claude session says instead of its room's, keyed by Claude Code's own session id
+# (`claude-tts name --here|--session ID`): two sessions awake in one room sound like two friends.
+CLAUDE_NAMES_DIR = TTS_CONFIG_DIR / "names"
 VOICES_DIR = HOME / ".local" / "share" / "piper-voices"
 # The Piper voice every install ships with; personas fall back to it when
 # their own model is missing on the machine that runs the daemon.
@@ -246,6 +250,52 @@ def session_del(session_id: str, key: str) -> None:
         del data[key]
         atomic_write_json(sf, data)
         load_config(session_id)  # writes the card from the new state
+
+
+# --- One Claude session's own name, over its room's ---
+
+CLAUDE_SESSION_ID_RE = re.compile(r"[0-9A-Za-z-]{8,64}")
+# A name file nobody has rewritten in this long belongs to a session long gone: each write
+# prunes them, so the directory stays the size of the sessions named this month.
+CLAUDE_NAME_KEEP_S = 30 * 86400
+
+
+def claude_name_path(claude_session_id: str) -> Path | None:
+    """The name file of one Claude session, or None for an id that is not one."""
+    if not CLAUDE_SESSION_ID_RE.fullmatch(claude_session_id or ""):
+        return None
+    return CLAUDE_NAMES_DIR / f"{claude_session_id}.json"
+
+
+def claude_session_name(claude_session_id: str) -> str:
+    """The name this Claude session gave itself, or "" when it gave none."""
+    path = claude_name_path(claude_session_id)
+    if path is None or not path.is_file():
+        return ""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return ""
+    return str(data.get("name") or "").strip() if isinstance(data, dict) else ""
+
+
+def set_claude_session_name(claude_session_id: str, name: str, now: float | None = None) -> Path:
+    """Write (or with an empty name, remove) one Claude session's name; prunes stale ones."""
+    path = claude_name_path(claude_session_id)
+    if path is None:
+        raise ValueError(f"not a Claude session id: {claude_session_id!r}")
+    now = time.time() if now is None else now
+    if name:
+        atomic_write_json(path, {"name": name, "claude_session_id": claude_session_id, "set_at": now})
+    else:
+        path.unlink(missing_ok=True)
+    for old in CLAUDE_NAMES_DIR.glob("*.json") if CLAUDE_NAMES_DIR.is_dir() else ():
+        try:
+            if old != path and now - old.stat().st_mtime > CLAUDE_NAME_KEEP_S:
+                old.unlink()
+        except OSError:
+            pass
+    return path
 
 
 # --- Voice card: what a session sounds like, resolved, for readers that must not shell out ---
