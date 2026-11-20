@@ -54,21 +54,17 @@ def detect_player() -> list[str] | None:
     return None
 
 
-# afplay's rate quality: 0 (its default) is low, 1 is high. At low quality a
-# sped-up voice breaks up and sounds hollow, "like it's in a wind tunnel"
-# (JMO 2026-11-20, speed 1.8 through afplay -r); high costs a little CPU.
-AFPLAY_RATE_QUALITY = "1"
-
-
 def player_command(player: list[str], wav: Path, speed: float = 1.0) -> list[str]:
     """The argv that plays one WAV at speed through player (from detect_player).
 
-    Only afplay can change speed; it gets the rate and its high rate quality
-    together, so no caller can ask for one without the other.
+    Only afplay can change speed, with -r alone. Never add afplay's -q 1 (its
+    "high" rate quality): 9.91.4 did, and JMO heard every sped-up voice doubled,
+    "like a TV on the same movie in two different rooms", a copy a little
+    behind the first (2026-11-20, his A/B on the Mac: -r 1.8 -q 1 was the one).
     """
     cmd = list(player)
     if Path(cmd[0]).name == "afplay" and speed != 1.0:
-        cmd.extend(["-r", str(speed), "-q", AFPLAY_RATE_QUALITY])
+        cmd.extend(["-r", str(speed)])
     cmd.append(str(wav))
     return cmd
 

@@ -101,11 +101,11 @@ def daemon_env(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-class TestASpedUpVoiceIsPlayedAtHighRateQuality:
-    """afplay -r without -q 1 time-stretches at its low default quality: JMO heard the
-    jmo room's 1.8x voice break up and sound "like it's in a wind tunnel" (2026-11-20).
-    A fake player named afplay writes the argv it was given, so the test reads what the
-    daemon really ran."""
+class TestASpedUpVoiceIsPlayedWithTheRateAlone:
+    """9.91.4 added afplay's -q 1 beside -r, and JMO heard every sped-up voice doubled,
+    a second copy a little behind the first; his A/B on the Mac named -r 1.8 -q 1 as
+    the one (2026-11-20). afplay gets -r and the file, nothing else. A fake player
+    named afplay writes the argv it was given, so the test reads what the daemon ran."""
 
     @staticmethod
     def recording_afplay(tmp: Path) -> tuple[Path, Path]:
@@ -117,7 +117,7 @@ class TestASpedUpVoiceIsPlayedAtHighRateQuality:
         script.chmod(script.stat().st_mode | stat.S_IEXEC)
         return script, argv_file
 
-    def test_the_daemon_asks_afplay_for_high_quality_with_the_rate(self, daemon_env):
+    def test_the_daemon_gives_afplay_the_rate_and_no_quality_flag(self, daemon_env):
         tmp = daemon_env["tmp_path"]
         wav = make_wav(tmp / "test.wav", 0.2)
         afplay, argv_file = self.recording_afplay(tmp)
@@ -126,7 +126,7 @@ class TestASpedUpVoiceIsPlayedAtHighRateQuality:
             success, _, _ = daemon_play_audio(wav, speed=1.8)
 
         assert success is True
-        assert argv_file.read_text().split("\n")[:-1] == ["-r", "1.8", "-q", "1", str(wav)]
+        assert argv_file.read_text().split("\n")[:-1] == ["-r", "1.8", str(wav)]
 
     def test_at_speed_one_afplay_gets_only_the_file(self, daemon_env):
         tmp = daemon_env["tmp_path"]
@@ -148,7 +148,7 @@ class TestASpedUpVoiceIsPlayedAtHighRateQuality:
         with patch.object(audio_mod, "detect_player", return_value=[str(afplay)]):
             audio_mod.play_audio(wav, speed=2.0, speed_method="playback", background=False)
 
-        assert argv_file.read_text().split("\n")[:-1] == ["-r", "2.0", "-q", "1", str(wav)]
+        assert argv_file.read_text().split("\n")[:-1] == ["-r", "2.0", str(wav)]
 
     def test_a_player_that_is_not_afplay_gets_no_rate_flags(self):
         from claude_code_tts.audio import player_command
