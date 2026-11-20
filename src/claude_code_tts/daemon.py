@@ -1841,6 +1841,18 @@ def claim_message(msg: dict) -> spoken.Claim | None:
     return claim
 
 
+def _bridge_room_voice(room: str, on: bool | None) -> dict | None:
+    """The bridge's /voice: the room's one switch (roomvoice.py), read (on None) or set.
+
+    daemon_up True: the bridge answers from inside the daemon, so its heartbeat is beside the point.
+    """
+    from claude_code_tts import roomvoice
+
+    if on is None:
+        return roomvoice.room_voice(room, daemon_up=True)
+    return roomvoice.set_room_voice(room, on, daemon_up=True)
+
+
 def daemon_loop(lockpick: bool = False) -> None:
     """Main daemon processing loop."""
     global _shutdown_requested
@@ -1894,6 +1906,7 @@ def daemon_loop(lockpick: bool = False) -> None:
             set_let_through=lambda rooms: hold(rooms, pause_source("bridge POST /pause let", process=False)),
             read_output_device=read_output_device,
             preempt=request_preempt,
+            room_voice=_bridge_room_voice,
         )
         if not bridge.start(http_config):
             bridge = None

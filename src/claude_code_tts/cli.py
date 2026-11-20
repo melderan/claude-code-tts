@@ -88,6 +88,13 @@ def cmd_status(args: argparse.Namespace) -> None:
 
     print(f"Session:  {sid}")
     print(f"Muted:    {str(cfg.muted).lower()} ({mute_source})")
+    from claude_code_tts.roomvoice import describe as describe_voice
+    from claude_code_tts.roomvoice import room_of, room_voice
+
+    voice = room_voice(room_of(sid), daemon_up=running)
+    if voice is not None:
+        # The room's one switch read back, the words `claude-tts voice` and the bridge's /voice give.
+        print(f"Voice:    {describe_voice(voice)}")
     from claude_code_tts.meeting import describe as describe_meeting
     from claude_code_tts.state import describe_pause_source, lets_through
 
@@ -234,38 +241,47 @@ def cmd_config(args: argparse.Namespace) -> None:
           "claude-tts config --changed hides the ones that match.")
 
 
-def _room_sessions(room: str) -> list[str]:
-    """The session ids in sessions.d that belong to a room, matched as `hold --let` matches.
-
-    A full id, a room tag (tts) or the id's last segment; a Claude Code folder id
-    (-Users-...-claude-code-tts) belongs to the room its path ends in, since one room's
-    checkout is spoken under both its folder id and its owner--house--room id.
-    """
-    from claude_code_tts.state import lets_through
-
-    if not TTS_SESSIONS_DIR.is_dir():
-        return []
-    found = []
-    for sf in sorted(TTS_SESSIONS_DIR.glob("*.json")):
-        sid = sf.stem
-        if lets_through(sid, [room]) and not sid.startswith("-"):
-            found.append(sid)
-        elif sid.startswith("-") and (sid == room or sid.endswith(f"-{room}")):
-            found.append(sid)
-    return found
+def _no_such_room(room: str) -> None:
+    print(f"No session in {TTS_SESSIONS_DIR} belongs to room {room!r}; nothing changed")
+    print("Rooms are named as `claude-tts hold --let` names them: tts, or alice--claude--claude-code-tts")
+    sys.exit(1)
 
 
 def _set_room_muted(room: str, muted: bool) -> None:
-    """Mute or unmute every session of one room; prints each one, exit 1 when none match."""
-    sessions = _room_sessions(room)
-    if not sessions:
-        print(f"No session in {TTS_SESSIONS_DIR} belongs to room {room!r}; nothing changed")
-        print("Rooms are named as `claude-tts hold --let` names them: tts, or alice--claude--claude-code-tts")
-        sys.exit(1)
-    for sid in sessions:
-        session_set(sid, "muted", muted)
-        print(f"{'Muted' if muted else 'Unmuted'}: {sid}")
-    print(f"{len(sessions)} session(s) of room {room} {'muted' if muted else 'unmuted'}")
+    """Mute or unmute one room: the room's one switch (roomvoice.py), as `claude-tts voice off|on`.
+
+    Prints each session, then whether the room is heard; exit 1 when no session is the room's.
+    """
+    from claude_code_tts.roomvoice import describe, set_room_voice
+
+    view = set_room_voice(room, not muted)
+    if view is None:
+        _no_such_room(room)
+        return
+    for s in view["sessions"]:
+        print(f"{'Muted' if muted else 'Unmuted'}: {s['session']}")
+    print(f"{len(view['sessions'])} session(s) of room {room} {'muted' if muted else 'unmuted'}")
+    print(describe(view))
+
+
+def cmd_voice(args: argparse.Namespace) -> None:
+    """A room's one voice switch: show it, or turn it on or off (`mute --room` and the bridge's /voice are the same switch).
+
+    Exit 0 when shown or set, 1 when no session is the room's. With no --room, this session's room.
+    """
+    from claude_code_tts.roomvoice import describe, room_of, room_voice, set_room_voice
+
+    room = args.room or room_of(get_session_id())
+    view = room_voice(room) if args.action == "show" else set_room_voice(room, args.action == "on")
+    if view is None:
+        _no_such_room(room)
+        return
+    if args.json:
+        print(json.dumps(view, indent=2))
+        return
+    print(describe(view))
+    for s in view["sessions"]:
+        print(f"  {s['session']}: {'muted' if s['muted'] else 'on'}")
 
 
 def cmd_mute(args: argparse.Namespace) -> None:
@@ -4911,10 +4927,21 @@ def main(argv: list[str] | None = None) -> None:
     p = subparsers.add_parser("mute", help="Mute TTS for this session")
     who = p.add_mutually_exclusive_group()
     who.add_argument("--all", action="store_true", help="Mute all sessions globally")
-    who.add_argument("--room", metavar="ROOM", help="Mute one room's sessions (tts, or alice--claude--claude-code-tts)")
+    who.add_argument("--room", metavar="ROOM",
+                     help="Turn one room off: its sessions muted and off a hold's let-through list (as `voice off`)")
     who.add_argument("--here", action="store_true", help="Mute this Claude session only, not its room")
     who.add_argument("--session", metavar="ID", help="Mute the Claude session with this id only, not its room")
     p.set_defaults(func=cmd_mute)
+
+    # --- voice ---
+    p = subparsers.add_parser(
+        "voice", help="A room's one voice switch: show it, or turn it on (heard, through a person's hold) or off"
+    )
+    p.add_argument("action", nargs="?", choices=["show", "on", "off"], default="show")
+    p.add_argument("--room", metavar="ROOM", help="The room (tts, or alice--claude--claude-code-tts); default this session's")
+    p.add_argument("--json", action="store_true",
+                   help="The switch, heard or not, every reason, every session (the shape of GET /voice, docs/http-bridge.md)")
+    p.set_defaults(func=cmd_voice)
 
     # --- voices ---
     p = subparsers.add_parser("voices", help="Every provider's voices: installed, available, who uses them, how to hear one")
@@ -4928,7 +4955,8 @@ def main(argv: list[str] | None = None) -> None:
     p = subparsers.add_parser("unmute", help="Unmute TTS for this session")
     who = p.add_mutually_exclusive_group()
     who.add_argument("--all", action="store_true", help="Unmute every session and make new sessions speak by default")
-    who.add_argument("--room", metavar="ROOM", help="Unmute one room's sessions (tts, or alice--claude--claude-code-tts)")
+    who.add_argument("--room", metavar="ROOM",
+                     help="Turn one room on: its sessions unmuted and let through a person's hold (as `voice on`)")
     who.add_argument("--here", action="store_true", help="Take back this Claude session's own mute")
     who.add_argument("--session", metavar="ID", help="Take back the own mute of the Claude session with this id")
     p.set_defaults(func=cmd_unmute)

@@ -321,6 +321,35 @@ for a backlog nobody wants to hear. The body is ignored (send `{}` or none).
 - To release and drop in one step, call this, then `POST /pause` with `{"paused": false}`.
 - A bridge older than 9.56.0 answers `404`. Added additively.
 
+### `GET /voice?room=<room>` and `POST /voice`
+
+A room's one voice switch: the same switch `claude-tts voice on|off` and `claude-tts mute|unmute
+--room` flip (src/claude_code_tts/roomvoice.py). A page shows what this returns and keeps no copy.
+
+```json
+POST /voice {"room": "notes", "on": true}
+{"room": "notes", "on": true, "audible": false,
+ "reasons": [{"reason": "recording", "detail": "a recording holds every voice until it ends"}],
+ "sessions": [{"session": "-Users-alice-code-notes", "muted": false},
+              {"session": "alice--claude--notes", "muted": false}]}
+```
+
+- The switch is the room's session mute in `sessions.d`, every session of the room (its
+  owner--house--room id and its Claude folder id, named as `let` names them). `on` is true when
+  none of them is muted.
+- `"on": true` unmutes every session of the room and, under a person's hold, adds the room to
+  `let_through`. `"on": false` mutes them and removes every `let_through` entry that names the
+  room. Neither starts or ends a hold; `/pause` stays the hold's switch.
+- `audible` is `on` with nothing else in the way. `reasons` names each thing in the way, a
+  short key and the words for a person: `muted` (the switch is off), `meeting` (a call holds
+  every voice), `recording` (a recording holds every voice), `held` (a person's hold that does
+  not let this room through, which only happens when the room was unmuted some other way, such
+  as `/tts-unmute` in the room itself), `daemon` (never from the bridge, which is the daemon).
+- A room with no session file here answers `404`; a missing or malformed `room`, or an `on`
+  that is not a boolean, `400`; a daemon without the switch (older than 9.90.0) `501` or `404`.
+- `GET /voice` is a polled read: an answered one is not logged. A change is logged as
+  `Bridge turned room <room> on|off`.
+
 ## Mute does not apply here
 
 `muted`, `default_muted` and a session's own mute are decided by the hook before it writes a

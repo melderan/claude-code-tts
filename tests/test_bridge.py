@@ -916,3 +916,64 @@ def test_a_polled_read_that_answered_is_not_logged_anything_else_is(server: Brid
     lines = [ln for ln in server.logs if ln.startswith("http ")]  # type: ignore[attr-defined]
     assert [("GET /pause" in ln and " 401 " in ln, "POST /pause" in ln) for ln in lines] == [
         (True, False), (False, True)]
+
+
+@pytest.fixture
+def voice_server(tts_home: Path):
+    """A bridge whose room switch is a dict: the route's contract, not roomvoice's (test_roomvoice.py)."""
+    rooms: dict[str, bool] = {"jmo": False}
+    calls: list[tuple[str, bool | None]] = []
+
+    def room_voice(room: str, on: bool | None) -> dict | None:
+        calls.append((room, on))
+        if room not in rooms:
+            return None
+        if on is not None:
+            rooms[room] = on
+        return {"room": room, "on": rooms[room], "audible": rooms[room], "reasons": [], "sessions": []}
+
+    fake = FakeState()
+    logs: list[str] = []
+    b = Bridge(log_fn=logs.append, read_playback_state=fake.read, clear_current_message=fake.clear,
+               set_paused=fake.set_paused, room_voice=room_voice)
+    assert b.start({"bind": "127.0.0.1", "port": 0, "allowed_origins": ["https://ok.example"]})
+    b.calls = calls  # type: ignore[attr-defined]
+    b.logs = logs  # type: ignore[attr-defined]
+    yield b
+    b.stop()
+
+
+def test_voice_reads_and_sets_the_one_switch(voice_server: Bridge) -> None:
+    status, body, _ = call(voice_server, "GET", "/voice?room=jmo")
+    assert status == 200 and body["on"] is False
+    status, body, _ = call(voice_server, "POST", "/voice", {"room": "jmo", "on": True})
+    assert status == 200 and body["on"] is True and body["audible"] is True
+    assert call(voice_server, "GET", "/voice?room=jmo")[1]["on"] is True, "read back, not a copy"
+    assert voice_server.calls == [("jmo", None), ("jmo", True), ("jmo", None)]  # type: ignore[attr-defined]
+    assert any("Bridge turned room jmo on" in ln for ln in voice_server.logs)  # type: ignore[attr-defined]
+    assert not [ln for ln in voice_server.logs if ln.startswith("http GET /voice")]  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("method, path, body, code", [
+    ("GET", "/voice?room=nope", None, 404),
+    ("POST", "/voice", {"room": "nope", "on": True}, 404),
+    ("GET", "/voice", None, 400),
+    ("GET", "/voice?room=a%20b", None, 400),
+    ("POST", "/voice", {"room": "jmo"}, 400),
+    ("POST", "/voice", {"room": "jmo", "on": "yes"}, 400),
+    ("POST", "/voice", {"on": True}, 400),
+])
+def test_voice_refuses_what_it_cannot_do(voice_server: Bridge, method: str, path: str, body: dict | None,
+                                         code: int) -> None:
+    assert call(voice_server, method, path, body)[0] == code
+
+
+def test_voice_needs_the_token(voice_server: Bridge) -> None:
+    assert call(voice_server, "GET", "/voice?room=jmo", token=None)[0] == 401
+    assert call(voice_server, "POST", "/voice", {"room": "jmo", "on": True}, token=None)[0] == 401
+    assert voice_server.calls == []  # type: ignore[attr-defined]
+
+
+def test_voice_on_a_daemon_with_no_switch_is_501(server: Bridge) -> None:
+    assert call(server, "GET", "/voice?room=jmo")[0] == 501
+    assert call(server, "POST", "/voice", {"room": "jmo", "on": True})[0] == 501

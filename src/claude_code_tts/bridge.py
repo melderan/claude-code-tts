@@ -491,6 +491,7 @@ class BridgeHTTPServer(ThreadingHTTPServer):
         set_let_through: Callable[[list[str]], dict] | None = None,
         read_output_device: Callable[[], dict | None] | None = None,
         preempt: Callable[[], None] | None = None,
+        room_voice: Callable[[str, bool | None], dict | None] | None = None,
     ) -> None:
         super().__init__(address, BridgeHandler)
         self.token = token
@@ -503,10 +504,11 @@ class BridgeHTTPServer(ThreadingHTTPServer):
         self.set_let_through = set_let_through
         self.read_output_device = read_output_device or (lambda: None)
         self.preempt = preempt or (lambda: None)
+        self.room_voice = room_voice
 
 
 # Reads a page polls; a 200 from one is not logged (BridgeHandler.log_request).
-_POLLED_READS = frozenset({"/pause", "/health", "/jobs", "/queue"})
+_POLLED_READS = frozenset({"/pause", "/health", "/jobs", "/queue", "/voice"})
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
@@ -645,6 +647,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "by must be room: /queue?by=room"})
                 return
             self._send_json(200, queue_by_room(msgqueue.scan(), self.server.read_playback_state()))
+        elif path == "/voice":
+            query = parse_qs(self.path.partition("?")[2])
+            self._voice((query.get("room") or [""])[0], None)
         else:
             self._send_json(404, {"error": "no such route"})
 
@@ -663,6 +668,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._pause(body)
         elif path == "/queue/drop":
             self._drop()
+        elif path == "/voice":
+            on = body.get("on")
+            if not isinstance(on, bool):
+                self._send_json(400, {"error": "on must be true or false"})
+                return
+            self._voice(str(body.get("room") or ""), on)
         else:
             self._send_json(404, {"error": "no such route"})
 
@@ -781,6 +792,27 @@ class BridgeHandler(BaseHTTPRequestHandler):
             taken = not control.exists()
         self.server.log_fn(f"Bridge asked to drop {len(ids)} queued message(s)")
         self._send_json(200, {"dropped": len(ids), "taken": taken})
+
+    def _voice(self, room: str, on: bool | None) -> None:
+        """A room's one voice switch (roomvoice.py): read it (on None) or turn it on or off.
+
+        The same switch `claude-tts voice` and `claude-tts mute|unmute --room` flip: on unmutes
+        the room and lets it through a person's hold; off mutes it and takes it off the list.
+        The reply is the room's voice read back afterwards, never a copy the page keeps.
+        """
+        if self.server.room_voice is None:
+            self._send_json(501, {"error": "this daemon has no room voice switch"})
+            return
+        if not _ROOM_KEY.match(room):
+            self._send_json(400, {"error": "room is required: a room tag or session id"})
+            return
+        view = self.server.room_voice(room, on)
+        if view is None:
+            self._send_json(404, {"error": "no session here belongs to this room", "room": room})
+            return
+        if on is not None:
+            self.server.log_fn(f"Bridge turned room {room} {'on' if on else 'off'}")
+        self._send_json(200, view)
 
     def _pause(self, body: dict) -> None:
         """Hold or release the whole queue. No "paused" in the body toggles.
@@ -977,6 +1009,7 @@ class Bridge:
         set_let_through: Callable[[list[str]], dict] | None = None,
         read_output_device: Callable[[], dict | None] | None = None,
         preempt: Callable[[], None] | None = None,
+        room_voice: Callable[[str, bool | None], dict | None] | None = None,
     ) -> None:
         self._log = log_fn
         self._read_state = read_playback_state
@@ -986,6 +1019,7 @@ class Bridge:
         self._set_let_through = set_let_through
         self._read_output_device = read_output_device
         self._preempt = preempt
+        self._room_voice = room_voice
         self._server: BridgeHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -1011,6 +1045,7 @@ class Bridge:
                 set_let_through=self._set_let_through,
                 read_output_device=self._read_output_device,
                 preempt=self._preempt,
+                room_voice=self._room_voice,
             )
         except OSError as e:
             self._log(f"HTTP bridge could not listen on {bind}:{port}: {e}")
