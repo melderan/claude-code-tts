@@ -138,6 +138,55 @@ class TestEnrichMessage:
         assert enrich_message("a line typed by hand, nothing spoken", max_age_seconds=600, db_path=db2) is None
 
 
+class TestABusyAnalysisDbNeverHoldsThePrompt:
+    """The daemon writes the analysis DB after every message it speaks; voice-context reads it
+    in step with the prompt under a 5 s hook timeout. While the daemon holds the lock, the
+    readers give no hint within a second instead of waiting out sqlite3's 5 s default (JMO
+    2026-11-20: the hook timed out after 5 s in several rooms)."""
+
+    @staticmethod
+    def _held(db):
+        import sqlite3
+        holder = sqlite3.connect(str(db), isolation_level=None)
+        holder.execute("BEGIN EXCLUSIVE")
+        return holder
+
+    def test_enrich_gives_up_fast_while_the_daemon_writes(self, tmp_path):
+        import time
+
+        from claude_code_tts.voice_context import enrich_message
+        db = _analysis_db(tmp_path, [("a.wav", 30, SPOKEN, "animated and expressive")])
+        holder = self._held(db)
+        try:
+            t0 = time.monotonic()
+            assert enrich_message(SPOKEN, max_age_seconds=600, db_path=db) is None
+            assert time.monotonic() - t0 < 1.0
+        finally:
+            holder.close()
+        assert enrich_message(SPOKEN, max_age_seconds=600, db_path=db) == (
+            "[Voice context]\n[Segment 1: animated and expressive]")
+
+    def test_the_typed_prompt_path_gives_up_fast_and_writes_nothing(self, tmp_path):
+        import sqlite3
+        import time
+
+        from claude_code_tts.handy import get_aggregated_tone
+        db = _analysis_db(tmp_path, [("a.wav", 30, SPOKEN, "animated and expressive")])
+        holder = self._held(db)
+        try:
+            t0 = time.monotonic()
+            assert get_aggregated_tone(max_age_seconds=600, db_path=db) is None
+            assert time.monotonic() - t0 < 1.0
+        finally:
+            holder.close()
+        # A reader asks for no write: on a file without the table it creates none.
+        bare = tmp_path / "bare.db"
+        sqlite3.connect(str(bare)).close()
+        assert get_aggregated_tone(max_age_seconds=600, db_path=bare) is None
+        tables = sqlite3.connect(str(bare)).execute("SELECT name FROM sqlite_master").fetchall()
+        assert tables == []
+
+
 def test_the_hook_reads_the_prompt_field_claude_code_sends(monkeypatch, capsys):
     """UserPromptSubmit puts the text in top-level "prompt"; reading anything else matches nothing."""
     import io

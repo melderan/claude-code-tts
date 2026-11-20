@@ -18,7 +18,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from claude_code_tts.handy import ANALYSIS_DB
+from claude_code_tts.handy import ANALYSIS_DB, open_analysis_ro
 
 
 def _get_recent_transcripts(
@@ -29,14 +29,15 @@ def _get_recent_transcripts(
 
     Reads the daemon's analysis DB, not Handy's history.db: the analysis DB
     lives in ~/.claude-tts, which a sandbox sees through its mount, while
-    Handy's own files exist only on the Mac that runs it.
+    Handy's own files exist only on the Mac that runs it. Opened read-only with a
+    short lock wait (handy.open_analysis_ro): this runs in step with the prompt.
 
     Returns list of {file_name, timestamp, text, tone} dicts.
     """
     if not db_path.exists():
         return []
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = open_analysis_ro(db_path)
         cutoff_ts = int(time.time() - max_age_seconds)
         rows = conn.execute(
             """SELECT file_name, timestamp, transcript, tone_summary

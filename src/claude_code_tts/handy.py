@@ -33,6 +33,19 @@ HANDY_RECORDINGS_DIR = HANDY_APP_SUPPORT / "recordings"
 HANDY_HISTORY_DB = HANDY_APP_SUPPORT / "history.db"
 ANALYSIS_DB = Path.home() / ".claude-tts" / "handy_analysis.db"
 
+# How long a reader on the prompt's path waits for the analysis DB's lock. The daemon writes this
+# file after every message it speaks (speech_history shares it), and voice-context reads it in step
+# with every prompt, from a sandbox across virtiofs. sqlite3's default wait is 5 s, the hook's own
+# timeout, so a prompt typed while rooms were speaking waited 5 s and was killed (JMO, 2026-11-20).
+# A tone hint is worth a quarter second; a busy file means no hint for this prompt.
+READ_BUSY_TIMEOUT_S = 0.25
+
+
+def open_analysis_ro(db_path: Path = ANALYSIS_DB) -> sqlite3.Connection:
+    """The analysis DB, read-only (no table created, no write lock asked), waiting READ_BUSY_TIMEOUT_S at most."""
+    uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    return sqlite3.connect(uri, uri=True, timeout=READ_BUSY_TIMEOUT_S)
+
 
 # --- Data structures ---
 
@@ -489,17 +502,23 @@ def get_aggregated_tone(
     """
     if not db_path.exists():
         return None
-    conn = _init_db(db_path)
+    try:
+        conn = open_analysis_ro(db_path)
+    except sqlite3.Error:
+        return None
     try:
         cutoff = time.time() - max_age_seconds
-        rows = conn.execute(
-            """SELECT rms_energy, energy_variance, pitch_mean_hz, pitch_range_hz,
-                      speaking_rate_wps, pause_count, pause_total_seconds,
-                      duration_seconds
-               FROM voice_analysis
-               WHERE analyzed_at > ? ORDER BY analyzed_at DESC""",
-            (cutoff,),
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                """SELECT rms_energy, energy_variance, pitch_mean_hz, pitch_range_hz,
+                          speaking_rate_wps, pause_count, pause_total_seconds,
+                          duration_seconds
+                   FROM voice_analysis
+                   WHERE analyzed_at > ? ORDER BY analyzed_at DESC""",
+                (cutoff,),
+            ).fetchall()
+        except sqlite3.Error:
+            return None
         if not rows:
             return None
 
