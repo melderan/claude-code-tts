@@ -4104,6 +4104,7 @@ def cmd_audition(args: argparse.Namespace) -> None:
         daemon_healthy,
         detect_player,
         generate_speech,
+        player_command,
         write_queue_message,
     )
 
@@ -4163,10 +4164,7 @@ def cmd_audition(args: argparse.Namespace) -> None:
         player = detect_player()
         if not player:
             return None
-        cmd = list(player)
-        if cmd[0] == "afplay" and rate != 1.0:
-            cmd.extend(["-r", str(rate)])
-        cmd.append(str(wav))
+        cmd = player_command(player, wav, rate)
         return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def wait_with_skip(proc: subprocess.Popen | None) -> bool:

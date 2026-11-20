@@ -54,6 +54,25 @@ def detect_player() -> list[str] | None:
     return None
 
 
+# afplay's rate quality: 0 (its default) is low, 1 is high. At low quality a
+# sped-up voice breaks up and sounds hollow, "like it's in a wind tunnel"
+# (JMO 2026-11-20, speed 1.8 through afplay -r); high costs a little CPU.
+AFPLAY_RATE_QUALITY = "1"
+
+
+def player_command(player: list[str], wav: Path, speed: float = 1.0) -> list[str]:
+    """The argv that plays one WAV at speed through player (from detect_player).
+
+    Only afplay can change speed; it gets the rate and its high rate quality
+    together, so no caller can ask for one without the other.
+    """
+    cmd = list(player)
+    if Path(cmd[0]).name == "afplay" and speed != 1.0:
+        cmd.extend(["-r", str(speed), "-q", AFPLAY_RATE_QUALITY])
+    cmd.append(str(wav))
+    return cmd
+
+
 
 def _sherpa_python() -> Path:
     """Path to the Python interpreter inside the sherpa venv."""
@@ -706,11 +725,7 @@ def play_audio(
             return None
         return None
 
-    cmd = list(player)
-    # afplay supports playback speed
-    if cmd[0] == "afplay" and speed_method == "playback" and speed != 1.0:
-        cmd.extend(["-r", str(speed)])
-    cmd.append(str(wav_path))
+    cmd = player_command(player, wav_path, speed if speed_method == "playback" else 1.0)
 
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

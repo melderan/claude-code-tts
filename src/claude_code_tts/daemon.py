@@ -29,6 +29,7 @@ from claude_code_tts import state as daemon_state
 from claude_code_tts.audio import _set_last_error as audio_set_last_error
 from claude_code_tts.audio import (
     detect_player,
+    player_command,
     reap_idle_workers,
     warm_mlx_workers,
     warm_sherpa_workers,
@@ -869,10 +870,7 @@ def daemon_play_audio(
         return (False, True, 0.0)
 
     try:
-        cmd = list(player)
-        if cmd[0] == "afplay" and speed != 1.0:
-            cmd.extend(["-r", str(speed)])
-        cmd.append(str(wav_file))
+        cmd = player_command(player, wav_file, speed)
 
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         write_playback_state(audio_pid=proc.pid)
