@@ -41,10 +41,39 @@ ANALYSIS_DB = Path.home() / ".claude-tts" / "handy_analysis.db"
 READ_BUSY_TIMEOUT_S = 0.25
 
 
-def open_analysis_ro(db_path: Path = ANALYSIS_DB) -> sqlite3.Connection:
-    """The analysis DB, read-only (no table created, no write lock asked), waiting READ_BUSY_TIMEOUT_S at most."""
+# Beside the DB: the epoch second of the newest stored analysis, one line. hooks/voice-context.sh reads
+# it with the shell alone and starts no Python when nothing was dictated lately, so a typed prompt costs
+# a read and a date, not an interpreter start (seconds on a loaded VM; Geordi measured 2026-11-20).
+LAST_DICTATION_NAME = "handy_last_dictation"
+
+
+READ_BUSY_RETRY_S = 0.025
+
+
+def query_analysis_ro(sql: str, params: tuple = (), db_path: Path = ANALYSIS_DB) -> list[tuple] | None:
+    """Rows of one query on the analysis DB opened read-only, or None when it stays busy past
+    READ_BUSY_TIMEOUT_S or cannot be read. A reader creates no table and asks for no write lock.
+
+    SQLite's own busy wait is off (timeout=0) and the wait is ours: where SQLite was built without
+    usleep, as for the Pythons on GitHub's macOS runners, its busy handler sleeps whole seconds, so
+    a 0.25 s timeout waited 1.1 s there (ci, 2026-11-20).
+    """
     uri = f"{db_path.resolve().as_uri()}?mode=ro"
-    return sqlite3.connect(uri, uri=True, timeout=READ_BUSY_TIMEOUT_S)
+    deadline = time.monotonic() + READ_BUSY_TIMEOUT_S
+    while True:
+        try:
+            conn = sqlite3.connect(uri, uri=True, timeout=0)
+            try:
+                return conn.execute(sql, params).fetchall()
+            finally:
+                conn.close()
+        except sqlite3.OperationalError as exc:
+            busy = "locked" in str(exc) or "busy" in str(exc)
+            if not busy or time.monotonic() + READ_BUSY_RETRY_S > deadline:
+                return None
+            time.sleep(READ_BUSY_RETRY_S)
+        except sqlite3.Error:
+            return None
 
 
 # --- Data structures ---
@@ -422,6 +451,10 @@ def store_analysis(result: AnalysisResult, db_path: Path = ANALYSIS_DB) -> None:
         conn.commit()
     finally:
         conn.close()
+    # After the row, so a hook that sees the marker finds the row. Store time is never before the
+    # recording's own time, so the shim's window never skips a row the CLI's window would match.
+    from claude_code_tts.state import _write_text_atomic
+    _write_text_atomic(db_path.parent / LAST_DICTATION_NAME, f"{int(time.time())}\n")
 
 
 def get_recent_tone(
@@ -502,65 +535,55 @@ def get_aggregated_tone(
     """
     if not db_path.exists():
         return None
-    try:
-        conn = open_analysis_ro(db_path)
-    except sqlite3.Error:
+    rows = query_analysis_ro(
+        """SELECT rms_energy, energy_variance, pitch_mean_hz, pitch_range_hz,
+                  speaking_rate_wps, pause_count, pause_total_seconds,
+                  duration_seconds
+           FROM voice_analysis
+           WHERE analyzed_at > ? ORDER BY analyzed_at DESC""",
+        (time.time() - max_age_seconds,),
+        db_path,
+    )
+    if not rows:
         return None
-    try:
-        cutoff = time.time() - max_age_seconds
-        try:
-            rows = conn.execute(
-                """SELECT rms_energy, energy_variance, pitch_mean_hz, pitch_range_hz,
-                          speaking_rate_wps, pause_count, pause_total_seconds,
-                          duration_seconds
-                   FROM voice_analysis
-                   WHERE analyzed_at > ? ORDER BY analyzed_at DESC""",
-                (cutoff,),
-            ).fetchall()
-        except sqlite3.Error:
-            return None
-        if not rows:
-            return None
 
-        n = len(rows)
-        avg_energy = sum(r[0] for r in rows) / n
-        avg_energy_var = sum(r[1] for r in rows) / n
-        avg_pitch = sum(r[2] for r in rows) / n
-        avg_pitch_range = sum(r[3] for r in rows) / n
-        avg_rate = sum(r[4] for r in rows) / n
-        total_pauses = sum(r[5] for r in rows)
-        total_pause_secs = sum(r[6] for r in rows)
-        total_duration = sum(r[7] for r in rows)
+    n = len(rows)
+    avg_energy = sum(r[0] for r in rows) / n
+    avg_energy_var = sum(r[1] for r in rows) / n
+    avg_pitch = sum(r[2] for r in rows) / n
+    avg_pitch_range = sum(r[3] for r in rows) / n
+    avg_rate = sum(r[4] for r in rows) / n
+    total_pauses = sum(r[5] for r in rows)
+    total_pause_secs = sum(r[6] for r in rows)
+    total_duration = sum(r[7] for r in rows)
 
-        # Build aggregate labels
-        energy_label = "high" if avg_energy > 0.12 else "medium" if avg_energy > 0.05 else "low"
-        expr_score = (avg_pitch_range / 100.0) + (avg_energy_var * 10.0)
-        expr_label = "animated" if expr_score > 1.5 else "moderate" if expr_score > 0.7 else "flat"
-        pace_label = "fast" if avg_rate > 3.5 else "moderate" if avg_rate > 2.0 else "slow"
-        pause_ratio = total_pause_secs / total_duration if total_duration > 0 else 0
+    # Build aggregate labels
+    energy_label = "high" if avg_energy > 0.12 else "medium" if avg_energy > 0.05 else "low"
+    expr_score = (avg_pitch_range / 100.0) + (avg_energy_var * 10.0)
+    expr_label = "animated" if expr_score > 1.5 else "moderate" if expr_score > 0.7 else "flat"
+    pace_label = "fast" if avg_rate > 3.5 else "moderate" if avg_rate > 2.0 else "slow"
+    pause_ratio = total_pause_secs / total_duration if total_duration > 0 else 0
 
-        features = AudioFeatures(
-            duration_seconds=total_duration,
-            rms_energy=round(avg_energy, 4),
-            energy_variance=round(avg_energy_var, 4),
-            peak_energy=0.0,
-            pitch_mean_hz=round(avg_pitch, 1),
-            pitch_range_hz=round(avg_pitch_range, 1),
-            pitch_variance=0.0,
-            speaking_rate_wps=round(avg_rate, 2),
-            pause_count=total_pauses,
-            pause_total_seconds=round(total_pause_secs, 2),
-            pause_ratio=round(pause_ratio, 3),
-            energy_label=energy_label,
-            expressiveness_label=expr_label,
-            pace_label=pace_label,
-        )
-        summary = summarize_tone(features)
-        if n > 1:
-            summary += f" (across {n} recordings)"
-        return summary
-    finally:
-        conn.close()
+    features = AudioFeatures(
+        duration_seconds=total_duration,
+        rms_energy=round(avg_energy, 4),
+        energy_variance=round(avg_energy_var, 4),
+        peak_energy=0.0,
+        pitch_mean_hz=round(avg_pitch, 1),
+        pitch_range_hz=round(avg_pitch_range, 1),
+        pitch_variance=0.0,
+        speaking_rate_wps=round(avg_rate, 2),
+        pause_count=total_pauses,
+        pause_total_seconds=round(total_pause_secs, 2),
+        pause_ratio=round(pause_ratio, 3),
+        energy_label=energy_label,
+        expressiveness_label=expr_label,
+        pace_label=pace_label,
+    )
+    summary = summarize_tone(features)
+    if n > 1:
+        summary += f" (across {n} recordings)"
+    return summary
 
 
 # --- Handy integration ---

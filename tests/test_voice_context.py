@@ -166,6 +166,33 @@ class TestABusyAnalysisDbNeverHoldsThePrompt:
         assert enrich_message(SPOKEN, max_age_seconds=600, db_path=db) == (
             "[Voice context]\n[Segment 1: animated and expressive]")
 
+    def test_a_lock_let_go_inside_the_wait_still_gives_the_tone(self, tmp_path):
+        """The wait retries: a write that ends within the quarter second costs no hint."""
+        import sqlite3
+        import threading
+        import time
+
+        from claude_code_tts.voice_context import enrich_message
+        db = _analysis_db(tmp_path, [("a.wav", 30, SPOKEN, "animated and expressive")])
+        held, done = threading.Event(), threading.Event()
+
+        def writer():
+            conn = sqlite3.connect(str(db), isolation_level=None)
+            conn.execute("BEGIN EXCLUSIVE")
+            held.set()
+            time.sleep(0.08)  # sleep-ok: the length of the daemon's write, the thing under test
+            conn.execute("ROLLBACK")
+            conn.close()
+            done.set()
+
+        t = threading.Thread(target=writer)
+        t.start()
+        assert held.wait(5)
+        out = enrich_message(SPOKEN, max_age_seconds=600, db_path=db)
+        t.join(5)
+        assert done.is_set()
+        assert out == "[Voice context]\n[Segment 1: animated and expressive]"
+
     def test_the_typed_prompt_path_gives_up_fast_and_writes_nothing(self, tmp_path):
         import sqlite3
         import time
@@ -219,6 +246,63 @@ def test_the_shim_passes_the_context_and_never_blocks_the_prompt(tmp_path, cli_b
     fake = tmp_path / "claude-tts"
     fake.write_text(f"#!/bin/bash\n{cli_body}\n")
     fake.chmod(0o755)
-    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}"}
+    env = {**os.environ, "HOME": str(tmp_path), "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}"}
     r = subprocess.run(["bash", str(shim)], input="{}", capture_output=True, text=True, env=env, timeout=10)
     assert (r.returncode, r.stdout, r.stderr) == (0, out, "")
+
+
+@pytest.mark.parametrize(("marker", "cli_runs"), [
+    (None, True),        # no marker: a daemon older than 9.91.3, the CLI decides as before
+    (0, True),           # dictated just now (seconds before now): the CLI reads the tone
+    (170, True),         # inside the 120 s window plus 60 s for clocks
+    (600, False),        # nothing dictated for ten minutes: no Python starts
+    ("garbage", True),   # a line that is not a number decides nothing
+    ("", True),
+])
+def test_the_shim_starts_no_python_when_nothing_was_dictated_lately(tmp_path, marker, cli_runs):
+    """A typed prompt costs a read and a date in the shell, not an interpreter start (Geordi,
+    2026-11-20: the CLI's start took seconds on a loaded VM, and the hook is killed at its timeout)."""
+    import os
+    import subprocess
+    import time
+    from pathlib import Path
+    shim = Path(__file__).resolve().parent.parent / "hooks" / "voice-context.sh"
+    ran = tmp_path / "ran"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "claude-tts"
+    fake.write_text(f'#!/bin/bash\ncat >/dev/null\ntouch "{ran}"\necho "[Voice context: JMO is calm]"\n')
+    fake.chmod(0o755)
+    if marker is not None:
+        (tmp_path / ".claude-tts").mkdir()
+        line = str(int(time.time()) - marker) if isinstance(marker, int) else marker
+        (tmp_path / ".claude-tts" / "handy_last_dictation").write_text(f"{line}\n")
+    env = {**os.environ, "HOME": str(tmp_path), "PATH": f"{bindir}:{os.environ.get('PATH', '')}"}
+    big = '{"prompt": "' + "x" * 200_000 + '"}'  # past a pipe's buffer: the shim must take it all
+    r = subprocess.run(["bash", str(shim)], input=big, capture_output=True, text=True, env=env, timeout=10)
+    assert r.returncode == 0 and r.stderr == ""
+    assert ran.exists() is cli_runs
+    assert r.stdout == ("[Voice context: JMO is calm]\n" if cli_runs else "")
+
+
+def test_storing_an_analysis_writes_the_marker_the_shim_reads(tmp_path):
+    import time
+
+    from claude_code_tts.handy import (
+        LAST_DICTATION_NAME,
+        AnalysisResult,
+        AudioFeatures,
+        store_analysis,
+    )
+    feats = AudioFeatures(
+        duration_seconds=2.0, rms_energy=0.1, energy_variance=0.01, peak_energy=0.5,
+        pitch_mean_hz=120.0, pitch_range_hz=40.0, pitch_variance=5.0, speaking_rate_wps=3.0,
+        pause_count=1, pause_total_seconds=0.2, pause_ratio=0.1,
+        energy_label="medium", expressiveness_label="moderate", pace_label="moderate",
+    )
+    db = tmp_path / "handy_analysis.db"
+    before = int(time.time())
+    store_analysis(AnalysisResult(file_name="a.wav", timestamp=before - 5, transcript=SPOKEN,
+                                  features=feats, analyzed_at=time.time()), db_path=db)
+    line = (tmp_path / LAST_DICTATION_NAME).read_text()
+    assert line.endswith("\n") and before <= int(line) <= int(time.time())
