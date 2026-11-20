@@ -690,6 +690,69 @@ class TestDaemonLoopMessageFlow:
         state = read_playback_state()
         assert state.get("current_message") is None
 
+    def _resume_once(self, daemon_env, interrupted_msg: dict, generate_ok: bool = True) -> None:
+        """Start the daemon with interrupted_msg on deck and stop it once the deck is clear."""
+        fake = make_fake_player(daemon_env["tmp_path"], duration=0.3)
+
+        def fake_generate(text, persona, output_file, **kw):
+            if generate_ok:
+                make_wav(output_file, 30.0)
+            return generate_ok
+
+        write_playback_state(paused=False, paused_by=None, current_message=interrupted_msg)
+        daemon_env["respawn_marker"].write_text(str(time.time()))
+        with patch.object(daemon_mod, "detect_player", return_value=[str(fake)]), \
+             patch.object(daemon_mod, "daemon_generate_speech", side_effect=fake_generate), \
+             patch.object(daemon_mod, "acquire_lock", return_value=True), \
+             patch.object(daemon_mod, "release_lock"), \
+             patch.object(daemon_mod, "speak_announcement"), \
+             patch.object(daemon_mod, "get_queue_config", return_value={
+                 "max_depth": 20, "max_age_seconds": 300,
+                 "speaker_transition": "none", "coalesce_rapid_ms": 500,
+                 "idle_poll_ms": 50,
+             }), \
+             patch.object(daemon_mod, "load_raw_config", return_value={}):
+
+            def run_daemon():
+                daemon_mod._shutdown_requested = False
+                daemon_mod._daemon_mode = True
+                daemon_mod.daemon_loop()
+
+            runner = threading.Thread(target=run_daemon, daemon=True)
+            runner.start()
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and read_playback_state().get("current_message") is not None:
+                time.sleep(0.05)  # sleep-ok: polling for the event, bounded by the deadline
+            daemon_mod._shutdown_requested = True
+            runner.join(timeout=3)
+        assert read_playback_state().get("current_message") is None
+
+    @pytest.mark.parametrize("generate_ok, outcome", [(True, "played"), (False, "failed")])
+    def test_a_resumed_hook_message_writes_its_outcome(self, daemon_env, generate_ok, outcome):
+        """2026-11-20: a hook reply cut by a recording and resumed wrote no row in the voice ledger;
+        the resume path wrote none, and the message on deck had lost its id. Now it keeps it."""
+        from claude_code_tts import ledger
+
+        session = f"resume-ledger-{outcome}"
+        self._resume_once(daemon_env, {
+            "id": f"hook-{outcome}",
+            "session_id": session,
+            "project": "test-project",
+            "text": "A reply cut off by a recording",
+            "persona": "claude-prime",
+            "speed": 2.0,
+            "speed_method": "playback",
+            "audio_position": 20.0,
+        }, generate_ok=generate_ok)
+        outs = ledger.outcomes(session)
+        assert [(o["id"], o["outcome"]) for o in outs] == [(f"hook-{outcome}", outcome)]
+
+    def test_a_hook_message_on_deck_keeps_its_id_and_is_no_job(self, daemon_env):
+        msg = {"id": "hook-1", "session_id": "s", "project": "p", "text": "hello there", "_file": Path("x.json")}
+        info = daemon_mod.prepare_message(msg, {}).current_msg_info
+        assert info["id"] == "hook-1"
+        assert "source" not in info, "a hook message must not read as a bridge job"
+
     @pytest.mark.parametrize("odd_text", [123, ["a", "b"], {"k": "v"}])
     def test_poison_files_are_dropped_and_the_next_message_plays(self, daemon_env, odd_text):
         """A `[]` or `null` file, or a message whose text is not a string, must not wedge the loop.

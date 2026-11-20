@@ -38,9 +38,12 @@ def _msg(text="hello", **over) -> dict:
 class TestPrepareMessage:
     def test_resolves_like_the_loop_did(self, monkeypatch):
         monkeypatch.setattr(daemon_mod, "get_persona_config", lambda _n: {"voice": "en_US-lessac-medium", "speed": 1.5})
-        p = prepare_message(_msg("hi there", speed=3.0), {})
+        msg = _msg("hi there", speed=3.0)
+        p = prepare_message(msg, {})
         assert (p.speed, p.effective_speed, p.effective_speed_method) == (3.0, 3.0, "playback")
-        assert p.speaker_key == "s:p" and p.job_id is None and "id" not in p.current_msg_info
+        assert p.speaker_key == "s:p" and p.job_id is None
+        # A hook message keeps its id on deck for the voice ledger, and is no bridge job (9.89.2).
+        assert p.current_msg_info["id"] == msg["id"] and "source" not in p.current_msg_info
         assert p.audio_file.name.startswith("tts_queue_s_") and p.audio_file.suffix == ".wav"
 
     def test_two_messages_get_two_wav_files(self, monkeypatch):

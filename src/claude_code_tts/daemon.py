@@ -1664,6 +1664,11 @@ def prepare_message(msg: dict, raw_config: dict) -> PreparedMessage:
         current_msg_info["id"] = job_id
         current_msg_info["source"] = msg.get("source")
         current_msg_info["want_marks"] = want_marks
+    elif msg.get("id"):
+        # A hook message keeps its id on deck, so a resume after a cut writes its outcome in
+        # the voice ledger under it; with no source it is no bridge job (2026-11-20: a reply
+        # cut by a recording and resumed left no row).
+        current_msg_info["id"] = str(msg["id"])
     if msg.get("summon"):
         # A cut-off summon resumes as one: through the hold, never through a call, as loud.
         current_msg_info["summon"] = True
@@ -2347,6 +2352,7 @@ def daemon_loop(lockpick: bool = False) -> None:
                         play_file.unlink(missing_ok=True)
 
                     if JOBS.state(i_job_id) == "cancelled":
+                        _outcome(interrupted, "cancelled", played_s=round(elapsed, 1))
                         clear_current_message()
                     elif was_killed:
                         # Accumulate position: where we resumed + how far we got
@@ -2363,9 +2369,11 @@ def daemon_loop(lockpick: bool = False) -> None:
                         log(f"Interrupted again at audio position {new_pos:.1f}s")
                         continue
                     else:
+                        _outcome(interrupted, "played", played_s=round(elapsed, 1), resumed_from=round(resume_from, 1))
                         clear_current_message()
                         JOBS.update(i_job_id, state="done")
                 else:
+                    _outcome(interrupted, "failed", audio_last_error() or "synthesis failed", resumed=True)
                     clear_current_message()
                     JOBS.update(i_job_id, state="failed")
                 continue
