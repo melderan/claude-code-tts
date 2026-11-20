@@ -181,12 +181,14 @@ TTS_HOOK_EVENTS: dict[str, tuple[tuple[str, int], ...]] = {
     # event: ((script, timeout seconds), ...), each script its own entry
     "Stop": (("speak-response.sh", 180),),
     "PostToolUse": (("speak-intermediate.sh", 30),),
-    # prompt-submitted.sh runs in step with the prompt, not async: its supersede must be
-    # written before anything the new turn queues, or the turn's first narration is dropped.
+    # voice-context.sh runs in step with the prompt: its stdout is the tone line Claude reads.
     "UserPromptSubmit": (("voice-context.sh", 5), ("prompt-submitted.sh", 5)),
 }
-# Both speech hooks run async so Claude Code never waits on synthesis or playback.
-TTS_ASYNC_SCRIPTS = ("speak-response.sh", "speak-intermediate.sh")
+# The speech hooks run async so Claude Code never waits on synthesis or playback.
+# prompt-submitted.sh too (9.91.1): since 9.87.2 it never decides in step anyway; it defers
+# to a detached run whose cutoff is the time the hook began (cli._supersede_from_hook), so an
+# async start keeps the same cutoff and the prompt stops waiting on a Python start (~0.3-0.5 s).
+TTS_ASYNC_SCRIPTS = ("speak-response.sh", "speak-intermediate.sh", "prompt-submitted.sh")
 TTS_HOOK_MARKERS = tuple(script for pairs in TTS_HOOK_EVENTS.values() for script, _ in pairs) + (
     "claude-tts speak --from-hook",
     "claude-tts supersede --from-hook",
@@ -314,8 +316,8 @@ def ensure_tts_hooks(settings: dict, hooks_dir: Path | None = None) -> bool:
     """Register our Stop, PostToolUse and UserPromptSubmit hooks in a settings dict.
 
     Looks at every hook in every entry, so a TTS hook the user grouped with
-    their own is found and not duplicated. Existing speech hooks are marked
-    async in place. Returns True if the dict changed.
+    their own is found and not duplicated. Existing hooks named in
+    TTS_ASYNC_SCRIPTS are marked async in place. Returns True if the dict changed.
     """
     hooks_dir = hooks_dir or HOOKS_DIR
     changed = False
@@ -1262,7 +1264,7 @@ def do_install(
                 settings = json.load(fh)
             if ensure_tts_hooks(settings):
                 write_settings(settings)
-                success("Settings updated (speech hooks registered and marked async)")
+                success("Settings updated (speech and supersede hooks registered and marked async)")
                 warn(SETTINGS_REWRITE_NOTICE)
             else:
                 info("Upgrade mode: keeping existing settings.json configuration")

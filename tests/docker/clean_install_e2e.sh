@@ -40,6 +40,8 @@ s = json.load(open(os.path.expanduser("~/.claude/settings.json")))
 h = s["hooks"]
 assert any("speak-response.sh" in k["command"] and k.get("async") is True for e in h["Stop"] for k in e["hooks"])
 assert any("speak-intermediate.sh" in k["command"] and k.get("async") is True for e in h["PostToolUse"] for k in e["hooks"])
+assert any("prompt-submitted.sh" in k["command"] and k.get("async") is True for e in h["UserPromptSubmit"] for k in e["hooks"])
+assert all(k.get("async") is not True for e in h["UserPromptSubmit"] for k in e["hooks"] if "voice-context.sh" in k["command"])
 PY
 
 echo "== 4. speech: the second failure in issue #1"

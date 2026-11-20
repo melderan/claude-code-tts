@@ -34,7 +34,9 @@ class TestEnsureTtsHooks:
         stop = s["hooks"]["Stop"][0]["hooks"][0]
         assert stop["command"].endswith("speak-response.sh")
         assert stop["async"] is True
-        assert "async" not in s["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        prompt = {e["hooks"][0]["command"].rsplit("/", 1)[-1]: e["hooks"][0] for e in s["hooks"]["UserPromptSubmit"]}
+        assert "async" not in prompt["voice-context.sh"]  # its stdout is the tone line Claude reads
+        assert prompt["prompt-submitted.sh"]["async"] is True
 
     def test_one_event_carries_two_of_our_hooks_each_added_once(self):
         """UserPromptSubmit runs the tone context and, separately, the supersede."""
@@ -45,8 +47,20 @@ class TestEnsureTtsHooks:
         commands = [h["command"] for e in s["hooks"]["UserPromptSubmit"] for h in e["hooks"]]
         assert commands == [str(HOOKS_DIR / "voice-context.sh"), str(HOOKS_DIR / "prompt-submitted.sh")]
         added = s["hooks"]["UserPromptSubmit"][1]["hooks"][0]
-        assert added["timeout"] == 5 and "async" not in added  # written before the turn queues anything
+        assert added["timeout"] == 5 and added["async"] is True  # the cutoff is the hook's start, not its end
         assert ensure_tts_hooks(s, HOOKS_DIR) is False
+
+    def test_marks_an_existing_in_step_supersede_async_and_leaves_voice_context(self):
+        """An install from before 9.91.1 registered prompt-submitted.sh in step; an upgrade flips it."""
+        s = {"hooks": {"UserPromptSubmit": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": str(HOOKS_DIR / "voice-context.sh"), "timeout": 5},
+            {"type": "command", "command": str(HOOKS_DIR / "prompt-submitted.sh"), "timeout": 5},
+        ]}]}}
+        assert ensure_tts_hooks(s, HOOKS_DIR) is True
+        voice, supersede = s["hooks"]["UserPromptSubmit"][0]["hooks"]
+        assert supersede["async"] is True
+        assert "async" not in voice
+        assert len(s["hooks"]["UserPromptSubmit"]) == 1
 
     def test_idempotent(self):
         s: dict = {}
