@@ -3238,6 +3238,15 @@ def _speak_from_hook_unguarded(args: argparse.Namespace) -> None:
             pass
         elif speakable and _same_text(speakable[-1][2], input_text):
             pass  # landed already; spoken from the file as before
+        elif (taken := _taken_this_turn(transcript, watermark, input_text)) is not None:
+            # Landed already and behind the watermark: a hook that fired as the turn ended (a
+            # tool's PostToolUse, late) found the reply in the file, spoke it and moved the mark
+            # past it between this hook's two reads. Its claim is keyed by the message, this
+            # one's by the turn, so the store cannot join them; the file can. JMO heard one reply
+            # twice that way (2026-11-20 00:19Z, the jmo room).
+            debug(f"{hook_type}: the response landed at line {taken}, behind the watermark another hook "
+                  "moved; it spoke it, not speaking it again")
+            return
         else:
             from_input = True
             if watermark == 0:
@@ -3385,25 +3394,54 @@ def _first_prompt_line(transcript: Path, start: int, end: int) -> int | None:
             for idx, line in enumerate(f):
                 if idx >= end:
                     break
-                if idx < start:
-                    continue
-                try:
-                    data = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if isinstance(data, dict) and data.get("type") == "user" and not data.get("isMeta"):
-                    content = (data.get("message") or {}).get("content")
-                    if isinstance(content, str) and content.strip():
-                        return idx
-                    if isinstance(content, list) and not any(
-                        isinstance(b, dict) and b.get("type") == "tool_result" for b in content
-                    ) and any(
-                        isinstance(b, dict) and (b.get("type") != "text" or str(b.get("text", "")).strip())
-                        for b in content
-                    ):
-                        return idx
+                if idx >= start and _is_prompt_line(line):
+                    return idx
     except OSError:
         return None
+    return None
+
+
+def _is_prompt_line(line: str) -> bool:
+    """Is this transcript line a prompt the person wrote? See _first_prompt_line."""
+    try:
+        data = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    if not (isinstance(data, dict) and data.get("type") == "user" and not data.get("isMeta")):
+        return False
+    content = (data.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    return isinstance(content, list) and not any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+    ) and any(
+        isinstance(b, dict) and (b.get("type") != "text" or str(b.get("text", "")).strip())
+        for b in content
+    )
+
+
+def _taken_this_turn(transcript: Path, watermark: int, response: str) -> int | None:
+    """The line of `response` if it is this turn's last text and already behind the watermark.
+
+    A line behind the watermark was taken by the hook that moved it there. This turn starts at
+    the last prompt in the file; a prompt at or past the watermark leaves nothing of this turn
+    behind it, and a file with no prompt judges nothing taken: the same words in an older turn
+    are a new reply.
+    """
+    if watermark <= 0:
+        return None
+    try:
+        with open(transcript) as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+    start = next((i for i in range(len(lines) - 1, -1, -1) if _is_prompt_line(lines[i])), None)
+    if start is None or start >= watermark:
+        return None
+    found, _ = _scan_transcript(transcript, start + 1, "post_tool_use")
+    before = [e for e in found if e[0] < watermark]
+    if before and _same_text(before[-1][2], response):
+        return before[-1][0]
     return None
 
 

@@ -83,7 +83,11 @@ def base_config():
 
 
 def _run_hook(
-    transcript_path: Path, hook_type: str, tool_name: str = "Bash", last_assistant_message: str | None = None
+    transcript_path: Path,
+    hook_type: str,
+    tool_name: str = "Bash",
+    last_assistant_message: str | None = None,
+    prompt_id: str | None = None,
 ) -> str | None:
     """Invoke _speak_from_hook with mocked speak() and return what was spoken."""
     spoken: list[str] = []
@@ -91,6 +95,8 @@ def _run_hook(
     payload: dict = {"transcript_path": str(transcript_path), "tool_name": tool_name}
     if last_assistant_message is not None:
         payload["last_assistant_message"] = last_assistant_message
+    if prompt_id is not None:
+        payload["prompt_id"] = prompt_id
     hook_input = json.dumps(payload)
 
     args = argparse.Namespace(hook_type=hook_type)
@@ -837,6 +843,26 @@ class TestStopSpeaksFromItsInput:
         monkeypatch.setattr("claude_code_tts.cli._scan_transcript", scan_without_the_landed_line)
         monkeypatch.setattr("claude_code_tts.cli._read_watermark", lambda *a: 2)
         assert _run_hook(transcript, "stop", last_assistant_message=final) is None
+
+    def test_a_late_post_tool_use_that_spoke_the_reply_blocks_the_stop(self, tmp_path, fake_state_dir):
+        """2026-11-20 00:19:02Z, the jmo room: a tool's PostToolUse fired as the turn ended, found
+        the final reply already landed, spoke it and moved the watermark past it. The Stop reread
+        the watermark after its yield, scanned nothing, took its input for a reply not yet written
+        and queued it again under another key. JMO heard one reply twice."""
+        transcript = self._turn_in_progress(tmp_path, "uuid-late-ptu")
+        final = "the delivery check is back, and it is not good"
+        _append(transcript, [_assistant_msg("m2", final)])
+        assert _run_hook(transcript, "post_tool_use") == final
+        assert _run_hook(transcript, "stop", last_assistant_message=final) is None
+
+    def test_the_same_words_as_the_last_turns_reply_are_spoken_again(self, tmp_path, fake_state_dir):
+        """The landed-behind-the-watermark check reads only this turn: "Done." twice is two replies."""
+        transcript = tmp_path / "projects" / "-Users-dev" / "uuid-done-twice.jsonl"
+        _write_transcript(transcript, [_user("one"), _assistant_msg("m0", "Done, all of it.")])
+        done = "Done, all of it."
+        assert _run_hook(transcript, "stop", last_assistant_message=done, prompt_id="p1") == done
+        _append(transcript, [_user("two"), _tool_use("m1"), _tool_result()])
+        assert _run_hook(transcript, "stop", last_assistant_message=done, prompt_id="p2") == done
 
     def test_first_stop_of_a_transcript_speaks_the_input_not_an_older_text(self, tmp_path, fake_state_dir):
         transcript = tmp_path / "projects" / "-Users-dev" / "uuid-O.jsonl"
