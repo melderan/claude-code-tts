@@ -198,7 +198,8 @@ def _run_summon(args: argparse.Namespace, queue_dir: Path) -> int:
 
 def test_summon_queues_one_now_block_in_the_rooms_voice_with_a_ledger_row(home: Path) -> None:
     queue_dir = home / "queue"
-    assert _run_summon(_summon_args("JMO", "I", "need", "your", "help!"), queue_dir) == 0
+    # --wait 0: queued and not waited for is exit 1; only a played outcome is 0 (Haley fa7b, 9.91.0).
+    assert _run_summon(_summon_args("JMO", "I", "need", "your", "help!"), queue_dir) == 1
     (f,) = list(queue_dir.glob("*.json"))
     msg = json.loads(f.read_text())
     assert msg["text"] == "JMO I need your help!"
@@ -213,7 +214,7 @@ def test_summon_changes_neither_the_hold_nor_the_mute(home: Path) -> None:
     with patch.object(st, "PLAYBACK_STATE_FILE", state_file):
         hold(["bob--claude--b"])
         before = st.read_playback_state()
-        assert _run_summon(_summon_args("help"), home / "queue") == 0
+        assert _run_summon(_summon_args("help"), home / "queue") == 1  # queued, not waited for
         after = st.read_playback_state()
     assert {k: after.get(k) for k in ("paused", "paused_by", "let_through")} == {
         k: before.get(k) for k in ("paused", "paused_by", "let_through")
@@ -225,6 +226,77 @@ def test_summon_exits_on_the_daemons_outcome(home: Path, outcome: str, code: int
     with patch.object(ledger, "new_id", return_value="feedfacecafe0001"):
         ledger.record_outcome(ROOM, "feedfacecafe0001", outcome, "" if outcome == "played" else "age")
         assert _run_summon(_summon_args("help", wait=5.0), home / "queue") == code
+
+
+def test_queued_not_waited_for_says_so_on_stderr(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert _run_summon(_summon_args("help"), home / "queue") == 1
+    assert "queued, not waited for" in capsys.readouterr().err
+
+
+def test_a_failed_outcome_gives_its_reason_on_stderr(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(ledger, "new_id", return_value="feedfacecafe0002"):
+        ledger.record_outcome(ROOM, "feedfacecafe0002", "dropped", "summon not allowed from this room")
+        assert _run_summon(_summon_args("help", wait=5.0), home / "queue") == 1
+    assert "summon not allowed from this room" in capsys.readouterr().err
+
+
+# --- who may summon (config summon_from; Haley fa7b: the jmo room only, unless JMO says otherwise) ---
+
+
+@pytest.mark.parametrize(("summon_from", "allowed"), [
+    (None, True), ([], True), ("carol", True),  # missing, empty or not a list: any room, as before 9.91.0
+    (["summoner"], True), ([ROOM], True), (["bob--claude--b"], False),
+])
+def test_summon_allowed(summon_from: object, allowed: bool) -> None:
+    assert st.summon_allowed(ROOM, summon_from) is allowed
+
+
+def test_a_room_summon_from_does_not_list_is_refused_and_queues_nothing(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from claude_code_tts import cli
+
+    with patch.object(cli, "load_raw_config", return_value={"summon_from": ["bob--claude--b"]}):
+        assert _run_summon(_summon_args("help", wait=5.0), home / "queue") == 1
+    assert "summon_from does not list" in capsys.readouterr().err
+    assert not (home / "queue").exists() or not list((home / "queue").glob("*.json"))
+    assert ledger.read(ROOM) == [], "a refused summon writes no ledger row: nothing was accepted"
+
+
+def test_the_daemon_drops_a_summon_from_a_room_not_listed_and_keeps_the_rest(home: Path) -> None:
+    """A queue file written around the CLI (an older CLI, a hand) is refused where every pass reads the queue."""
+    from claude_code_tts import msgqueue
+
+    queue_dir = home / "queue"
+    with (
+        patch.object(msgqueue, "QUEUE_DIR", queue_dir),
+        patch.object(d, "load_raw_config", return_value={"summon_from": ["bob--claude--b"]}),
+    ):
+        refused, _ = msgqueue.write_message(
+            {"session_id": ROOM, "project": "s", "text": "help", "lane": "now", "source": "summon", "summon": True}
+        )
+        listed, _ = msgqueue.write_message(
+            {"session_id": "bob--claude--b", "project": "b", "text": "help", "lane": "now", "source": "summon",
+             "summon": True}
+        )
+        plain, _ = msgqueue.write_message({"session_id": ROOM, "project": "s", "text": "an ordinary reply"})
+        kept = d.get_queue_messages()
+    assert {m["_file"] for m in kept} == {listed, plain}
+    assert not refused.exists() and listed.exists() and plain.exists()
+    (out,) = ledger.outcomes(ROOM)
+    assert (out["outcome"], out["reason"]) == ("dropped", "summon not allowed from this room")
+
+
+def test_a_summon_plays_through_a_plain_pause_and_the_other_rooms_stay_held(home: Path) -> None:
+    """Haley fa7b item 3: `claude-tts pause` (no let list), then a summon. On 11-14 the Mac ran
+    9.86.2, older than summon, and the call sat behind the pause for six hours."""
+    with patch.object(st, "PLAYBACK_STATE_FILE", home / "playback.json"):
+        st.set_paused(True)
+        state = st.read_playback_state()
+    after = float(state["paused_since"]) + 1
+    assert may_play(state, ROOM, "now", after, summon=True)
+    assert not may_play(state, "bob--claude--b", "", after), "another room's speech stays held"
+    assert not may_play(state, ROOM, "", after), "the summoning room's ordinary speech stays held"
 
 
 def test_summon_without_an_outcome_times_out_with_exit_1(home: Path) -> None:
@@ -309,8 +381,8 @@ def test_the_daemon_plays_a_summon_through_a_hold_loud_and_writes_played(
         with patch("claude_code_tts.audio.daemon_healthy", return_value=True):
             from claude_code_tts import cli
 
-            with patch.object(cli, "get_session_id", return_value=ROOM):
-                cli.cmd_summon(_summon_args("JMO I need your help!"))
+            with patch.object(cli, "get_session_id", return_value=ROOM), pytest.raises(SystemExit):
+                cli.cmd_summon(_summon_args("JMO I need your help!"))  # --wait 0: queued, exit 1
         assert _wait_for(lambda: "JMO I need your help!" in spoken), "the summon never played through the hold"
         assert _wait_for(
             lambda: any(o.get("outcome") == "played" for o in ledger.outcomes(ROOM))
@@ -342,8 +414,9 @@ def test_the_pause_hotkey_during_a_summon_stops_only_that_read(home: Path) -> No
         with (
             patch("claude_code_tts.audio.daemon_healthy", return_value=True),
             patch.object(cli, "get_session_id", return_value=ROOM),
+            pytest.raises(SystemExit),
         ):
-            cli.cmd_summon(_summon_args("JMO I need your help!"))
+            cli.cmd_summon(_summon_args("JMO I need your help!"))  # --wait 0: queued, exit 1
         assert _wait_for(lambda: playing.exists()), "the summon never started"
         _pause_hotkey()
         assert _wait_for(

@@ -697,6 +697,16 @@ def lets_through(session_id: str, let_through: list[str] | None) -> bool:
     return any(entry in (session_id, tag, last) for entry in let_through)
 
 
+def summon_allowed(session_id: str, summon_from: object) -> bool:
+    """Whether a room may summon: config `summon_from` lists the rooms, named as `hold --let` names them.
+
+    Missing or empty, any room may (the behaviour before 9.91.0); a list names the only ones.
+    """
+    if not isinstance(summon_from, list) or not summon_from:
+        return True
+    return lets_through(session_id, [str(r) for r in summon_from])
+
+
 def may_play(state: dict, session_id: str, lane: str = "", queued_at: object = None, *, summon: bool = False) -> bool:
     """Whether a message from session_id may play under this state.
 

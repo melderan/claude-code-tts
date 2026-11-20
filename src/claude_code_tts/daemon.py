@@ -86,6 +86,7 @@ from claude_code_tts.state import (
     release_lock,
     set_meeting,
     set_paused,
+    summon_allowed,
     take_respawn_marker,
     write_heartbeat,
     write_output_device,
@@ -1406,8 +1407,29 @@ def write_control_message(
 
 
 def get_queue_messages() -> list[dict]:
-    """Get all messages in the queue, sorted by timestamp."""
-    return msgqueue.scan(log=log)
+    """Get all messages in the queue, sorted by timestamp; a summon from a room not allowed is dropped."""
+    return refuse_unallowed_summons(msgqueue.scan(log=log))
+
+
+def refuse_unallowed_summons(msgs: list[dict]) -> list[dict]:
+    """Drop each summon whose room config `summon_from` does not list, with its outcome; the rest.
+
+    Here, where every pass reads the queue, so no path plays it and nothing raises the volume
+    for it. The summoning command reads the outcome and exits 1 with the reason. Another room's
+    words are not lost: they are in that room's voice ledger already.
+    """
+    if not any(m.get("summon") for m in msgs):
+        return msgs
+    summon_from = load_raw_config().get("summon_from")
+    kept = []
+    for m in msgs:
+        if m.get("summon") and not summon_allowed(str(m.get("session_id", "")), summon_from):
+            log(f"Summon {m.get('id', '?')} from {m.get('session_id', '?')} refused: summon_from does not list it")
+            _dropped(m, "summon not allowed from this room")
+            m["_file"].unlink(missing_ok=True)
+            continue
+        kept.append(m)
+    return kept
 
 
 def _cancel_removed_job(msg: dict) -> None:

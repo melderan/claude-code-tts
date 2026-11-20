@@ -2095,7 +2095,7 @@ def cmd_summon(args: argparse.Namespace) -> None:
     """
     from claude_code_tts import ledger
     from claude_code_tts.audio import daemon_healthy, write_queue_message
-    from claude_code_tts.state import in_meeting, read_playback_state
+    from claude_code_tts.state import in_meeting, read_playback_state, summon_allowed
 
     text = " ".join(args.text).strip()
     if not text:
@@ -2105,8 +2105,13 @@ def cmd_summon(args: argparse.Namespace) -> None:
         print(f"--volume must be 1-100, not {args.volume}", file=sys.stderr)
         sys.exit(2)
     session_id = get_session_id(for_write=True)
+    if not summon_allowed(session_id, load_raw_config().get("summon_from")):
+        # The daemon drops it too; refusing here says so at once and queues nothing.
+        print(f"Summon refused: config summon_from does not list {session_id}", file=sys.stderr)
+        sys.exit(1)
     if not daemon_healthy():
-        print("The daemon is not running, so nobody heard it: claude-tts daemon start, then summon again")
+        print("The daemon is not running, so nobody heard it: claude-tts daemon start, then summon again",
+              file=sys.stderr)
         sys.exit(1)
     cfg = load_config(session_id)
     msg_id = ledger.new_id()
@@ -2121,7 +2126,10 @@ def cmd_summon(args: argparse.Namespace) -> None:
     )
     print(f"Summon {msg_id} queued for {session_id}, output volume at least {args.volume}")
     if args.wait <= 0:
-        return
+        # Queued is not heard: exit 0 means it played, and nobody waited to learn that.
+        print(f"Summon {msg_id}: queued, not waited for (--wait 0); exit 1 until an outcome says played",
+              file=sys.stderr)
+        sys.exit(1)
 
     deadline = time.monotonic() + args.wait
     said_why = ""
@@ -2130,7 +2138,7 @@ def cmd_summon(args: argparse.Namespace) -> None:
         if hit is not None and hit.get("outcome") in _SETTLED:
             outcome = str(hit["outcome"])
             reason = f" ({hit['reason']})" if hit.get("reason") else ""
-            print(f"Summon {msg_id}: {outcome}{reason}")
+            print(f"Summon {msg_id}: {outcome}{reason}", file=sys.stdout if outcome == "played" else sys.stderr)
             sys.exit(0 if outcome == "played" else 1)
         state = read_playback_state()
         why = (
@@ -2146,7 +2154,8 @@ def cmd_summon(args: argparse.Namespace) -> None:
         time.sleep(0.25)
     print(
         f"Summon {msg_id}: not spoken after {args.wait:.0f}s; it stays queued. "
-        f"claude-tts ledger --last 1 shows its outcome later"
+        f"claude-tts ledger --last 1 shows its outcome later",
+        file=sys.stderr,
     )
     sys.exit(1)
 
