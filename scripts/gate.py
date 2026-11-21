@@ -54,6 +54,8 @@ FAST: list[tuple[str, list[str]]] = [
     ("mypy", ["uv", "tool", "run", "mypy@2.4.1", "src"]),
     ("ty", ["uv", "tool", "run", "ty@0.0.99", "check", "src"]),
     ("version", ["scripts/check-version.sh"]),
+    # The kit's shims are copies of hooks/; ci checked it and the gate did not (9.92.0 failed on GitHub only).
+    ("kit", ["scripts/kit-check.sh"]),
     ("tests", ["uv", "run", "--python", "3.12", "--with", "pytest", "pytest", "-q",
                "--ignore=tests/docker", "-p", "no:cacheprovider"]),
 ]

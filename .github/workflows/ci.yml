@@ -44,11 +44,7 @@ jobs:
       - name: version consistency
         run: just version
       - name: kit shims match hooks/
-        run: |
-          for f in speak-response.sh speak-intermediate.sh; do
-            cmp hooks/$f kits/claude-tts/files/home/.claude/hooks/$f
-          done
-          python3 -c "import json; json.load(open('kits/claude-tts/files/home/.config/claude/claude-tts.json'))"
+        run: scripts/kit-check.sh
 
   test:
     name: pytest ${{ matrix.os }} py${{ matrix.python }}
