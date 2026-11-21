@@ -15,7 +15,6 @@ from unittest.mock import patch
 
 import pytest
 
-import tests.test_spoken as ts
 from claude_code_tts import cli, spoken
 from claude_code_tts.config import TTSConfig
 from tests.test_spoken import (
@@ -31,8 +30,6 @@ from tests.test_spoken import (
     _tool_use,
     _user,
 )
-
-fake_state_dir = ts.fake_state_dir  # the shared fixture, registered under its own name here
 
 X_TEXT = "the new turn's first text before its next tool call"
 

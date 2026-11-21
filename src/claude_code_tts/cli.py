@@ -3122,6 +3122,13 @@ def _speak_from_hook_unguarded(args: argparse.Namespace) -> None:
     has_input_field = hook_type == "stop" and "last_assistant_message" in hook_data
     input_text = str(hook_data.get("last_assistant_message") or "").strip() if hook_type == "stop" else ""
 
+    # The size before any read: a PostToolUse that finds nothing to speak marks it in
+    # quiet_file, and hooks/speak-intermediate.sh skips the next subagent hook while the
+    # transcript is that size. Taken first, so a line written during this hook's reads
+    # makes the mark smaller than the file and the next hook runs (see _mark_quiet).
+    quiet_file = Path(f"/tmp/claude_tts_spoken_{transcript_key}.quiet")
+    quiet_size = _file_size(transcript) if hook_type == "post_tool_use" else None
+
     watermark = _read_watermark(state_file, lock_dir, transcript)
     current_lines = _count_lines(transcript)
     debug(f"{hook_type}: watermark={watermark} current={current_lines}")
@@ -3148,6 +3155,7 @@ def _speak_from_hook_unguarded(args: argparse.Namespace) -> None:
 
     if current_lines <= watermark and hook_type != "stop":
         debug(f"{hook_type}: no new lines since last speak")
+        _mark_quiet(quiet_file, quiet_size)
         return
 
     # Scan transcript for assistant text. Claude Code keeps appending while
@@ -3155,6 +3163,10 @@ def _speak_from_hook_unguarded(args: argparse.Namespace) -> None:
     # watermark written below must cover everything the scan saw, or the
     # next hook finds the same text again (heard twice, 20 s apart, 2026-09-26).
     speakable, scanned_lines = _scan_transcript(transcript, watermark, hook_type)
+    if hook_type == "post_tool_use" and not speakable:
+        # Nothing below this point acts for a PostToolUse with no text: no record is
+        # taken, no claim made, the watermark stays. The same bytes give the same nothing.
+        _mark_quiet(quiet_file, quiet_size)
 
     # "It came in": the response a Stop hook spoke from its input has landed. The
     # transcript is appended in order, so the first prompt after the watermark (a
@@ -3795,6 +3807,29 @@ def _count_lines(path: Path) -> int:
             return sum(1 for _ in f)
     except OSError:
         return 0
+
+
+def _file_size(path: Path) -> int | None:
+    """The file's size in bytes, or None when it cannot be read."""
+    try:
+        return os.stat(path).st_size
+    except OSError:
+        return None
+
+
+def _mark_quiet(quiet_file: Path, size: int | None) -> None:
+    """Record that a PostToolUse found nothing to speak in the transcript's first `size` bytes.
+
+    hooks/speak-intermediate.sh reads it: a subagent's PostToolUse (agent_id in its input)
+    whose transcript is still that size, and no newer than this mark, exits without starting
+    Python. A subagent writes its lines to its own file, never the parent transcript this hook
+    scans, so while it works every one of its tool calls found the same nothing; in the jmo
+    room that was 66 of 76 hook starts in two minutes (2026-11-21, JMO's CPU worry). A parent
+    hook never skips: its own tool_use line may not be written yet when it fires. The transcript
+    is only appended to, so any new line changes the size and the next hook scans as before.
+    """
+    if size is not None:
+        _store_watermark(quiet_file, size)
 
 
 def _load_watermark(state_file: Path) -> int | None:

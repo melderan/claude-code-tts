@@ -53,23 +53,6 @@ def _tool_result() -> dict:
 
 
 @pytest.fixture
-def fake_state_dir(tmp_path, monkeypatch):
-    """Redirect /tmp watermark files into tmp_path so tests don't collide."""
-    real_path_class = Path
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-
-    def fake_path(arg):
-        s = str(arg)
-        if s.startswith("/tmp/claude_tts_spoken_") or s.startswith("/tmp/claude_tts_wm_"):
-            return state_dir / real_path_class(s).name
-        return real_path_class(arg)
-
-    monkeypatch.setattr("claude_code_tts.cli.Path", fake_path)
-    yield state_dir
-
-
-@pytest.fixture
 def base_config():
     return TTSConfig(
         mode="direct",

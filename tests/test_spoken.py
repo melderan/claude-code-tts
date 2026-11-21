@@ -28,7 +28,6 @@ from claude_code_tts import cli, spoken
 from claude_code_tts.config import TTSConfig
 from tests.test_pause_ledger import loop_harness, stop_loop
 
-fake_state_dir = _wm.fake_state_dir  # the shared fixture, registered under its own name here
 _append, _assistant_msg, _tool_result, _tool_use = _wm._append, _wm._assistant_msg, _wm._tool_result, _wm._tool_use
 _user, _write_transcript = _wm._user, _wm._write_transcript
 

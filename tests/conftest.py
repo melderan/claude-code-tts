@@ -59,6 +59,28 @@ def _own_audio_dir(monkeypatch, tmp_path_factory):
     monkeypatch.setattr("claude_code_tts.daemon.AUDIO_TMP_DIR", tmp_path_factory.mktemp("audio"))
 
 
+@pytest.fixture
+def fake_state_dir(tmp_path, monkeypatch):
+    """Redirect the hook's /tmp watermark, record and quiet-mark files into tmp_path so tests don't collide.
+
+    Here, not in test_watermark.py, so every test file that runs the hook can ask for it by name.
+    """
+    from pathlib import Path
+
+    real_path_class = Path
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    def fake_path(arg):
+        s = str(arg)
+        if s.startswith("/tmp/claude_tts_spoken_") or s.startswith("/tmp/claude_tts_wm_"):
+            return state_dir / real_path_class(s).name
+        return real_path_class(arg)
+
+    monkeypatch.setattr("claude_code_tts.cli.Path", fake_path)
+    yield state_dir
+
+
 @pytest.fixture(autouse=True)
 def _no_remembered_engine():
     """audio.py remembers which engine spoke last and why a spare stood in; a test that patches

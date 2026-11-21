@@ -130,11 +130,14 @@ class TestHookContent:
         assert "exec claude-tts speak --from-hook --hook-type stop" in content
 
     def test_speak_intermediate_is_shim(self):
+        """A shim with one shortcut: a subagent hook on a transcript already found quiet ends
+        before Python (9.92.0, tests/test_quiet_mark.py); every other input reaches the CLI."""
         hook = _repo_dir() / "hooks" / "speak-intermediate.sh"
         content = hook.read_text()
-        lines = content.strip().splitlines()
-        assert len(lines) <= 3, f"Hook too long ({len(lines)} lines) — should be a thin shim"
-        assert "exec claude-tts speak --from-hook --hook-type post_tool_use" in content
+        code = [ln for ln in content.strip().splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+        assert len(code) <= 20, f"Hook too long ({len(code)} lines of code): the speech logic belongs in the CLI"
+        assert code[-1] == 'exec claude-tts speak --from-hook --hook-type post_tool_use <<<"$input"'
+        assert content.count("exit") == 1 and "exit 0" in content  # the one skip, silent and successful
 
     def test_hooks_are_executable_bash(self):
         for name in ["speak-response.sh", "speak-intermediate.sh"]:
