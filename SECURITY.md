@@ -66,6 +66,8 @@ reports:
   distribution's `ca-certificates` package).
 - a venv as affected: run the `uv pip install ... --upgrade 'certifi>=2026.10.18'` line it prints. The
   floor matters: an index that holds back new releases would otherwise install an older certifi that
-  still carries the root, and the install would report success.
+  still carries the root, and the install would report success. Where no index may be asked, the
+  same line names the offline route: certifi is data only and depends on nothing, so one wheel you
+  have read and hashed installs with `uv pip install --offline --no-deps`.
 - a macOS keychain note: the root is still in the system keychain; Apple announced its block of the
   intermediates on 2026-10-19, so keep macOS current.

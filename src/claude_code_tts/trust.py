@@ -194,9 +194,15 @@ def check_venvs(venvs: dict[str, Path]) -> list[Check]:
             if hits:
                 # A floor, not a bare --upgrade: an index that holds back new releases would
                 # otherwise resolve to a certifi that still carries the root and report success.
+                # Where no index may be asked (a supply-chain hold), the second route needs none:
+                # certifi is data only (one PEM file, two small modules) and depends on nothing,
+                # so one wheel read and hashed by a person installs offline with --no-deps.
+                py = venv / "bin" / "python"
                 out.extend(Check(
                     "affected", f"venv {label}", f"certifi {ver} still trusts {r.name}",
-                    fix=f"uv pip install --python {venv / 'bin' / 'python'} --upgrade 'certifi>={r.certifi_without}'",
+                    fix=(f"uv pip install --python {py} --upgrade 'certifi>={r.certifi_without}'; with no index "
+                         f"allowed, a certifi {r.certifi_without} or newer wheel you have read and hashed: "
+                         f"uv pip install --python {py} --offline --no-deps <certifi wheel>"),
                 ) for r in hits)
             else:
                 out.append(Check("ok", f"venv {label}", f"certifi {ver}, no distrusted root"))

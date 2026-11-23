@@ -78,7 +78,9 @@ class TestStoresAndVenvs:
         venv = self._venv(tmp_path / "mlx", C3 + G3, "2026.07.22")
         [c] = trust.check_venvs({"mlx": venv})
         assert c.status == "affected" and "2026.07.22" in c.detail
-        assert c.fix == f"uv pip install --python {venv / 'bin' / 'python'} --upgrade 'certifi>=2026.10.18'"
+        py = venv / "bin" / "python"
+        assert c.fix.startswith(f"uv pip install --python {py} --upgrade 'certifi>=2026.10.18'; ")
+        assert c.fix.endswith(f"uv pip install --python {py} --offline --no-deps <certifi wheel>"), "a route with no index"
 
     def test_venv_with_fixed_certifi_is_ok(self, tmp_path):
         [c] = trust.check_venvs({"mlx": self._venv(tmp_path / "mlx", C3, "2026.10.18")})
