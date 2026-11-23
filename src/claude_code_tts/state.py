@@ -521,6 +521,13 @@ def _write_playback_state_locked(
             state.pop("paused_from", None)
         state["paused"] = paused
     if paused_by is not UNSET:
+        if state.get("paused") and state.get("paused_by") == "mic" and paused_by == "user" and paused is not False:
+            # A person's pause over a mic hold: the recording is still open, so it becomes the
+            # recording flag under their hold, started when the mic hold began (the cap's clock).
+            # Through 9.92.2 a plain pause dropped it: a later `hold --let`, a click or a summon
+            # then took the dictation for over and spoke into it, and the cap never saw it.
+            state["mic_held"] = True
+            state["mic_held_since"] = state.get("paused_since") or time.time()
         state["paused_by"] = paused_by
         if paused_by != "user" and paused_from is UNSET:
             state.pop("paused_from", None)

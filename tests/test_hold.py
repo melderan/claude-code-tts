@@ -142,6 +142,27 @@ class TestMicUnderAHandHold:
         finally:
             w.stop()
 
+    @pytest.mark.parametrize("press", ["pause", "hold --let"])
+    def test_a_persons_pause_over_a_mic_hold_keeps_the_recording_and_its_start(self, tmp_path, press):
+        """A plain pause over a mic hold dropped the recording through 9.92.2: a later let, a click or
+        a summon spoke into the dictation, and the cap's clock never started."""
+        with patch.object(st, "PLAYBACK_STATE_FILE", tmp_path / "playback.json"):
+            st.write_playback_state(paused=True, paused_by="mic")
+            began = st.read_playback_state()["paused_since"]
+            if press == "pause":
+                st.set_paused(True)
+                hold(["b"])
+            else:
+                hold(["b"])
+            state = st.read_playback_state()
+            assert state["paused_by"] == "user" and state["let_through"] == ["b"]
+            assert state.get("mic_held") is True, "the dictation is still open"
+            assert state["mic_held_since"] == began, "and the cap counts from its start"
+            assert not may_play(state, "alice--claude--b"), "the let-through room waits for it"
+            st.write_playback_state(mic_held=False)  # the stop line, as _resume_after_mic writes it
+            state = st.read_playback_state()
+            assert state["paused"] is True and state["paused_by"] == "user" and may_play(state, "alice--claude--b")
+
 
 def _enqueue(queue_dir: Path, text: str, session_id: str, ago: float = 0.0) -> Path:
     ts = time.time() - ago
