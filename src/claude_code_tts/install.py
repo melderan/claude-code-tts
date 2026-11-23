@@ -32,6 +32,7 @@ from typing import Any
 
 # Version of this installer/package
 from claude_code_tts import __version__
+from claude_code_tts.daemon_service import is_packaged, service_template
 from claude_code_tts.piper_pins import PIPER_BASE, PIPER_SHA256
 from claude_code_tts.trust import file_sha256
 
@@ -1178,11 +1179,11 @@ def do_install(
     else:
         services_dir.mkdir(parents=True, exist_ok=True)
 
-    # macOS launchd plist
-    src_plist = REPO_DIR / "services" / "com.claude-tts.daemon.plist"
+    # macOS launchd plist: the checkout's services/, or the copy a wheel carries inside the package
+    src_plist = service_template("com.claude-tts.daemon.plist", REPO_DIR)
     dst_plist = services_dir / "com.claude-tts.daemon.plist"
     plist_label = "com.claude-tts.daemon"
-    if src_plist.exists():
+    if src_plist is not None:
         # Template the plist with real paths (launchd doesn't expand ~)
         claude_tts_bin = shutil.which("claude-tts") or str(HOME / ".local" / "bin" / "claude-tts")
         claude_tts_bin_dir = str(Path(claude_tts_bin).parent)
@@ -1196,8 +1197,13 @@ def do_install(
         else:
             dst_plist.write_text(plist_content)
 
-        # Deploy to ~/Library/LaunchAgents on macOS
-        if PLATFORM == "macos":
+        # Deploy to ~/Library/LaunchAgents on macOS. A checkout's template is deployed here, as before.
+        # A wheel's copy is only staged above: loading it is `claude-tts daemon install-service`, so an
+        # upgrade from a wheel never bootstraps a LaunchAgent.
+        if PLATFORM == "macos" and is_packaged(src_plist):
+            if not upgrade:
+                info("LaunchAgent not loaded by the installer from a wheel; run: claude-tts daemon install-service")
+        elif PLATFORM == "macos":
             launch_agents_dir = HOME / "Library" / "LaunchAgents"
             deployed_plist = launch_agents_dir / "com.claude-tts.daemon.plist"
             if dry_run:
@@ -1237,15 +1243,15 @@ def do_install(
                     warn(f"  launchctl load {deployed_plist}")
 
     # Linux systemd service
-    src_systemd = REPO_DIR / "services" / "claude-tts.service"
+    src_systemd = service_template("claude-tts.service", REPO_DIR)
     dst_systemd = services_dir / "claude-tts.service"
-    if src_systemd.exists():
+    if src_systemd is not None:
         if dry_run:
             dry(f"cp {src_systemd} -> {dst_systemd}")
         else:
             shutil.copy(src_systemd, dst_systemd)
 
-    if src_plist.exists() or src_systemd.exists():
+    if src_plist is not None or src_systemd is not None:
         success("Services: launchd plist, systemd unit")
 
     # --- Configure settings.json ---

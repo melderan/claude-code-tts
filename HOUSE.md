@@ -66,7 +66,7 @@ When writing documentation, comments, commit messages, or any public-facing cont
 - Multi-speaker model support (libritts has 904 speakers)
 - Voice knowledge base in `docs/voice-notes.md`
 - New sessions speak by default (since 9.23.0; an upgrade flips a config written before that once, 9.25.3); `claude-tts mute --all` flips the default to silent
-- Daemon management via `claude-tts daemon start|stop|restart|status`
+- Daemon management via `claude-tts daemon start|stop|restart|status|install-service` (install-service writes and starts the macOS LaunchAgent from the installed wheel; `--dry-run` first)
 
 ## Quick Reference
 
@@ -74,6 +74,7 @@ When writing documentation, comments, commit messages, or any public-facing cont
 # Installation
 uv tool install git+https://github.com/melderan/claude-code-tts
 claude-tts-install
+claude-tts daemon install-service --dry-run   # macOS, fresh Mac: print the LaunchAgent it would write and run; drop --dry-run to load and start it
 
 # Upgrade the machine that owns the daemon from this checkout: rebuild CLI, deploy
 # hooks/commands, restart the daemon, verify; full log per run in .logs/just/ (gitignored)

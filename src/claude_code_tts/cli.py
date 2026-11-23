@@ -4764,6 +4764,15 @@ def cmd_daemon(args: argparse.Namespace) -> None:
         print_log_stats()
     elif dc == "install":
         install_service()
+    elif dc == "install-service":
+        from claude_code_tts.daemon_service import install_launchagent
+
+        # 0 only when the daemon is up; 1 refused or not up; 2 not macOS (usage). Nothing runs on --dry-run.
+        sys.exit(
+            install_launchagent(
+                dry_run=getattr(args, "dry_run", False), force=getattr(args, "force", False)
+            )
+        )
     elif dc == "foreground":
         # A refusal is exit 1, so launchd (KeepAlive SuccessfulExit false) tries again.
         if not run_foreground(lockpick=lockpick):
@@ -4776,7 +4785,7 @@ def cmd_daemon(args: argparse.Namespace) -> None:
         )
         print(f"Control message written: {qf.name}")
     else:
-        print("Usage: claude-tts daemon <start|stop|restart|status|logs|stats|install|foreground>")
+        print("Usage: claude-tts daemon <start|stop|restart|status|logs|stats|install|install-service|foreground>")
         sys.exit(1)
 
 
@@ -5072,6 +5081,17 @@ def main(argv: list[str] | None = None) -> None:
         "stats", help="Digest of the daemon log: messages, first-audio latency, pauses, noise"
     ).set_defaults(func=cmd_daemon)
     daemon_sub.add_parser("install", help="Install system service").set_defaults(func=cmd_daemon)
+    ds = daemon_sub.add_parser(
+        "install-service",
+        help="Write and start the daemon's LaunchAgent from the installed package (macOS); exit 0 when up",
+    )
+    ds.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print every path, command and the rendered plist; write and run nothing",
+    )
+    ds.add_argument("--force", action="store_true", help="Replace a LaunchAgent plist whose content differs")
+    ds.set_defaults(func=cmd_daemon)
     ds = daemon_sub.add_parser("foreground", help="Run daemon in foreground")
     ds.add_argument("--lockpick", action="store_true", help="Force start even if locked")
     ds.set_defaults(func=cmd_daemon)

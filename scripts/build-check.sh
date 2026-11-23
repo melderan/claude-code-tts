@@ -14,9 +14,18 @@ python3 - dist/*.whl <<'PY'
 import sys, zipfile
 names = zipfile.ZipFile(sys.argv[1]).namelist()
 hooks = [n for n in names if "/hooks/" in n]; cmds = [n for n in names if "/commands/" in n]
+plists = [n for n in names if n.endswith("/services/com.claude-tts.daemon.plist")]
 assert len(hooks) >= 4 and len(cmds) >= 14, (hooks, cmds)
-print(f"wheel ships {len(hooks)} hooks and {len(cmds)} commands")
+assert len(plists) == 1, plists
+print(f"wheel ships {len(hooks)} hooks, {len(cmds)} commands and the LaunchAgent template")
 PY
+# The installed package finds its LaunchAgent template with no checkout beside it (-I: no cwd, no user site).
+"$T/tools/claude-code-tts/bin/python" -I -c '
+from claude_code_tts.daemon_service import service_template
+template = service_template("com.claude-tts.daemon.plist")
+assert template is not None and template.is_file(), "LaunchAgent template not found in the installed package"
+print("installed package finds the LaunchAgent template")
+'
 mkdir -p "$T/home/.claude" && echo '{}' > "$T/home/.claude/settings.json"
 out=$(HOME=$T/home PATH=$T/bin:$PATH "$T/bin/claude-tts-install" --dry-run 2>&1 || true)
 if echo "$out" | grep -q "Source .* missing"; then
