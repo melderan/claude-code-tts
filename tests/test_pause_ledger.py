@@ -314,6 +314,23 @@ class TestMicHoldLimit:
     def test_mic_hold_expired(self, state, held, max_s, expect):
         assert d.mic_hold_expired(state, held, max_s) is expect
 
+    @pytest.mark.parametrize(
+        ("state", "expect"),
+        [
+            ({"paused": True, "paused_by": "user", "mic_held": True, "mic_held_since": 0.0}, True),
+            ({"paused": True, "paused_by": "user", "mic_held": True, "mic_held_since": 900.0}, False),
+            ({"paused": True, "paused_by": "user", "mic_held": True}, False),
+            ({"paused": True, "paused_by": "user", "mic_held": True, "mic_held_since": "junk"}, False),
+            ({"paused": True, "paused_by": "user", "mic_held_since": 0.0}, False),
+            ({"paused": True, "paused_by": "mic", "mic_held": True, "mic_held_since": 0.0}, False),
+            ({"paused": False, "mic_held": True, "mic_held_since": 0.0}, False),
+        ],
+    )
+    def test_hand_hold_recording_expired(self, state, expect):
+        """Only a recording flag over a person's hold; a mic hold has its own cap above."""
+        assert d.hand_hold_recording_expired(state, 1000.0, 180.0) is expect
+        assert d.hand_hold_recording_expired(state, 1000.0, 0.0) is False, "0 disables the cap"
+
     def test_default_cap_outlasts_a_long_dictation(self):
         """Every cap release in the log to 2026-10-02 (five) was a real dictation; the longest was 14 min
         and a 10 min 20 s one was cut 20 s early at 600. The saved recording now ends the hold; the cap

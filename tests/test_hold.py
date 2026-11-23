@@ -370,6 +370,47 @@ class TestLoopLetsRoomsThrough:
         log = (state_dir / "daemon.log").read_text()
         assert "through a recording, never heard" in log and "Dropped stale message" not in log
 
+    def test_a_recording_under_a_hand_hold_that_never_ends_is_capped_and_the_hold_stays(self, tmp_path):
+        """2026-11-22 18:28Z: a recording began under JMO's hand hold and Handy logged no stop and
+        saved no file; the cap read only a mic hold, so the room he let through waited 5 h 45 m,
+        until he ended the recording in Handy. The cap now ends the recording flag; his hold, and
+        whom it lets through, stay as they were."""
+        loop_harness, stop_loop = _ledger_helpers()
+        state_dir, queue_dir, spoken, patches = loop_harness(tmp_path, {"mic_pause_max_s": 1.5})
+        for p in patches:
+            p.start()
+        try:
+            st.write_playback_state(paused=False, paused_by=None, audio_pid=None, current_message=None)
+
+            def run():
+                d._shutdown_requested = False
+                d._daemon_mode = True
+                d.daemon_loop()
+
+            runner = threading.Thread(target=run, daemon=True)
+            runner.start()
+            assert _wait_for(lambda: (state_dir / "daemon.heartbeat").exists())
+            assert loop_passes.wait_passes(2), "the loop stopped passing"  # startup clears a recording flag it finds
+            hold(["b"])
+            st.write_playback_state(mic_held=True)
+            _enqueue(queue_dir, "a waits for the hand hold", "alice--claude--a")
+            _enqueue(queue_dir, "b waits for the recording", "alice--claude--b")
+            assert loop_passes.wait_passes(3), "the loop stopped passing"
+            assert spoken == [], "the recording holds the let-through room while it is young"
+            assert _wait_for(lambda: "b waits for the recording" in spoken), "the cap never ended the recording"
+            state = st.read_playback_state()
+            assert state["paused"] is True and state["paused_by"] == "user", "the hand hold stays"
+            assert state.get("let_through") == ["b"], "and still lets b through"
+            assert "mic_held" not in state and "mic_held_since" not in state
+            assert loop_passes.wait_passes(3), "the loop stopped passing"
+            assert "a waits for the hand hold" not in spoken
+        finally:
+            stop_loop(runner)
+            for p in reversed(patches):
+                p.stop()
+        log = (state_dir / "daemon.log").read_text()
+        assert "Recording under the hand hold open" in log and "the hand hold stays" in log
+
     def test_a_recording_stamps_when_it_began_and_the_loop_opens_its_span_there(self, tmp_path):
         """The loop can be synthesizing for seconds when a recording starts; the span is the watcher's."""
         with patch.object(st, "PLAYBACK_STATE_FILE", tmp_path / "playback.json"):

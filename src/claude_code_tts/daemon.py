@@ -528,6 +528,22 @@ def mic_hold_expired(state: dict, held_s: float, max_s: float) -> bool:
     return bool(state.get("paused")) and state.get("paused_by") == "mic" and 0 < max_s < held_s
 
 
+def hand_hold_recording_expired(state: dict, now: float, max_s: float) -> bool:
+    """True when a recording under a person's hold has outlived max_s with no end seen.
+
+    The person's pause is never limited; the recording flag on top of it is. Through 9.92.1 the
+    cap read only a mic hold, so a recording under a hand hold that left neither a stop line nor
+    a file held even the rooms let through until the person ended it in Handy (2026-11-22, 5 h 45 m).
+    Clearing the flag keeps the hand hold and its let list as they were.
+    """
+    if not (state.get("paused") and state.get("paused_by") != "mic" and state.get("mic_held")):
+        return False
+    since = state.get("mic_held_since")
+    if isinstance(since, bool) or not isinstance(since, (int, float)):
+        return False
+    return 0 < max_s < now - since
+
+
 
 def get_queue_config() -> dict:
     """Get queue-specific config with defaults."""
@@ -2206,6 +2222,16 @@ def daemon_loop(lockpick: bool = False) -> None:
                         "WARN",
                     )
                     set_paused(False)
+                    continue
+                now = time.time()
+                if hand_hold_recording_expired(state, now, mic_pause_max_s):
+                    log(
+                        f"Recording under the hand hold open {now - float(state['mic_held_since']):.0f}s passed "
+                        f"mic_pause_max_s={mic_pause_max_s:.0f} with no end of recording seen; the rooms let "
+                        "through may speak again, the hand hold stays",
+                        "WARN",
+                    )
+                    write_playback_state(mic_held=False)
                     continue
                 # Supersedes act on the whole held queue: a new prompt in a held room makes its
                 # older replies as stale as in any other, and its control would otherwise wait,
