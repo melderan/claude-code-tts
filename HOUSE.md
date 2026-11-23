@@ -189,7 +189,7 @@ src/claude_code_tts/
   mlx_catalog.py           # Curated mlx models with licenses checked on Hugging Face
 hooks/
   speak-response.sh        # Thin shim -> claude-tts speak --from-hook
-  speak-intermediate.sh    # Shim -> claude-tts speak --from-hook; a subagent call on a transcript already found quiet starts no Python (9.92.0)
+  speak-intermediate.sh    # Gate: exits 0 with no Python start where the CLI would speak nothing (no new lines or text, muted, disabled), else exec claude-tts speak --from-hook
   play-sound.sh            # Sound effects hook
   prompt-submitted.sh      # UserPromptSubmit -> claude-tts supersede --from-hook (silent, never blocks)
 commands/tts-*.md          # Slash command definitions (call claude-tts CLI)

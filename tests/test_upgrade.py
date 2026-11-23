@@ -129,15 +129,16 @@ class TestHookContent:
         assert len(lines) <= 3, f"Hook too long ({len(lines)} lines) — should be a thin shim"
         assert "exec claude-tts speak --from-hook --hook-type stop" in content
 
-    def test_speak_intermediate_is_shim(self):
-        """A shim with one shortcut: a subagent hook on a transcript already found quiet ends
-        before Python (9.92.0, tests/test_quiet_mark.py); every other input reaches the CLI."""
+    def test_speak_intermediate_is_a_gate_in_front_of_the_cli(self):
+        """A gate with one shortcut: exit 0 with no Python start where the CLI would speak nothing (Geordi's
+        gate, 2026-11-21; tests/test_intermediate_gate.py); every other input reaches the CLI, whose
+        exec is the last line. The speech logic stays in the CLI: the gate's checks are reads, not speech."""
         hook = _repo_dir() / "hooks" / "speak-intermediate.sh"
         content = hook.read_text()
         code = [ln for ln in content.strip().splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
-        assert len(code) <= 20, f"Hook too long ({len(code)} lines of code): the speech logic belongs in the CLI"
+        assert len(code) <= 120, f"Hook too long ({len(code)} lines of code): the speech logic belongs in the CLI"
         assert code[-1] == 'exec claude-tts speak --from-hook --hook-type post_tool_use <<<"$input"'
-        assert content.count("exit") == 1 and "exit 0" in content  # the one skip, silent and successful
+        assert sum("exit" in ln for ln in code) == 1 and "exit 0" in [ln.strip() for ln in code]  # the one skip
 
     def test_hooks_are_executable_bash(self):
         for name in ["speak-response.sh", "speak-intermediate.sh"]:

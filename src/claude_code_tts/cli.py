@@ -3123,9 +3123,9 @@ def _speak_from_hook_unguarded(args: argparse.Namespace) -> None:
     input_text = str(hook_data.get("last_assistant_message") or "").strip() if hook_type == "stop" else ""
 
     # The size before any read: a PostToolUse that finds nothing to speak marks it in
-    # quiet_file, and hooks/speak-intermediate.sh skips the next subagent hook while the
-    # transcript is that size. Taken first, so a line written during this hook's reads
-    # makes the mark smaller than the file and the next hook runs (see _mark_quiet).
+    # quiet_file. The gate in hooks/speak-intermediate.sh reads the transcript instead; an
+    # installed 9.92.0 shim still reads this mark. Taken first, so a line written during this
+    # hook's reads makes the mark smaller than the file and the next hook runs (see _mark_quiet).
     quiet_file = Path(f"/tmp/claude_tts_spoken_{transcript_key}.quiet")
     quiet_size = _file_size(transcript) if hook_type == "post_tool_use" else None
 
@@ -3820,13 +3820,12 @@ def _file_size(path: Path) -> int | None:
 def _mark_quiet(quiet_file: Path, size: int | None) -> None:
     """Record that a PostToolUse found nothing to speak in the transcript's first `size` bytes.
 
-    hooks/speak-intermediate.sh reads it: a subagent's PostToolUse (agent_id in its input)
-    whose transcript is still that size, and no newer than this mark, exits without starting
-    Python. A subagent writes its lines to its own file, never the parent transcript this hook
-    scans, so while it works every one of its tool calls found the same nothing; in the jmo
-    room that was 66 of 76 hook starts in two minutes (2026-11-21, JMO's CPU worry). A parent
-    hook never skips: its own tool_use line may not be written yet when it fires. The transcript
-    is only appended to, so any new line changes the size and the next hook scans as before.
+    The 9.92.0 shim read it: a subagent's PostToolUse whose transcript is still that size, and
+    no newer than this mark, exited without starting Python. hooks/speak-intermediate.sh no
+    longer reads it (the gate checks the transcript, the watermark and the pins, and skips
+    where this function's caller would speak nothing), so nothing in this repo reads the mark.
+    It is still written for a shim installed before the gate. The transcript is only appended
+    to, so any new line changes the size and the next hook scans as before.
     """
     if size is not None:
         _store_watermark(quiet_file, size)

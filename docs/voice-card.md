@@ -61,7 +61,9 @@ process it ran under; `<host>` is the machine's short host name with the same da
 ## When
 
 The card is rewritten every time claude-tts resolves the session's config: at every hook
-(so after every reply the room speaks or declines to), and at every `/tts-*` command that
+that runs the CLI (so after every reply the room speaks or declines to; since 9.93.0 a
+PostToolUse with nothing new to say ends in the shell and leaves the card as the last run
+wrote it, so `written_at` can be older than the last tool call), and at every `/tts-*` command that
 changes the session file (`/tts-speed`, `/tts-persona`, `/tts-mute`, `/tts-unmute`,
 `/tts-intermediate`). It is written in one step (a temp file, then rename), so a reader never
 sees a half-written card. `claude-tts mute --all` and a global persona change rewrite every
