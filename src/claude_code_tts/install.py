@@ -949,6 +949,93 @@ def restart_running_daemon(dry_run: bool = False) -> None:
             pass  # Daemon not running, nothing to restart
 
 
+def install_service_files(*, dry_run: bool, upgrade: bool) -> None:
+    """Stage the service templates under ~/.claude-tts/services and, from a checkout on macOS, load the LaunchAgent.
+
+    A wheel's template is staged only: loading it is `claude-tts daemon install-service`, never an upgrade.
+    """
+    services_dir = TTS_CONFIG_DIR / "services"
+    if dry_run:
+        dry(f"mkdir -p {services_dir}")
+    else:
+        services_dir.mkdir(parents=True, exist_ok=True)
+
+    # macOS launchd plist: the checkout's services/, or the copy a wheel carries inside the package
+    src_plist = service_template("com.claude-tts.daemon.plist", REPO_DIR)
+    dst_plist = services_dir / "com.claude-tts.daemon.plist"
+    plist_label = "com.claude-tts.daemon"
+    if src_plist is not None:
+        # Template the plist with real paths (launchd doesn't expand ~)
+        claude_tts_bin = shutil.which("claude-tts") or str(HOME / ".local" / "bin" / "claude-tts")
+        claude_tts_bin_dir = str(Path(claude_tts_bin).parent)
+        plist_content = src_plist.read_text()
+        plist_content = plist_content.replace("CLAUDE_TTS_BIN_DIR", claude_tts_bin_dir)
+        plist_content = plist_content.replace("CLAUDE_TTS_BIN", claude_tts_bin)
+        plist_content = plist_content.replace("CLAUDE_TTS_CONFIG", str(TTS_CONFIG_DIR))
+        plist_content = plist_content.replace("CLAUDE_TTS_HOME", str(HOME))
+        if dry_run:
+            dry(f"template {src_plist} -> {dst_plist}")
+        else:
+            dst_plist.write_text(plist_content)
+
+        # Deploy to ~/Library/LaunchAgents on macOS. A checkout's template is deployed here, as before.
+        # A wheel's copy is only staged above: loading it is `claude-tts daemon install-service`, so an
+        # upgrade from a wheel never bootstraps a LaunchAgent.
+        if PLATFORM == "macos" and is_packaged(src_plist):
+            if not upgrade:
+                info("LaunchAgent not loaded by the installer from a wheel; run: claude-tts daemon install-service")
+        elif PLATFORM == "macos":
+            launch_agents_dir = HOME / "Library" / "LaunchAgents"
+            deployed_plist = launch_agents_dir / "com.claude-tts.daemon.plist"
+            if dry_run:
+                dry(f"cp {dst_plist} -> {deployed_plist}")
+                dry(f"launchctl bootout gui/$UID {plist_label}")
+                dry(f"launchctl bootstrap gui/$UID {deployed_plist}")
+            else:
+                launch_agents_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy(dst_plist, deployed_plist)
+                uid = os.getuid()
+                # Unload old version — try both APIs (legacy load/unload
+                # and modern bootout/bootstrap) since we don't know which
+                # was used to load the previous version.
+                subprocess.run(
+                    ["launchctl", "bootout", f"gui/{uid}", f"gui/{uid}/{plist_label}"],
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["launchctl", "remove", plist_label],
+                    capture_output=True,
+                )
+                # Load new version — try modern API first, fall back to legacy
+                result = subprocess.run(
+                    ["launchctl", "bootstrap", f"gui/{uid}", str(deployed_plist)],
+                    capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    result = subprocess.run(
+                        ["launchctl", "load", str(deployed_plist)],
+                        capture_output=True, text=True,
+                    )
+                if result.returncode == 0:
+                    success("Launchd service installed and loaded (starts on login)")
+                else:
+                    warn(f"Launchd load failed: {result.stderr.strip()}")
+                    warn(f"Plist deployed to {deployed_plist} -- load manually with:")
+                    warn(f"  launchctl load {deployed_plist}")
+
+    # Linux systemd service
+    src_systemd = service_template("claude-tts.service", REPO_DIR)
+    dst_systemd = services_dir / "claude-tts.service"
+    if src_systemd is not None:
+        if dry_run:
+            dry(f"cp {src_systemd} -> {dst_systemd}")
+        else:
+            shutil.copy(src_systemd, dst_systemd)
+
+    if src_plist is not None or src_systemd is not None:
+        success("Services: launchd plist, systemd unit")
+
+
 def do_install(
     dry_run: bool = False,
     upgrade: bool = False,
@@ -1173,86 +1260,7 @@ def do_install(
 
     # --- Install service files ---
 
-    services_dir = TTS_CONFIG_DIR / "services"
-    if dry_run:
-        dry(f"mkdir -p {services_dir}")
-    else:
-        services_dir.mkdir(parents=True, exist_ok=True)
-
-    # macOS launchd plist: the checkout's services/, or the copy a wheel carries inside the package
-    src_plist = service_template("com.claude-tts.daemon.plist", REPO_DIR)
-    dst_plist = services_dir / "com.claude-tts.daemon.plist"
-    plist_label = "com.claude-tts.daemon"
-    if src_plist is not None:
-        # Template the plist with real paths (launchd doesn't expand ~)
-        claude_tts_bin = shutil.which("claude-tts") or str(HOME / ".local" / "bin" / "claude-tts")
-        claude_tts_bin_dir = str(Path(claude_tts_bin).parent)
-        plist_content = src_plist.read_text()
-        plist_content = plist_content.replace("CLAUDE_TTS_BIN_DIR", claude_tts_bin_dir)
-        plist_content = plist_content.replace("CLAUDE_TTS_BIN", claude_tts_bin)
-        plist_content = plist_content.replace("CLAUDE_TTS_CONFIG", str(TTS_CONFIG_DIR))
-        plist_content = plist_content.replace("CLAUDE_TTS_HOME", str(HOME))
-        if dry_run:
-            dry(f"template {src_plist} -> {dst_plist}")
-        else:
-            dst_plist.write_text(plist_content)
-
-        # Deploy to ~/Library/LaunchAgents on macOS. A checkout's template is deployed here, as before.
-        # A wheel's copy is only staged above: loading it is `claude-tts daemon install-service`, so an
-        # upgrade from a wheel never bootstraps a LaunchAgent.
-        if PLATFORM == "macos" and is_packaged(src_plist):
-            if not upgrade:
-                info("LaunchAgent not loaded by the installer from a wheel; run: claude-tts daemon install-service")
-        elif PLATFORM == "macos":
-            launch_agents_dir = HOME / "Library" / "LaunchAgents"
-            deployed_plist = launch_agents_dir / "com.claude-tts.daemon.plist"
-            if dry_run:
-                dry(f"cp {dst_plist} -> {deployed_plist}")
-                dry(f"launchctl bootout gui/$UID {plist_label}")
-                dry(f"launchctl bootstrap gui/$UID {deployed_plist}")
-            else:
-                launch_agents_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy(dst_plist, deployed_plist)
-                uid = os.getuid()
-                # Unload old version — try both APIs (legacy load/unload
-                # and modern bootout/bootstrap) since we don't know which
-                # was used to load the previous version.
-                subprocess.run(
-                    ["launchctl", "bootout", f"gui/{uid}", f"gui/{uid}/{plist_label}"],
-                    capture_output=True,
-                )
-                subprocess.run(
-                    ["launchctl", "remove", plist_label],
-                    capture_output=True,
-                )
-                # Load new version — try modern API first, fall back to legacy
-                result = subprocess.run(
-                    ["launchctl", "bootstrap", f"gui/{uid}", str(deployed_plist)],
-                    capture_output=True, text=True,
-                )
-                if result.returncode != 0:
-                    result = subprocess.run(
-                        ["launchctl", "load", str(deployed_plist)],
-                        capture_output=True, text=True,
-                    )
-                if result.returncode == 0:
-                    success("Launchd service installed and loaded (starts on login)")
-                else:
-                    warn(f"Launchd load failed: {result.stderr.strip()}")
-                    warn(f"Plist deployed to {deployed_plist} -- load manually with:")
-                    warn(f"  launchctl load {deployed_plist}")
-
-    # Linux systemd service
-    src_systemd = service_template("claude-tts.service", REPO_DIR)
-    dst_systemd = services_dir / "claude-tts.service"
-    if src_systemd is not None:
-        if dry_run:
-            dry(f"cp {src_systemd} -> {dst_systemd}")
-        else:
-            shutil.copy(src_systemd, dst_systemd)
-
-    if src_plist is not None or src_systemd is not None:
-        success("Services: launchd plist, systemd unit")
+    install_service_files(dry_run=dry_run, upgrade=upgrade)
 
     # --- Configure settings.json ---
 

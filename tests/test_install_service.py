@@ -392,45 +392,46 @@ class TestPlatformAndTemplate:
 
 
 class TestUpgradeNeverReachesInstallService:
-    def test_upgrade_dry_run_never_reaches_install_launchagent(self, monkeypatch, capsys):
-        def reached(**kwargs):
-            raise AssertionError("claude-tts-install --upgrade reached install-service")
+    @pytest.fixture
+    def wheel_home(self, tmp_path, monkeypatch):
+        """A home, a ~/.claude-tts and a package holding the template, all under tmp; any subprocess fails the test.
 
-        monkeypatch.setattr(ds, "install_launchagent", reached)
-        monkeypatch.setattr(inst, "run_preflight_checks", lambda dry_run=False: (True, []))
-        monkeypatch.setattr(inst, "PLATFORM", "macos")
-        monkeypatch.setattr(inst, "restart_running_daemon", lambda **kw: None)
-        inst.do_install(dry_run=True, upgrade=True, restart_daemon=False)
-        assert "run: claude-tts daemon install-service" not in capsys.readouterr().out
-
-    def test_a_wheel_template_is_staged_but_never_loaded_by_an_upgrade(self, tmp_path, monkeypatch, capsys):
-        """A wheel's template sits inside the package: the upgrade stages it and deploys nothing to LaunchAgents."""
+        The installer's service step runs for real here (not dry): nothing it touches is outside tmp_path.
+        """
         pkg = tmp_path / "pkg"
         (pkg / "services").mkdir(parents=True)
         (pkg / "services" / ds.PLIST_NAME).write_text(REPO_TEMPLATE.read_text())
+        home = tmp_path / "home"
+        home.mkdir()
         monkeypatch.setattr(ds, "PACKAGE_DIR", pkg)
         monkeypatch.setattr(inst, "REPO_DIR", pkg)
+        monkeypatch.setattr(inst, "HOME", home)
+        monkeypatch.setattr(inst, "TTS_CONFIG_DIR", home / ".claude-tts")
         monkeypatch.setattr(inst, "PLATFORM", "macos")
-        monkeypatch.setattr(inst, "run_preflight_checks", lambda dry_run=False: (True, []))
-        monkeypatch.setattr(inst, "restart_running_daemon", lambda **kw: None)
-        inst.do_install(dry_run=True, upgrade=True, restart_daemon=False)
-        out = capsys.readouterr().out
-        assert "LaunchAgents" not in out, "a packaged template must not be deployed by the installer"
-        assert "launchctl" not in out
 
-    def test_a_wheel_template_is_hinted_on_a_fresh_install_not_loaded(self, tmp_path, monkeypatch, capsys):
-        pkg = tmp_path / "pkg"
-        (pkg / "services").mkdir(parents=True)
-        (pkg / "services" / ds.PLIST_NAME).write_text(REPO_TEMPLATE.read_text())
-        monkeypatch.setattr(ds, "PACKAGE_DIR", pkg)
-        monkeypatch.setattr(inst, "REPO_DIR", pkg)
-        monkeypatch.setattr(inst, "PLATFORM", "macos")
-        monkeypatch.setattr(inst, "run_preflight_checks", lambda dry_run=False: (True, []))
-        monkeypatch.setattr(inst, "restart_running_daemon", lambda **kw: None)
-        inst.do_install(dry_run=True, upgrade=False, restart_daemon=False)
+        def no_subprocess(*args, **kwargs):
+            raise AssertionError(f"the service step reached a real subprocess: {args[0] if args else kwargs}")
+
+        monkeypatch.setattr(inst.subprocess, "run", no_subprocess)
+        return home
+
+    def test_an_upgrade_from_a_wheel_stages_the_template_and_loads_nothing(self, wheel_home, capsys):
+        inst.install_service_files(dry_run=False, upgrade=True)
         out = capsys.readouterr().out
-        assert "LaunchAgents" not in out
+        assert (wheel_home / ".claude-tts" / "services" / ds.PLIST_NAME).is_file(), "staged"
+        assert not (wheel_home / "Library" / "LaunchAgents").exists(), "a packaged template is never deployed"
+        assert "run: claude-tts daemon install-service" not in out, "an upgrade stays silent"
+
+    def test_a_fresh_install_from_a_wheel_names_install_service_and_loads_nothing(self, wheel_home, capsys):
+        inst.install_service_files(dry_run=False, upgrade=False)
+        out = capsys.readouterr().out
+        assert not (wheel_home / "Library" / "LaunchAgents").exists()
         assert "run: claude-tts daemon install-service" in out
+
+    def test_do_install_runs_the_service_step_with_its_own_upgrade_flag(self):
+        """do_install hands its upgrade flag to the step the tests above drive."""
+        source = Path(inst.__file__).read_text()
+        assert "install_service_files(dry_run=dry_run, upgrade=upgrade)" in source
 
     def test_the_installer_never_calls_the_command_function(self):
         source = Path(inst.__file__).read_text()

@@ -25,14 +25,17 @@ import pytest  # noqa: E402  (HOME must be set before anything else is imported)
 
 
 @pytest.fixture(autouse=True)
-def _no_inherited_tts_session(monkeypatch):
-    """The suite decides per test whether CLAUDE_TTS_SESSION is set; the shell running it does not.
+def _no_inherited_tts_env(monkeypatch):
+    """The suite decides per test which CLAUDE_TTS_* variables are set; the shell running it does not.
 
-    The claude-house kit exports it in every room, and 9.25.1's hook crash only showed with it set,
-    so a suite that inherited the shell's environment tested one path on the Mac and the other in a
-    room. Tests that want it call monkeypatch.setenv themselves.
+    CI sets none of them, so a run anywhere starts from the same empty set. A shell that exports one
+    tests a different path than CI does: CLAUDE_TTS_SESSION hid 9.25.1's hook crash, and
+    CLAUDE_TTS_HOOKS_MANAGED made the installer skip the process-list read that three 9.94.0 tests
+    reached on GitHub's runners and never on a machine that had it set. Tests that want one call
+    monkeypatch.setenv themselves.
     """
-    monkeypatch.delenv("CLAUDE_TTS_SESSION", raising=False)
+    for name in [n for n in os.environ if n.startswith("CLAUDE_TTS_")]:
+        monkeypatch.delenv(name)
 
 
 @pytest.fixture(autouse=True)
