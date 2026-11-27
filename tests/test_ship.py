@@ -69,6 +69,10 @@ def run(repo, *args: str, release_rc: int = 0, ci_wait: bool = True) -> subproce
         SHIP_TEST_RECORD=str(record),
         SHIP_TEST_RELEASE_RC=str(release_rc),
     )
+    # BASH_ENV (and ENV, its sh twin) is sourced by every child shell and can rewrite the PATH
+    # set above; drop both so the PATH this helper builds is the one ship.sh sees.
+    env.pop("BASH_ENV", None)
+    env.pop("ENV", None)
     return subprocess.run(
         [str(root / "scripts" / "ship.sh"), *args], cwd=root, env=env, input="", capture_output=True, text=True
     )
@@ -92,6 +96,21 @@ def test_without_ci_wait_it_refuses_before_committing(repo):
     assert git(root, "log", "--format=%s") == "chore: start\n"
     assert '"1.2.3"' in (root / "src" / "claude_code_tts" / "__init__.py").read_text()
     assert not record.exists()
+
+
+def test_an_inherited_bash_env_cannot_put_ci_wait_back(repo, tmp_path, monkeypatch):
+    # A sandbox can export BASH_ENV, a file every child bash sources before it runs; one that
+    # puts a ci-wait back on the PATH made the test above pass ship.sh's check in codex-tts's run.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "ci-wait").write_text("#!/bin/sh\nexit 0\n")
+    (elsewhere / "ci-wait").chmod(0o755)
+    bash_env = tmp_path / "bash_env.sh"
+    bash_env.write_text(f'export PATH="{elsewhere}:$PATH"\n')
+    monkeypatch.setenv("BASH_ENV", str(bash_env))
+    r = run(repo, "fix", "something", ci_wait=False)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "nothing committed" in r.stdout
 
 
 def test_a_failed_push_stops_before_release(repo):
